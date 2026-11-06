@@ -2,7 +2,7 @@
 """Impostazioni, come quelle di macOS: barra laterale con le voci, a destra il pannello.
 
   tod-settings.py [voce]        voce: rete, batteria, aspetto, schermo, suono, notifiche, telefono,
-                                tastiera, app, aggiornamenti, info, avanzate
+                                tastiera, stampanti, app, aggiornamenti, info, avanzate
 
 Una finestra sola al posto dei tanti pannelli di XFCE. Le cose semplici si fanno qui (tema, sfondo,
 dimensioni, volume, non disturbare, app di Android...); per quelle complesse (scorciatoie, mouse,
@@ -42,6 +42,7 @@ CONF = os.path.join(HOME, ".config/tod/tod.conf")
 BARRA = os.path.join(HOME, ".config/tod/barra.json")   # impostazioni della barra (share/tod-barra.py)
 STATE = os.path.join(HOME, ".local/state/tod")
 HERE = os.path.dirname(os.path.abspath(__file__))
+STAMPA = os.path.join(HERE, "stampa/tod-stampa.py")   # il servizio di stampa (lib/stampa.sh)
 ITALIAN = os.environ.get("LANGUAGE", os.environ.get("LANG", "")).startswith("it")
 
 def T(it, en):
@@ -172,6 +173,8 @@ class Settings(Gtk.Window):
         ("telefono", T("Telefono", "Phone"), "phone-symbolic", "teal", "android app notifiche telefono"),
         ("tastiera", T("Tastiera e mouse", "Keyboard & Mouse"), "input-keyboard-symbolic", "gray",
          "layout lingua scorciatoie mouse puntatore"),
+        ("stampanti", T("Stampanti e scanner", "Printers & Scanners"), "printer-symbolic", "gray",
+         "stampante stampare stampa scanner usb wifi pdf coda lavori driver"),
         ("app", T("App", "Apps"), "applications-system-symbolic", "orange",
          "app installate disinstalla rimuovi elimina predefinite browser apri con file"),
         ("aggiornamenti", T("Aggiornamenti", "Updates"), "software-update-available-symbolic", "blue", "update pacchetti"),
@@ -248,7 +251,7 @@ class Settings(Gtk.Window):
         if row is None:
             return
         key = row.key
-        if key not in self.built or key in ("rete", "batteria", "aggiornamenti", "suono"):   # dati che cambiano
+        if key not in self.built or key in ("rete", "batteria", "aggiornamenti", "suono", "stampanti"):   # dati che cambiano
             old = self.stack.get_child_by_name(key)
             if old:
                 self.stack.remove(old)
@@ -859,6 +862,177 @@ class Settings(Gtk.Window):
             if os.path.isfile(p):
                 return p
         return None
+
+    # --- stampanti: il servizio di stampa (share/stampa/tod-stampa.py) -----------------------
+    def stampa(self, *args, then=None):
+        """tod-stampa.py in sottofondo (lpadmin chiede alla stampante cosa sa fare: qualche secondo);
+        then(codice, testo) nella UI."""
+        def work():
+            try:
+                r = subprocess.run([sys.executable, STAMPA, *args], capture_output=True, text=True, timeout=180,
+                                   stdin=subprocess.DEVNULL)
+                esito = (r.returncode, (r.stdout + r.stderr).strip())
+            except (OSError, subprocess.TimeoutExpired) as e:
+                esito = (1, str(e))
+            if then:
+                GLib.idle_add(lambda: then(*esito) and False)
+        threading.Thread(target=work, daemon=True).start()
+
+    def pane_stampanti(self, box):
+        self.st_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.pack_start(self.st_box, False, False, 0)
+        self.st_msg = Gtk.Label(xalign=0, wrap=True)
+        self.st_msg.get_style_context().add_class("hint")
+        box.pack_start(self.st_msg, False, False, 0)
+        self.st_box.pack_start(self.row(T("Cerco le stampanti…", "Looking for printers…"), Gtk.Spinner(active=True)),
+                               False, False, 0)
+        self.fill_stampanti()
+
+    def fill_stampanti(self, msg=None):
+        if msg is not None:
+            self.st_msg.set_text(msg)
+
+        def carica():
+            try:
+                e = json.loads(subprocess.run([sys.executable, STAMPA, "elenco", "--json"], capture_output=True,
+                                              text=True, timeout=30, stdin=subprocess.DEVNULL).stdout or "{}")
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                e = {}
+            try:   # quelle trovate in rete dall'ultima ricerca del servizio (ogni minuto)
+                trovate = json.load(open(os.path.join(TMP, "tod-stampa/trovate.json")))
+            except (OSError, ValueError):
+                trovate = []
+            GLib.idle_add(lambda: self.show_stampanti(e, trovate) and False)
+        threading.Thread(target=carica, daemon=True).start()
+
+    def show_stampanti(self, e, trovate):
+        for c in self.st_box.get_children():
+            self.st_box.remove(c)
+        if not e.get("servizio"):
+            self.group(self.st_box, None, [self.row(
+                T("Il servizio di stampa è spento", "The print service is off"),
+                self.button(T("Accendi", "Turn on"), lambda: tod("stampa", "riavvia", then=lambda: GLib.timeout_add_seconds(
+                    4, lambda: self.fill_stampanti() and False))),
+                T("Parte da solo con il desktop. Se non si accende, da un terminale: tod stampa prepara",
+                  "It starts with the desktop. If it doesn't, from a terminal: tod stampa prepara"))])
+            self.st_box.show_all()
+            return False
+        righe = []
+        for p in e.get("stampanti", []):
+            h = Gtk.Box(spacing=12)
+            h.get_style_context().add_class("group-row")
+            img = Gtk.Image.new_from_icon_name("printer", Gtk.IconSize.DND)
+            img.set_pixel_size(32)
+            h.pack_start(img, False, False, 0)
+            v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, valign=Gtk.Align.CENTER)
+            v.pack_start(Gtk.Label(label=p["descrizione"], xalign=0), False, False, 0)
+            dove = {"usb": "USB", "rete": "Wi-Fi"}.get(p["tipo"], p["tipo"])
+            if not p["attiva"]:
+                stato = T("In pausa", "Paused")
+            elif p["raggiungibile"] is False:
+                stato = T("Non collegata", "Not connected") if p["tipo"] == "usb" else T("Non raggiungibile", "Not reachable")
+            elif p["stato"] == "stampa":
+                stato = T("Sta stampando", "Printing")
+            else:
+                stato = T("Pronta", "Ready")
+            parti = [dove, stato]
+            if p["predefinita"]:
+                parti.append(T("Predefinita", "Default"))
+            if p["lavori"]:
+                n = len(p["lavori"])
+                parti.append(T(f"{n} in coda" if n > 1 else "1 in coda", f"{n} queued"))
+            sl = Gtk.Label(label=" · ".join(parti), xalign=0)
+            sl.get_style_context().add_class("hint")
+            v.pack_start(sl, False, False, 0)
+            h.pack_start(v, True, True, 0)
+            menu = Gtk.Menu()
+            voci = []
+            if not p["predefinita"]:
+                voci.append((T("Imposta come predefinita", "Set as default"), lambda n=p["nome"]: self.stampa(
+                    "predefinita", n, then=lambda *_: self.fill_stampanti())))
+            voci.append((T("Stampa una pagina di prova", "Print a test page"), lambda n=p["nome"]: self.stampa(
+                "prova", n, then=lambda c, t: self.fill_stampanti(
+                    T("Pagina di prova inviata.", "Test page sent.") if c == 0 else t))))
+            if p["lavori"]:
+                voci.append((T("Annulla i lavori in coda", "Cancel queued jobs"), lambda n=p["nome"]: self.stampa(
+                    "annulla", n, then=lambda *_: self.fill_stampanti())))
+            voci.append((T("Rimuovi", "Remove"), lambda q=p: self.togli_stampante(q)))
+            for testo, cb in voci:
+                mi = Gtk.MenuItem(label=testo)
+                mi.connect("activate", lambda _w, f=cb: f())
+                menu.append(mi)
+            menu.show_all()
+            mb = Gtk.MenuButton(popup=menu, valign=Gtk.Align.CENTER)
+            mb.add(Gtk.Image.new_from_icon_name("view-more-symbolic", Gtk.IconSize.BUTTON))
+            h.pack_end(mb, False, False, 0)
+            righe.append(h)
+        if not righe:
+            righe.append(self.row(T("Nessuna stampante", "No printers"), None,
+                                  T("Collega una stampante USB o accendi quella Wi-Fi: si aggiunge da sola.",
+                                    "Plug in a USB printer or turn on your Wi-Fi printer: it's added automatically.")))
+        self.group(self.st_box, T("Stampanti", "Printers"), righe)
+
+        installate = {p["uri"] for p in e.get("stampanti", [])}
+        ip_installati = {re.sub(r"^\w+://([^/:]+).*", r"\1", u) for u in installate}
+        nuove = [t for t in trovate if t["uri"] not in installate and t["ip"] not in ip_installati]
+        righe = []
+        for t in nuove:
+            b = self.button(T("Aggiungi", "Add"), lambda k=t["chiave"]: self.aggiungi_stampante(k))
+            righe.append(self.row(t["modello"], b, " · ".join(
+                ["Wi-Fi", t["ip"]] + ([] if t["senza_driver"] else [T("potrebbe servire un driver", "may need a driver")]))))
+        voce = Gtk.Entry(placeholder_text=T("192.168.1.50 o ipp://…", "192.168.1.50 or ipp://…"), width_chars=24)
+        voce.connect("activate", lambda w: self.aggiungi_stampante(w.get_text()))
+        hb = Gtk.Box(spacing=6)
+        hb.pack_start(voce, False, False, 0)
+        hb.pack_start(self.button(T("Aggiungi", "Add"), lambda: self.aggiungi_stampante(voce.get_text())), False, False, 0)
+        righe.append(self.row(T("Con l'indirizzo", "By address"), hb,
+                              T("Per una stampante di rete che non compare qui sopra.", "For a network printer not listed above.")))
+        righe.append(self.row(T("Cerca di nuovo in rete", "Search the network again"),
+                              self.button(T("Cerca", "Search"), self.ricerca_stampanti)))
+        self.group(self.st_box, T("Aggiungi una stampante", "Add a printer"), righe)
+        nota = Gtk.Label(label=T("Le stampanti USB e quelle Wi-Fi della tua rete si aggiungono da sole, senza driver nella "
+                                 "maggior parte dei casi. Ogni app le trova nella sua finestra di stampa.",
+                                 "USB printers and Wi-Fi printers on your network are added automatically, usually "
+                                 "without drivers. Every app finds them in its print dialog."), xalign=0, wrap=True)
+        nota.get_style_context().add_class("hint")
+        self.st_box.pack_start(nota, False, False, 0)
+        self.st_box.show_all()
+        return False
+
+    def aggiungi_stampante(self, cosa):
+        cosa = cosa.strip()
+        if not cosa:
+            return
+        self.st_msg.set_text(T("Aggiungo la stampante…", "Adding the printer…"))
+        self.stampa("aggiungi", cosa, then=lambda c, t: self.fill_stampanti(
+            T("Stampante aggiunta.", "Printer added.") if c == 0 else T("Non sono riuscito ad aggiungerla: ", "Couldn't add it: ") + t))
+
+    def ricerca_stampanti(self):
+        self.st_msg.set_text(T("Cerco in rete…", "Searching the network…"))
+
+        def fatto(c, t):
+            try:   # il risultato della ricerca: lo stesso file che scrive il servizio
+                trovate = json.loads(t.splitlines()[-1]) if t else []
+                os.makedirs(os.path.join(TMP, "tod-stampa"), exist_ok=True)
+                with open(os.path.join(TMP, "tod-stampa/trovate.json"), "w") as f:
+                    json.dump(trovate, f, ensure_ascii=False)
+                msg = T(f"Trovate in rete: {len(trovate)}.", f"Found on the network: {len(trovate)}.")
+            except (ValueError, IndexError, OSError):
+                msg = T("Ricerca non riuscita.", "Search failed.")
+            self.fill_stampanti(msg)
+        self.stampa("cerca", "--json", then=fatto)
+
+    def togli_stampante(self, p):
+        d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
+                              buttons=Gtk.ButtonsType.NONE, text=T(f"Rimuovere {p['descrizione']}?", f"Remove {p['descrizione']}?"))
+        d.format_secondary_text(T("Non comparirà più nella finestra di stampa. Se è USB, torna quando la ricolleghi.",
+                                  "It won't appear in print dialogs anymore. A USB printer comes back when you plug it in again."))
+        d.add_button(T("Annulla", "Cancel"), Gtk.ResponseType.CANCEL)
+        d.add_button(T("Rimuovi", "Remove"), Gtk.ResponseType.OK).get_style_context().add_class("destructive-action")
+        ok = d.run() == Gtk.ResponseType.OK
+        d.destroy()
+        if ok:
+            self.stampa("togli", p["nome"], then=lambda *_: self.fill_stampanti(T("Stampante rimossa.", "Printer removed.")))
 
     def pane_app(self, box):
         self.app_filter = Gtk.SearchEntry(placeholder_text=T("Cerca un'app", "Search apps"))
