@@ -4,7 +4,8 @@
   termux-usb -r -e tod-usb-info.py /dev/bus/usb/BBB/DDD
 
 Leggere il file usbfs restituisce i descrittori (dispositivo + configurazioni): da lì vendor,
-prodotto e classi delle interfacce. Classe 8 = memoria di massa (chiavette, dischi). Stampa JSON.
+prodotto e classi delle interfacce. Classe 8 = memoria di massa (chiavette, dischi), 7 = stampante
+(la prende share/stampa/tod-stampante-usb.py). Stampa JSON.
 """
 import json
 import os
@@ -28,4 +29,5 @@ while i + 2 <= len(raw):
         info["classes"].append(d[5])
     i += ln
 info["storage"] = 8 in info["classes"]
+info["printer"] = 7 in info["classes"]   # anche con il lettore di schede (multifunzione): due pezzi, due programmi
 print(json.dumps(info))

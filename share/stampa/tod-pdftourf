@@ -1,0 +1,18 @@
+#!/bin/sh
+# tod-pdftourf: filtro di CUPS per le stampanti solo AirPrint, che vogliono Apple Raster (image/urf). Lo mette
+# lib/stampa.sh in /usr/lib/cups/filter del container; la conversione la dichiara tod.convs (share/stampa/
+# tod-stampa.py). cups-filters 1.28 di Debian non lo fa: il suo gstoraster dà raster di CUPS anche se gli si chiede
+# URF (6 novembre). Ghostscript invece ha i dispositivi urfrgb e urfgray.
+#   tod-pdftourf lavoro utente titolo copie opzioni [file]     (PDF da pdftopdf; risultato su stdout)
+f=${6:-}
+[ -n "$f" ] || f=-
+opz=" $5 "
+res=$(sed -n 's/^\*DefaultResolution: *\([0-9]*\).*/\1/p' "$PPD" 2>/dev/null | head -n 1)
+r=$(printf '%s' "$opz" | sed -n 's/.* Resolution=\([0-9]*\).*/\1/p')
+[ -n "$r" ] && res=$r
+urf=$(sed -n 's/^\*cupsUrfSupported: *"\(.*\)"/\1/p' "$PPD" 2>/dev/null | head -n 1)
+dev=urfrgb
+case $urf in *SRGB24*) ;; *) dev=urfgray ;; esac   # la stampante dichiara solo il grigio
+case $opz in *ColorModel=Gray* | *print-color-mode=monochrome* | *ColorModel=Black*) dev=urfgray ;; esac
+echo "INFO: Ghostscript, $dev a ${res:-300} dpi" >&2
+exec gs -q -dNOPAUSE -dBATCH -dSAFER -sstdout=%stderr -sDEVICE=$dev -r"${res:-300}" -sOutputFile=- "$f"

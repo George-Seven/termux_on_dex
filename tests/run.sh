@@ -69,7 +69,7 @@ getprop() {
 }
 
 TOD_ROOT=$ROOT
-for m in core i18n detect pkgs x11 api usb gpu desktop session container diretto apt apps disinstalla games phantom shizuku lingua look files maint menu tui benvenuto installer; do
+for m in core i18n detect pkgs x11 api usb stampa gpu desktop session container diretto apt apps disinstalla games phantom shizuku lingua look files maint menu tui benvenuto installer; do
   # shellcheck source=/dev/null
   . "$ROOT/lib/$m.sh"
 done
@@ -1791,6 +1791,260 @@ C
   eq "256 settori in fila: 3 comandi; salti, scritture, fine del disco, guasti: dati giusti" \
     "in fila 1 3|sparse 1 34|dopo una scrittura 1|fine del disco 1|settore guasto dopo 1|spenta 1 64" \
     "$("$WORK/antp_$$" | paste -sd'|')"
+}
+
+test_diretto_execvpe() { # 6 novembre: execvpe del glibc cerca nel PATH senza fakechroot, sul vero Android (i filtri di
+  # stampa, gstoraster, non trovavano /usr/bin/gs). tod-diretto.so la fa come execvp, con l'ambiente del chiamante
+  local s
+  s=$(cat "$ROOT/share/diretto/tod-diretto.c")
+  has "execvpe intercettata" "int execvpe(const char *file, char *const argv[], char *const envp[])" "$s"
+  has "cercata nel PATH come execvp" 'if (f) return execve(f, argv, envp);' "$s"
+}
+
+_stampa_py() { # _stampa_py FILE: python con FILE caricato come modulo m; il codice della prova arriva da stdin
+  python3 -c 'import importlib.util as u, sys
+s = u.spec_from_file_location("m", sys.argv[1]); m = u.module_from_spec(s); s.loader.exec_module(m)
+exec(sys.stdin.read())' "$1"
+}
+
+test_stampa_conf() { # i filtri di CUPS partono con l'ambiente del modo diretto: PassEnv sta in cups-files.conf. In
+  # cupsd.conf CUPS 2.4 lo ignora, e filtri e collegamenti cadevano con il segnale 31 (6 novembre)
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(TMPDIR="$WORK/sc_tmp" TOD_TERMUX_HOME="$WORK/sc_home" _stampa_py "$ROOT/share/stampa/tod-stampa.py" <<'EOF'
+m.scrivi_conf()
+f = open(m.os.path.join(m.CONF, "cups-files.conf")).read()
+c = open(m.os.path.join(m.CONF, "cupsd.conf")).read()
+pe = [r for r in f.splitlines() if r.startswith("PassEnv ")]
+print(len(pe), all(v in pe[0].split() for v in ("GLIBC_TUNABLES", "FAKECHROOT_BASE", "LD_PRELOAD", "FAKECHROOT_EXCLUDE_PATH")))
+print("PassEnv" in c, "Listen " + m.SOCK in c, "ErrorPolicy retry-job" in c, "DefaultAuthType None" in c)
+print(oct(m.os.stat(m.RUN).st_mode & 0o777))
+print(open(m.os.path.join(m.CONF, "tod.convs")).read().splitlines()[-1].split())
+EOF
+)
+  eq "PassEnv nel file giusto, CUPS sul nostro socket, cartella privata, conversione verso URF" \
+    $'1 True\nFalse True True True\n0o700\n[\'application/vnd.cups-pdf\', \'image/urf\', \'100\', \'tod-pdftourf\']' "$out"
+}
+
+test_stampa_pdftourf() { # stampanti solo AirPrint: Ghostscript con urfrgb o urfgray, alla risoluzione della stampante
+  local fk="$WORK/spu_bin" ppd="$WORK/spu.ppd" out
+  mkdir -p "$fk"
+  printf '#!/bin/sh\necho "gs $*"\n' >"$fk/gs"
+  chmod +x "$fk/gs"
+  printf '*DefaultResolution: 600dpi\n*cupsUrfSupported: "CP1,IS1-4-5-19,RS300-600,SRGB24,V1.4,W8"\n' >"$ppd"
+  out=$(PATH="$fk:$PATH" PPD="$ppd" sh "$ROOT/share/stampa/tod-pdftourf" 1 pietro prova 1 "" 2>/dev/null)
+  has "a colori, 600 dpi, dallo stdin" "-sDEVICE=urfrgb -r600 -sOutputFile=- -" "$out"
+  out=$(PATH="$fk:$PATH" PPD="$ppd" sh "$ROOT/share/stampa/tod-pdftourf" 1 pietro prova 1 "print-color-mode=monochrome Resolution=300dpi" /x.pdf 2>/dev/null)
+  has "in bianco e nero chiesto dall'utente, 300 dpi, dal file" "-sDEVICE=urfgray -r300 -sOutputFile=- /x.pdf" "$out"
+  printf '*DefaultResolution: 300dpi\n*cupsUrfSupported: "CP1,RS300,V1.4,W8"\n' >"$ppd"
+  out=$(PATH="$fk:$PATH" PPD="$ppd" sh "$ROOT/share/stampa/tod-pdftourf" 1 pietro prova 1 "" 2>/dev/null)
+  has "stampante solo in grigio" "-sDEVICE=urfgray -r300" "$out"
+}
+
+test_stampa_bonjour() { # stampanti Wi-Fi: risposte mDNS (nomi compressi), ipp preferito a ipps, anche le solo AirPrint (URF)
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(TMPDIR="$WORK/sb_tmp" TOD_TERMUX_HOME="$WORK/sb_home" _stampa_py "$ROOT/share/stampa/tod-stampa.py" <<'EOF'
+import struct
+class Msg:   # una risposta mDNS, con i nomi compressi come le stampanti vere
+    def __init__(s):
+        s.b, s.vis, s.n = bytearray(struct.pack(">HHHHHH", 0, 0x8400, 0, 0, 0, 0)), {}, 0
+    def nome(s, n):
+        parti = n.split(".")
+        for i in range(len(parti)):
+            suff = ".".join(parti[i:]).lower()
+            if suff in s.vis:
+                s.b += struct.pack(">H", 0xC000 | s.vis[suff]); return
+            s.vis[suff] = len(s.b)
+            s.b += bytes([len(parti[i].encode())]) + parti[i].encode()
+        s.b += b"\0"
+    def rr(s, n, tipo, scrivi):
+        s.nome(n); s.b += struct.pack(">HHI", tipo, 0x8001, 120); pos = len(s.b); s.b += b"\0\0"
+        scrivi(); s.b[pos:pos + 2] = struct.pack(">H", len(s.b) - pos - 2); s.n += 1
+    def txt(s, *kv):
+        for x in kv: s.b += bytes([len(x)]) + x.encode()
+    def fine(s):
+        s.b[6:8] = struct.pack(">H", s.n); return bytes(s.b)
+p = Msg()
+hp, canon = "HP LaserJet MFP M140w._ipp._tcp.local", "Canon X._ipp._tcp.local"
+p.rr("_ipp._tcp.local", 12, lambda: p.nome(hp))
+p.rr("_ipps._tcp.local", 12, lambda: p.nome("HP LaserJet MFP M140w._ipps._tcp.local"))
+p.rr("_ipp._tcp.local", 12, lambda: p.nome(canon))
+p.rr(hp, 33, lambda: (p.b.extend(struct.pack(">HHH", 0, 0, 631)), p.nome("hp-m140w.local")))
+p.rr(hp, 16, lambda: p.txt("rp=ipp/print", "ty=HP LaserJet MFP M140w", "pdl=application/pdf,image/pwg-raster", "UUID=564E4333-4B12"))
+p.rr("HP LaserJet MFP M140w._ipps._tcp.local", 33, lambda: (p.b.extend(struct.pack(">HHH", 0, 0, 443)), p.nome("hp-m140w.local")))
+p.rr("HP LaserJet MFP M140w._ipps._tcp.local", 16, lambda: p.txt("rp=ipp/print", "ty=HP LaserJet MFP M140w", "UUID=564E4333-4B12"))
+p.rr("hp-m140w.local", 1, lambda: p.b.extend(bytes([192, 168, 1, 50])))
+p.rr(canon, 33, lambda: (p.b.extend(struct.pack(">HHH", 0, 0, 631)), p.nome("canon.local")))
+p.rr(canon, 16, lambda: p.txt("rp=ipp/print", "ty=Canon X", "pdl=image/urf", "URF=W8,SRGB24"))
+rr = m.analizza(p.fine())
+for x in sorted(m.stampanti_da(rr, {canon.lower(): "192.168.1.60"}), key=lambda x: x["uri"]):
+    print(x["uri"], x["modello"], x["chiave"], x["senza_driver"])
+print(m.analizza(m.domanda([("_ipp._tcp.local", 12)])))
+print(m.nome_coda("HP LaserJet MFP M140w (A4)"), m.nome_coda("HP LaserJet", {"HP_LaserJet"}), m.nome_coda("ÀÈ"))
+EOF
+)
+  eq "due stampanti, indirizzi giusti, nomi delle code" "ipp://192.168.1.50:631/ipp/print HP LaserJet MFP M140w 564e4333-4b12 True
+ipp://192.168.1.60:631/ipp/print Canon X 192.168.1.60/ipp/print True
+[]
+HP_LaserJet_MFP_M140w_A4 HP_LaserJet_2 Stampante" "$out"
+}
+
+test_stampa_giro_usb() { # stampanti USB: una coda per ponte (IPP Everywhere), la prima diventa predefinita, ricollegata
+  # aggiorna l'indirizzo, senza driver lo segnala; tolta dall'utente mentre è collegata non torna da sola
+  command -v python3 >/dev/null || return 0
+  local fk="$WORK/sgu_bin" out
+  mkdir -p "$fk"
+  cat >"$fk/lpstat" <<'EOF'
+#!/bin/sh
+case "$1" in
+  -v) if [ -f "$FAKE/code" ]; then while read -r n u; do echo "device for $n: $u"; done <"$FAKE/code"; fi ;;
+  -d) if [ -s "$FAKE/pred" ]; then echo "system default destination: $(cat "$FAKE/pred")"; else echo "no system default destination"; fi ;;
+esac
+EOF
+  cat >"$fk/lpadmin" <<'EOF'
+#!/bin/sh
+echo "$*" >>"$FAKE/lpadmin.log"
+nome="" uri=""
+while [ $# -gt 0 ]; do case "$1" in -p) nome=$2; shift ;; -v) uri=$2; shift ;; -d) echo "$2" >"$FAKE/pred"; shift ;; esac; shift; done
+if [ -n "$nome" ] && [ -n "$uri" ]; then
+  { grep -v "^$nome " "$FAKE/code" 2>/dev/null; echo "$nome $uri"; } >"$FAKE/code.n"; mv "$FAKE/code.n" "$FAKE/code"
+fi
+EOF
+  printf '#!/bin/sh\nexit 0\n' >"$fk/lpinfo"
+  printf '#!/bin/sh\necho "$*" >>"$FAKE/lpadmin.log"\n' >"$fk/cupsenable"
+  chmod +x "$fk"/*
+  out=$(PATH="$fk:$PATH" FAKE="$fk" TMPDIR="$WORK/sgu_tmp" TOD_TERMUX_HOME="$WORK/sgu_home" \
+    _stampa_py "$ROOT/share/stampa/tod-stampa.py" <<'EOF'
+import json, os
+os.makedirs(m.USB, exist_ok=True)
+def usb(ident, **kv):
+    json.dump(dict(id=ident, **kv), open(os.path.join(m.USB, ident + ".json"), "w"))
+usb("st1", porta=40001, tipo="ipp", nome="HP DeskJet 2700", seriale="CN123", vendor="03f0", product="112a")
+usb("st2", porta=40002, tipo="raw", device_id="MFG:Acme;MDL:Vecchia 1;CMD:ESCPL2;", nome="Acme Vecchia 1",
+    seriale="", vendor="1234", product="0001")
+m.avvisa = m.log = lambda *a: None
+db = m.carica_db()
+c = m.giro_usb(db, set())
+print(sorted(c))
+print(json.dumps(db["stampanti"], sort_keys=True))
+print(sorted(db.get("senza_driver", {})))
+usb("st1", porta=40011, tipo="ipp", nome="HP DeskJet 2700", seriale="CN123", vendor="03f0", product="112a")
+m.giro_usb(db, c)
+print(db["stampanti"]["usb:cn123"]["uri"])
+db["tolte"].append("usb:cn123")
+del db["stampanti"]["usb:cn123"]
+m.giro_usb(db, c)
+print("usb:cn123" in db["stampanti"])
+EOF
+)
+  eq "code create e aggiornate" "['usb:1234:0001', 'usb:cn123']
+{\"usb:cn123\": {\"modello\": \"HP DeskJet 2700\", \"nome\": \"HP_DeskJet_2700\", \"tipo\": \"usb\", \"uri\": \"ipp://127.0.0.1:40001/ipp/print\"}}
+['usb:1234:0001']
+ipp://127.0.0.1:40011/ipp/print
+False" "$out"
+  has "IPP Everywhere, senza driver" "-m everywhere" "$(sed -n 1p "$fk/lpadmin.log")"
+  has "la prima è la predefinita" "-d HP_DeskJet_2700" "$(cat "$fk/lpadmin.log")"
+}
+
+test_stampa_usb_ponte() { # il ponte USB: interfacce IPP via USB (7/1/4) preferite, nome dall'ID 1284, byte nei due sensi
+  # e quello che la stampante manda dopo la chiusura buttato (sennò rovinerebbe il collegamento dopo)
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(TMPDIR="$WORK/sup_tmp" _stampa_py "$ROOT/share/stampa/tod-stampante-usb.py" <<'EOF'
+import socket, threading, time
+ep = lambda a: bytes([7, 5, a, 2, 0, 2, 0])
+intf = lambda num, alt, proto, o, i: bytes([9, 4, num, alt, 2, 7, 1, proto, 0]) + ep(o) + ep(i)
+dev = bytes([18, 1, 0, 2, 0, 0, 0, 64, 0xf0, 0x03, 0x2a, 0x11, 0, 1, 1, 2, 3, 1])
+corpo = intf(0, 0, 2, 0x01, 0x82) + intf(1, 0, 4, 0x03, 0x84) + intf(2, 0, 2, 0x05, 0x86) + intf(2, 1, 4, 0x07, 0x88)
+conf = bytes([9, 2, 9 + len(corpo), 0, 3, 1, 0, 0xc0, 50]) + corpo
+d, i = m.descrittori(dev + conf)
+tipo, canali = m.scegli(i)
+print(d["vendor"], d["product"], tipo, [(c["num"], c["alt"], c["out"], c["in"]) for c in canali])
+print(m.scegli([x for x in i if x["proto"] != 4])[0], m.scegli([])[0])
+print(m.nome_di("MFG:HP;MDL:HP DeskJet 2700;CMD:PCL3GUI;", ""), "|", m.nome_di("MFG:Brother;MDL:HL-L2350DW;", ""), "|",
+      m.nome_di("", "Stampante"))
+class Finta:
+    def __init__(s):
+        s.scritto, s.da_leggere = b"", [b"HTTP/1.1 200 OK\r\n", b"Content-Length: 2\r\n\r\nok"]
+    def scrivi(s, e, x):
+        s.scritto += x
+    def leggi(s, e, n, ms):
+        time.sleep(0.01)
+        return s.da_leggere.pop(0) if s.da_leggere and b"\r\n\r\n" in s.scritto else b""
+a, b = socket.socketpair()
+f = Finta()
+t = threading.Thread(target=m.pompa, args=(b, f, 1, 0x82, 50))
+t.start()
+a.sendall(b"POST /ipp/print HTTP/1.1\r\nHost: x\r\n\r\n")
+r = b""
+while not r.endswith(b"ok"):
+    r += a.recv(100)
+f.da_leggere.append(b"avanzo")
+a.close()
+t.join(5)
+print(f.scritto.split(b"\r\n")[0].decode(), "|", r.split(b"\r\n")[0].decode(), f.da_leggere, t.is_alive())
+class Staccata(Finta):
+    def leggi(s, e, n, ms):
+        raise m.Staccata()
+a, b = socket.socketpair()
+try:
+    m.pompa(b, Staccata(), 1, 0x82, 50)
+    print("niente")
+except m.Staccata:
+    print("staccata")
+EOF
+)
+  eq "interfacce, nome, byte" "03f0 112a ipp [(1, 0, 3, 132), (2, 1, 7, 136)]
+raw None
+HP DeskJet 2700 | Brother HL-L2350DW | Stampante
+POST /ipp/print HTTP/1.1 | HTTP/1.1 200 OK [] False
+staccata" "$out"
+}
+
+test_usb_stampanti() { # 6 novembre: una stampante USB non è un "non disco": va al ponte del servizio di stampa, anche
+  # una multifunzione con il lettore di schede (disco e stampante insieme)
+  local bin="$HOME/binst" run="$HOME/runst" f out i
+  mkdir -p "$bin" "$run" "$TMPDIR/tod-stampa"
+  f=$(sed -n '/^log() {/p;/^is_storage() {/,/^}/p;/^stampanti_collega() {/,/^}/p' "$ROOT/share/usb/tod-usb")
+  printf '#!/bin/sh\necho %s\n' "'{\"classes\": [7], \"storage\": false, \"printer\": true}'" >"$bin/termux-usb"
+  chmod +x "$bin/termux-usb"
+  PATH="$bin:$PATH" RUN="$run" HERE=/x LOG="$run/log" bash -c "$f"$'\n''is_storage /dev/bus/usb/001/007' || true
+  eq "per il servizio di stampa" "/dev/bus/usb/001/007" "$(cat "$run/stampanti")"
+  eq "non tra i non dischi" "" "$(cat "$run/nondischi" 2>/dev/null)"
+  printf '#!/bin/sh\necho %s\n' "'{\"classes\": [7, 8], \"storage\": true, \"printer\": true}'" >"$bin/termux-usb"
+  out=$(PATH="$bin:$PATH" RUN="$run" HERE=/x LOG="$run/log" bash -c "$f"$'\n''is_storage /dev/bus/usb/001/008 && echo disco')
+  eq "multifunzione: disco" "disco" "$out"
+  eq "multifunzione: anche stampante" $'/dev/bus/usb/001/007\n/dev/bus/usb/001/008' "$(cat "$run/stampanti")"
+  printf '#!/bin/sh\necho "$*" >>"%s"\n' "$run/lanci" >"$bin/termux-usb"
+  printf '/dev/bus/usb/001/007\n' >"$run/stampanti"
+  PATH="$bin:$PATH" RUN="$run" HERE="$ROOT/share/usb" LOG="$run/log" bash -c "$f"$'\n''stampanti_collega'
+  for i in $(seq 1 50); do if [[ -s $run/lanci ]]; then break; fi; sleep 0.1; done
+  has "ponte lanciato" "share/usb/../stampa/tod-stampante-usb.py st1 /dev/bus/usb/001/007" "$(cat "$run/lanci" 2>/dev/null)"
+  eq "segnata come sua" "/dev/bus/usb/001/007" "$(cat "$run/stampa-dev-st1")"
+  eq "elenco svuotato" "" "$(cat "$run/stampanti" 2>/dev/null)"
+}
+
+test_stampa_client_conf() { # le app di Termux e del container trovano il nostro CUPS da client.conf; senza CUPS nel
+  # container il servizio non parte
+  _fake_rootfs
+  local c="$PREFIX/etc/cups/client.conf"
+  stampa_client_conf
+  has "Termux" "ServerName $TMPDIR/tod-stampa/cups.sock" "$(cat "$c")"
+  has "container" "ServerName $TMPDIR/tod-stampa/cups.sock" "$(cat "$R/etc/cups/client.conf")"
+  has "CUPS tra gli aiuti del container" "cups-daemon cups-filters" "$CX_AIUTI"
+  if stampa_pronta; then echo "  ✗ CUPS dato per installato" >&2; return 1; fi
+  setsid() { echo "setsid $*" >>"$WORK/scc_py_$$"; }   # mai un servizio vero dai test
+  stampa_start
+  eq "senza CUPS: il servizio non parte" "" "$(cat "$WORK/scc_py_$$" 2>/dev/null)"
+  mkdir -p "$R/usr/sbin" "$R/usr/lib/cups/filter"
+  printf '#!/bin/sh\n' >"$R/usr/sbin/cupsd"; cp "$R/usr/sbin/cupsd" "$R/usr/lib/cups/filter/pdftopdf"
+  chmod +x "$R/usr/sbin/cupsd" "$R/usr/lib/cups/filter/pdftopdf"
+  stampa_start
+  for _ in 1 2 3 4 5 6 7 8 9 10; do if [[ -s $WORK/scc_py_$$ ]]; then break; fi; sleep 0.1; done
+  has "con CUPS: il servizio parte" "share/stampa/tod-stampa.py sorveglia" "$(cat "$WORK/scc_py_$$" 2>/dev/null)"
+  if cmp -s "$ROOT/share/stampa/tod-pdftourf" "$R/usr/lib/cups/filter/tod-pdftourf" && [[ -x $R/usr/lib/cups/filter/tod-pdftourf ]]; then :
+  else echo "  ✗ filtro URF non installato nel container" >&2; return 1; fi
 }
 
 test_usb_non_dischi() { # un errore nel chiedere al dispositivo non deve farlo ignorare per sempre

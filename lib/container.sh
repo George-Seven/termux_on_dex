@@ -101,7 +101,9 @@ cx_startup_watch() { # in sottofondo: spegne il cursore di attesa alla prima fin
 # Strumenti di servizio delle app del container, senza voce nel menu. zenity: le app Rust (rfd: la suite Craft,
 # PdfCraft "Aggiungi immagine") aprono la finestra dei file con il portale del desktop o, se manca, con zenity;
 # in Termux il portale non c'è, e senza zenity la finestra non si apriva affatto (31 ottobre).
-CX_AIUTI="zenity"
+# cups-daemon e cups-filters (STAMPA_CX_PKGS): il servizio di stampa del desktop (lib/stampa.sh), anche per le
+# app di Termux.
+CX_AIUTI="zenity cups-daemon cups-filters cups-core-drivers"
 
 cx_install() {
   local u loc

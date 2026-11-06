@@ -414,6 +414,7 @@ session_hook() { # autostart dentro il desktop: DPI per lo schermo attuale, env 
     cx_sync_apps || true
     # app di Debian senza proot (lib/diretto.sh): la prima volta installa libfakechroot, poi è un controllo
     (diretto_prepara || true) </dev/null >>"$TOD_STATE_DIR/session.log" 2>&1 &
+    stampa_start || true   # stampanti (lib/stampa.sh): CUPS del container, Wi-Fi e USB
   fi
   apt_shell_setup || true
   android_apps_sync || true
@@ -487,6 +488,7 @@ session_stop() {
   if [[ -z ${TOD_TEST_RUN:-} && -f $TOD_ROOT/share/usb/tod-usb ]]; then
     timeout 60 bash "$TOD_ROOT/share/usb/tod-usb" ferma >>"$TOD_STATE_DIR/usb.log" 2>&1 || true
   fi
+  stampa_stop   # il CUPS del container gira senza proot: il pkill di proot qui sotto non lo prende
   # le app di Debian (proot) prima del desktop, con qualche secondo per chiudersi bene
   pkill -TERM -f '(^|/)proot( |$)' 2>/dev/null || true
   local i

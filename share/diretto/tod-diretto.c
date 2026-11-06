@@ -14,7 +14,7 @@
 //  - apt, dpkg, sudo, pkexec vogliono essere root: si rilanciano in proot (share/diretto/tod-proot);
 //  - gli script (#!): fakechroot con il caricatore ne perde gli ultimi due argomenti (pkexec apt-get
 //    install -y <file.deb> arrivava senza il .deb: ArtCraft, 26 ottobre). La riga #! la leggiamo noi e
-//    si lancia l'interprete, come fa il kernel (execve, execvp, posix_spawn, posix_spawnp);
+//    si lancia l'interprete, come fa il kernel (execve, execvp, execvpe, posix_spawn, posix_spawnp);
 //  - le azioni di posix_spawn (cartella di partenza, file da aprire) il glibc le fa senza fakechroot:
 //    i loro percorsi si traducono qui.
 //
@@ -310,6 +310,17 @@ int execvp(const char *file, char *const argv[]) {
   const char *f = cerca(file, buf, sizeof buf);
   if (f) return execve(f, argv, environ);
   return vero(file, argv);
+}
+
+// execvpe del glibc cerca nel PATH con chiamate interne, che fakechroot non vede: provava /usr/bin/gs del vero
+// Android e i filtri di stampa (gstoraster) non trovavano Ghostscript (6 novembre)
+int execvpe(const char *file, char *const argv[], char *const envp[]) {
+  static int (*vero)(const char *, char *const[], char *const[]);
+  if (!vero) vero = dlsym(RTLD_NEXT, "execvpe");
+  char buf[4096];
+  const char *f = cerca(file, buf, sizeof buf);
+  if (f) return execve(f, argv, envp);
+  return vero(file, argv, envp);
 }
 
 typedef int (*spawn_t)(pid_t *, const char *, const void *, const void *, char *const[], char *const[]);

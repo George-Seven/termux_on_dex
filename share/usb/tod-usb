@@ -33,11 +33,48 @@ is_storage() { # 0 se il dispositivo è un disco (chiede il permesso ad Android 
   [[ $dev == file:* ]] && return 0   # disco finto delle prove (TOD_USB_FINTI)
   grep -qxF "$dev" "$RUN/nondischi" 2>/dev/null && return 1
   info=$(timeout 90 termux-usb -r -e "python3 $HERE/tod-usb-info.py" "$dev" 2>/dev/null)
+  # una stampante (anche una multifunzione con il lettore di schede): la prende stampanti_collega
+  if [[ $info == *'"printer": true'* ]]; then echo "$dev" >>"$RUN/stampanti"; fi
   [[ $info == *'"storage": true'* ]] && return 0
   # tastiera, mouse, rete: non si richiede più. Solo se il dispositivo ha risposto davvero "non sono
   # un disco": un errore (permesso negato, risposta vuota) non deve far ignorare un lettore di schede
-  if [[ $info == '{'*'"storage": false'*'}' ]]; then echo "$dev" >>"$RUN/nondischi"; fi
+  if [[ $info == '{'*'"storage": false'*'}' && $info != *'"printer": true'* ]]; then echo "$dev" >>"$RUN/nondischi"; fi
   return 1
+}
+
+stampante_viva() { # come lkl_vivo, per il ponte di una stampante (share/stampa/tod-stampante-usb.py)
+  local p
+  [[ -f $RUN/stampa-$1.pid ]] && read -r p <"$RUN/stampa-$1.pid" && kill -0 "$p" 2>/dev/null
+}
+
+stampanti_collega() { # le stampanti trovate da is_storage: un ponte ciascuna, che le offre al servizio di stampa
+  # (share/stampa/tod-stampa.py, che c'è se $TMPDIR/tod-stampa esiste: senza, il ponte non servirebbe a nessuno)
+  local dev id
+  [[ -s $RUN/stampanti ]] || return 0
+  if [[ -d ${TMPDIR:-/tmp}/tod-stampa ]]; then
+    while IFS= read -r dev; do
+      [[ -n $dev ]] || continue
+      if cat "$RUN"/stampa-dev-* 2>/dev/null | grep -qxF "$dev"; then continue; fi
+      id="st$(( $(cat "$RUN/contatore-st" 2>/dev/null || echo 0) + 1 ))"; echo "${id#st}" >"$RUN/contatore-st"
+      echo "$dev" >"$RUN/stampa-dev-$id"
+      (setsid termux-usb -r -e "python3 $HERE/../stampa/tod-stampante-usb.py $id" "$dev" </dev/null >>"$LOG" 2>&1 &)
+      log "stampante $dev: ponte $id"
+    done <"$RUN/stampanti"
+  fi
+  rm -f "$RUN/stampanti"
+}
+
+stampanti_finite() { # ponti chiusi (stampante staccata): via i loro file. Il pid lo scrive il ponte appena parte:
+  # fino a 60 s dopo l'avvio (il permesso di Android) un ponte senza pid è ancora in arrivo
+  local f id
+  for f in "$RUN"/stampa-dev-*; do
+    [[ -f $f ]] || continue
+    id=${f##*/stampa-dev-}
+    stampante_viva "$id" && continue
+    if [[ ! -f $RUN/stampa-$id.pid ]] && (($(date +%s) - $(stat -c %Y "$f") < 60)); then continue; fi
+    log "stampante chiusa: $(cat "$f") ($id)"
+    rm -f "$f" "$RUN/stampa-$id.pid" "${TMPDIR:-/tmp}/tod-stampa/usb/$id.json"
+  done
 }
 
 lkl_vivo() { # senza processi (read e kill sono di bash): il servizio lo chiama ogni 2 s per ogni disco
@@ -165,7 +202,8 @@ for d in os.listdir("/proc"):
         continue
     nome = os.path.basename(a[0]) if a else ""
     if (nome == "tod-lkl" and len(a) > 2 and a[1] == run) or \
-       (len(a) > 2 and a[1].endswith("share/usb/tod-usb") and a[2] == "_sorveglia" and stesso_tmp(d)):   # solo il servizio vero: due che arrivano insieme non si chiudono a vicenda
+       (len(a) > 2 and a[1].endswith("share/usb/tod-usb") and a[2] == "_sorveglia" and stesso_tmp(d)) or \
+       (nome.startswith("python") and len(a) > 2 and a[1].endswith("share/stampa/tod-stampante-usb.py") and stesso_tmp(d)):   # solo il servizio vero: due che arrivano insieme non si chiudono a vicenda
         print(d)
 PY
 ); do
@@ -179,7 +217,8 @@ ferma() { # fine della sessione: servizio chiuso, dati scritti e partizioni smon
   kill "$(cat "$RUN/sorveglia.pid")" 2>/dev/null
   lkl_ferma_tutti
   orfani
-  rm -f "$RUN/sorveglia.pid" "$RUN"/vol-* "$RUN/vols" "$RUN/volumi" "$RUN/volumi.gio" "$RUN/espulsi" "$RUN/dischi.pid" "$RUN"/lkl-* "$RUN"/caldo-*
+  rm -f "$RUN/sorveglia.pid" "$RUN"/vol-* "$RUN/vols" "$RUN/volumi" "$RUN/volumi.gio" "$RUN/espulsi" "$RUN/dischi.pid" "$RUN"/lkl-* "$RUN"/caldo-* \
+    "$RUN"/stampa-* "$RUN/stampanti" "${TMPDIR:-/tmp}"/tod-stampa/usb/*.json
   log "servizio fermato (fine della sessione)"
 }
 
@@ -210,8 +249,8 @@ usb_nuovi() { # DEVS: i dispositivi USB comparsi dall'ultimo giro e non ancora d
   for dev in $devs; do
     grep -qxF "$dev" <<<"$VISTI" && continue
     grep -qxF "$dev" "$RUN/espulsi" 2>/dev/null && continue
-    # già di un tod-lkl. Con cat: grep su un nome che non c'è darebbe errore anche trovandolo
-    if cat "$RUN"/lkl-dev-* 2>/dev/null | grep -qxF "$dev"; then continue; fi
+    # già di un tod-lkl o del ponte di una stampante. Con cat: grep su un nome che non c'è darebbe errore anche trovandolo
+    if cat "$RUN"/lkl-dev-* "$RUN"/stampa-dev-* 2>/dev/null | grep -qxF "$dev"; then continue; fi
     if is_storage "$dev"; then echo "$dev"; fi
   done
 }
@@ -279,6 +318,8 @@ giro() { # DEVS: un giro del servizio
   done
   local ids=()
   for nuovo in $(usb_nuovi "$devs"); do ids+=("$(lkl_collega "$nuovo")"); done
+  stampanti_finite
+  stampanti_collega
   if ((${#ids[@]})); then lkl_aspetta "${ids[@]}"; fi
   cat "$RUN"/lkl-*.volumi 2>/dev/null >"$RUN/volumi.nuovo"
   if cmp -s "$RUN/volumi.nuovo" "$RUN/volumi"; then rm -f "$RUN/volumi.nuovo"
@@ -348,7 +389,8 @@ _sorveglia() { # il servizio vero (sotto il blocco): porte USB, dischi, espulsio
   echo $$ >"$RUN/sorveglia.pid"
   monitor
   orfani
-  rm -f "$RUN"/vol-* "$RUN/vols" "$RUN/espulsi" "$RUN"/lkl-* "$RUN"/caldo-*
+  rm -f "$RUN"/vol-* "$RUN/vols" "$RUN/espulsi" "$RUN"/lkl-* "$RUN"/caldo-* "$RUN"/stampa-* "$RUN/stampanti" \
+    "${TMPDIR:-/tmp}"/tod-stampa/usb/*.json
   : >"$RUN/volumi.gio"   # c'è (anche vuoto): il monitor dei volumi sa che i dischi li annuncia scalda()
   pulisci_macchina
   # per tod-run nel container: i programmi caricano tod-fs (glibc) e vedono /media/usb
