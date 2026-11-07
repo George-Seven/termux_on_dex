@@ -112,6 +112,8 @@ self_after() { # tod _self_after: con il codice nuovo, i file che dipendono da l
   desktop_install_entries || true
   # dischi USB: i file di tod-lkl della versione nuova
   if usb_on && ! usb_lkl_ok; then usb_install || warn "$(t s_usb)"; fi
+  # la Rete in Esplora file: Samba e tod-smb (rete_start lo ricompila se cambia)
+  if rete_on && ! rete_pronta; then rete_install || warn "$(t s_rete)"; fi
   # Termux:X11 nuova: installarla chiude Termux (sharedUid), quindi solo da tod update in Termux
   if x11_glamor_da_aggiornare; then echo "x11=nuova"; fi
   return 0

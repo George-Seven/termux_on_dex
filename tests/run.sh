@@ -69,7 +69,7 @@ getprop() {
 }
 
 TOD_ROOT=$ROOT
-for m in core i18n detect pkgs x11 api usb stampa gpu desktop session container diretto apt apps disinstalla games phantom shizuku lingua look files maint menu tui benvenuto installer; do
+for m in core i18n detect pkgs x11 api usb stampa rete gpu desktop session container diretto apt apps disinstalla games phantom shizuku lingua look files maint menu tui benvenuto installer; do
   # shellcheck source=/dev/null
   . "$ROOT/lib/$m.sh"
 done
@@ -2047,6 +2047,118 @@ test_stampa_client_conf() { # le app di Termux e del container trovano il nostro
   else echo "  ✗ filtro URF non installato nel container" >&2; return 1; fi
 }
 
+test_scoperta_wsd_netbios() { # i PC Windows: la risposta WS-Discovery (Computer sì, stampanti no) e il nome NetBIOS
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(_stampa_py "$ROOT/share/scoperta.py" <<'EOF'
+import struct
+pc = b'<soap:Envelope><soap:Body><wsd:ProbeMatches><wsd:ProbeMatch><wsd:Types>wsdp:Device  pub:Computer</wsd:Types>' \
+     b'<wsd:XAddrs>http://192.168.1.23:5357/abc/</wsd:XAddrs></wsd:ProbeMatch></wsd:ProbeMatches></soap:Body></soap:Envelope>'
+st = b'<wsd:Types>wsdp:Device wprt:PrintDeviceType</wsd:Types>'
+print(m.analizza_wsd(pc), "Computer" in m.analizza_wsd(st)[0])
+q = m.pacchetto_nbstat()
+print(len(q), q[12], q[13:15], q[-4:].hex())
+nomi = [(b"WORKGROUP", 0x00, 0x8400), (b"PC-PIETRO", 0x00, 0x0400), (b"PC-PIETRO", 0x20, 0x0400)]
+r = struct.pack(">HHHHHH", 0x746f, 0x8400, 0, 1, 0, 0) + b"\xc0\x0c" + struct.pack(">HHIH", 0x21, 1, 0, 1 + 18 * 3) + bytes([3])
+for n, s, f in nomi:
+    r += n.ljust(15) + bytes([s]) + struct.pack(">H", f)
+print(m.analizza_nbstat(r), repr(m.analizza_nbstat(b"corto")))
+EOF
+)
+  eq "WS-Discovery e NetBIOS" "('wsdp:Device pub:Computer', ['http://192.168.1.23:5357/abc/']) False
+50 32 b'CK' 00210001
+PC-PIETRO ''" "$out"
+}
+
+_rete_py() { # _rete_py: tod-rete.py caricato come m, con case e cartelle di prova; il codice da stdin
+  TMPDIR="$WORK/rete_tmp" TOD_TERMUX_HOME="$WORK/rete_home" TOD_SMB_BIN="${TOD_SMB_BIN:-/nessuno}" \
+    _stampa_py "$ROOT/share/rete/tod-rete.py"
+}
+
+test_rete_alias() { # il nome del socket di un PC è lo stesso in tod-rete.py, tod-fs.c e tod-usb (byte per byte)
+  command -v python3 >/dev/null || return 0
+  local nomi=("PC di Pietro" "NAS/Casa" "UNITÀ USB" "Mac.local") py sh="" n f
+  py=$(_rete_py <<'EOF'
+for n in ["PC di Pietro", "NAS/Casa", "UNITÀ USB", "Mac.local"]:
+    print(m.alias_di(n))
+EOF
+)
+  f=$(sed -n '/^alias_of() {/p' "$ROOT/share/usb/tod-usb")
+  for n in "${nomi[@]}"; do sh+=$(bash -c "$f"$'\n''alias_of "$1"' _ "$n")$'\n'; done
+  eq "come tod-usb (e quindi tod-fs.c)" "${sh%$'\n'}" "$py"
+  eq "nomi" $'pc-di-pietro\nnas_casa\nunit---usb\nmac.local' "$py"
+}
+
+test_rete_password() { # la password: prima da ospite, poi la finestra; ricordata nel portachiavi; quella rifiutata si
+  # richiede con l'avviso; con una password in memoria nessuna finestra
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(_rete_py <<'EOF'
+chieste, salvate = [], []
+m.log = lambda *a: None
+m.password_di = lambda pc, u: None
+m.ricorda_password = lambda pc, u, p: salvate.append((pc, u, p))
+s = m.Servizio()
+def chiedi(nome, utente, dominio, errore):
+    chieste.append((nome, utente, errore))
+    return {"utente": "pietro", "password": "a\tb%c", "dominio": "", "ricorda": True}
+print(s.risposta("AUTH\tPC-PIETRO\t192.168.1.23\tIPC$\tprimo\n", chiedi).strip())
+print(s.risposta("AUTH\tPC-PIETRO\t192.168.1.23\tIPC$\tospite\n", chiedi).strip())
+print(chieste, salvate, m.carica_conf()["credenziali"])
+print(s.risposta("AUTH\tPC-PIETRO\t192.168.1.23\tDocumenti\tprimo\n", chiedi).strip())
+print(s.risposta("AUTH\tPC-PIETRO\t192.168.1.23\tDocumenti\trifiutate\n", chiedi).strip(), chieste[-1])
+print(s.risposta("sbagliata", chiedi).strip())
+EOF
+)
+  eq "ospite, finestra, ricordata, rifiutata" $'NO\nOK\t-\tpietro\ta%09b%25c\n'"[('PC-PIETRO', '', False)] [('PC-PIETRO', 'pietro', 'a\\tb%c')] {'PC-PIETRO': {'utente': 'pietro', 'dominio': ''}}"$'\nOK\t-\tpietro\ta%09b%25c\nOK\t-\tpietro\ta%09b%25c'" ('PC-PIETRO', 'pietro', True)"$'\nNO' "$out"
+}
+
+test_rete_elenco_pc() { # i PC trovati e quelli aggiunti a mano: elenco per tod-fs, un tod-smb per PC, i PC spariti via
+  command -v python3 >/dev/null || return 0
+  local smb="$WORK/rete_smb_finto" out
+  printf '#!/bin/sh\necho "$*" >>"%s"\nexec sleep 30\n' "$WORK/rete_smb_args" >"$smb"
+  chmod +x "$smb"
+  out=$(TOD_SMB_BIN="$smb" _rete_py <<'EOF'
+import os, time
+os.makedirs(m.RUN, exist_ok=True)
+s = m.Servizio()
+m.principale(["x", "aggiungi", "smb://192.168.1.9:4450/", "NAS di casa"])
+s.aggiorna(m.tutti_i_nomi([{"nome": "PC-PIETRO", "ip": "192.168.1.23", "porta": 445},
+                           {"nome": "PC-PIETRO", "ip": "192.168.1.24", "porta": 445}]))
+print(open(m.VOLUMI).read().strip())
+time.sleep(0.5)
+print(sorted(open(os.environ["TMPDIR"] + "/../rete_smb_args").read().split("\n")))
+s.pc["PC-PIETRO"]["visto"] -= 3600
+s.aggiorna([])
+print(open(m.VOLUMI).read().strip())
+print(sorted(n for n, p in s.proc.items() if p.poll() is None))
+m.principale(["x", "togli", "NAS di casa"])
+s.aggiorna([])
+print(repr(open(m.VOLUMI).read()), m.carica_conf()["pc"])
+s.chiudi()
+EOF
+)
+  local r="$WORK/rete_tmp/tod-rete"
+  eq "elenco e tod-smb" $'NAS di casa\t192.168.1.9\nPC-PIETRO\t192.168.1.23\nPC-PIETRO (192.168.1.24)\t192.168.1.24\n'"['', '$r nas-di-casa 192.168.1.9:4450 NAS di casa', '$r pc-pietro 192.168.1.23 PC-PIETRO', '$r pc-pietro--192.168.1.24- 192.168.1.24 PC-PIETRO (192.168.1.24)']"$'\nNAS di casa\t192.168.1.9\nPC-PIETRO (192.168.1.24)\t192.168.1.24\n'"['NAS di casa', 'PC-PIETRO (192.168.1.24)']"$'\n'"'PC-PIETRO (192.168.1.24)\\t192.168.1.24\\n' []" "$out"
+}
+
+test_rete_segnalibro() { # "Rete" nella barra di Esplora file solo con tod-smb e un tod-fs.so che conosce /media/rete
+  local d
+  d=$(usb_data)
+  mkdir -p "$d" "${TOD_TERMUX_HOME:-$HOME}/.local/share/tod-rete"
+  files_user_home() { echo "$HOME/utente"; }
+  files_user_folders() { :; }
+  files_sdcards() { :; }
+  files_bookmarks
+  if grep -q "media/rete" "$(files_termux_home)/.config/gtk-3.0/bookmarks" 2>/dev/null; then
+    echo "  ✗ Rete senza tod-smb" >&2; return 1
+  fi
+  printf '#!/bin/sh\n' >"$(rete_bin)"; chmod +x "$(rete_bin)"
+  printf 'x/media/rete\0y' >"$d/tod-fs.so"
+  files_bookmarks
+  has "Rete nella barra" "file:///media/rete Rete" "$(cat "$(files_termux_home)/.config/gtk-3.0/bookmarks")"
+}
+
 test_usb_non_dischi() { # un errore nel chiedere al dispositivo non deve farlo ignorare per sempre
   local bin="$HOME/binnd" run="$HOME/runnd" out
   mkdir -p "$bin" "$run"
@@ -2901,6 +3013,7 @@ test_x11_glamor_nuova_versione() { # la Termux:X11 nuova si propone solo da tod 
   local X11_GLAMOR_VERSIONE=2
   x11_glamor_da_aggiornare || { echo "  ✘ versione 2 uscita: da aggiornare"; return 1; }
   usb_on() { return 1; }
+  rete_on() { return 1; }   # niente apt veri dai test (samba)
   desktop_install_entries() { :; }
   eq "dopo il codice nuovo: avviso per la finestra" "x11=nuova" "$(self_after)"
   conf_set X11_GLAMOR_INSTALLATA 2

@@ -43,6 +43,7 @@ BARRA = os.path.join(HOME, ".config/tod/barra.json")   # impostazioni della barr
 STATE = os.path.join(HOME, ".local/state/tod")
 HERE = os.path.dirname(os.path.abspath(__file__))
 STAMPA = os.path.join(HERE, "stampa/tod-stampa.py")   # il servizio di stampa (lib/stampa.sh)
+RETE = os.path.join(HERE, "rete/tod-rete.py")         # la Rete in Esplora file (lib/rete.sh)
 ITALIAN = os.environ.get("LANGUAGE", os.environ.get("LANG", "")).startswith("it")
 
 def T(it, en):
@@ -160,7 +161,8 @@ CSS = b"""
 
 class Settings(Gtk.Window):
     PANES = [  # chiave, titolo, icona, colore, parole per la ricerca
-        ("rete", T("Wi-Fi e rete", "Wi-Fi & Network"), "network-wireless-symbolic", "blue", "wifi internet rete mobile"),
+        ("rete", T("Wi-Fi e rete", "Wi-Fi & Network"), "network-wireless-symbolic", "blue",
+         "wifi internet rete mobile pc nas computer cartelle condivise samba smb windows"),
         ("batteria", T("Batteria", "Battery"), "battery-good-symbolic", "green", "energia carica"),
         ("aspetto", T("Aspetto", "Appearance"), "preferences-desktop-wallpaper-symbolic", "purple",
          "tema scuro chiaro sfondo wallpaper colori"),
@@ -348,6 +350,61 @@ class Settings(Gtk.Window):
         box.pack_start(hint, False, False, 0)
         self.group(box, None, [self.row(T("Impostazioni di rete del telefono", "Phone network settings"),
                                         self.button(T("Apri", "Open"), lambda: am("android.settings.WIFI_SETTINGS")))])
+        self.rete_pc(box)
+
+    # --- i computer in rete (share/rete/tod-rete.py): le loro cartelle condivise in Esplora file, sotto "Rete" ----
+    def rete_pc(self, box):
+        try:
+            e = json.loads(sh([sys.executable, RETE, "elenco", "--json"], timeout=10) or "{}")
+        except ValueError:
+            e = {}
+        if not e.get("servizio"):
+            return
+        righe = []
+        for p in e.get("pc", []):
+            voci = []
+            if p.get("password"):
+                voci.append(self.button(T("Dimentica la password", "Forget password"),
+                                        lambda n=p["nome"]: self.rete_cmd("dimentica", n)))
+            if p.get("manuale"):
+                voci.append(self.button(T("Rimuovi", "Remove"), lambda n=p["nome"]: self.rete_cmd("togli", n)))
+            hb = Gtk.Box(spacing=6)
+            for v in voci:
+                hb.pack_start(v, False, False, 0)
+            righe.append(self.row(p["nome"], hb, p["ip"]))
+        if not righe:
+            righe.append(self.row(T("Nessun computer trovato", "No computers found"), None,
+                                  T("PC e NAS della rete Wi-Fi compaiono da soli.", "PCs and NAS on the Wi-Fi network appear automatically.")))
+        voce = Gtk.Entry(placeholder_text=T("192.168.1.10 o nome", "192.168.1.10 or name"), width_chars=20)
+        voce.connect("activate", lambda w: self.rete_cmd("aggiungi", w.get_text()))
+        hb = Gtk.Box(spacing=6)
+        hb.pack_start(voce, False, False, 0)
+        hb.pack_start(self.button(T("Aggiungi", "Add"), lambda: self.rete_cmd("aggiungi", voce.get_text())), False, False, 0)
+        righe.append(self.row(T("Aggiungi con l'indirizzo", "Add by address"), hb,
+                              T("Per un computer che non compare da solo.", "For a computer that doesn't appear by itself.")))
+        righe.append(self.row(T("Apri la Rete in Esplora file", "Open Network in the file manager"),
+                              self.button(T("Apri", "Open"), lambda: spawn(["exo-open", "--launch", "FileManager", "/media/rete"]))))
+        self.group(box, T("Computer in rete", "Computers on the network"), righe)
+
+    def rete_cmd(self, *args):
+        if args[-1].strip() == "":
+            return
+
+        def work():
+            subprocess.run([sys.executable, RETE, *[a.strip() for a in args]], capture_output=True, timeout=30,
+                           stdin=subprocess.DEVNULL)
+            GLib.timeout_add(2500, lambda: self.ricarica_rete() and False)   # il servizio aggiorna l'elenco in 2 s
+        threading.Thread(target=work, daemon=True).start()
+
+    def ricarica_rete(self):
+        if self.stack.get_visible_child_name() == "rete":
+            old = self.stack.get_child_by_name("rete")
+            self.stack.remove(old)
+            page = self.page("rete")
+            self.stack.add_named(page, "rete")
+            page.show_all()
+            self.stack.set_visible_child_name("rete")
+        return False
 
     def pane_batteria(self, box):
         b = (phone_state().get("battery") or {})

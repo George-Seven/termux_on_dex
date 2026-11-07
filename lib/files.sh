@@ -97,6 +97,8 @@ files_bookmarks() { # barra laterale: le cartelle dell'utente, le schede SD, poi
     k=$((k + 1))
     ours+="file://$d $(t fm_sdcard)$( ((k > 1)) && printf ' %s' "$k")"$'\n'
   done < <(files_sdcards)
+  # la Rete: i PC e i NAS di casa (lib/rete.sh)
+  if rete_on && rete_pronta; then ours+="file:///media/rete $(t fm_rete)"$'\n'; fi
   # da togliere: i nostri (anche di versioni precedenti: Telefono, Fotocamera, Debian),
   # riconosciuti dal percorso reale
   skip=$(

@@ -11,6 +11,8 @@
  *
  *   /media/usb            le partizioni montate (da $RUN/volumi, prima colonna)
  *   /media/usb/<nome>/... i loro file
+ *   /media/rete           i PC e i NAS in rete (tod-rete/volumi, accanto a $RUN), serviti allo stesso modo da
+ *   /media/rete/<PC>/...  share/rete/tod-smb: dentro, le loro cartelle condivise
  *
  * Un file aperto è un descrittore vero (/dev/null) con accanto il suo stato (handle SFTP, posizione):
  * read, write, lseek, fstat, dup, close... su quel numero passano da qui. TOD_FS_RUN dice dov'è $RUN
@@ -54,6 +56,12 @@
 
 #define RADICE "/media/usb"
 #define LRAD 10
+/* Le cartelle condivise dei PC in rete (share/rete): /media/rete/<PC>/<cartella>, servite allo stesso modo (un server
+ * SFTP per PC, share/rete/tod-smb) da una cartella di lavoro sorella di quella dei dischi, tod-rete. Nel nome del
+ * volume il primo byte SEGNO_RETE dice "rete": connessioni, socket ed elenchi si cercano lì */
+#define RETE "/media/rete"
+#define LRETE 11
+#define SEGNO_RETE '\x01'
 
 /* ---------- le funzioni vere ---------- */
 #define VERA(tipo, nome, ...) \
@@ -66,7 +74,7 @@ static int r_close(int fd) { VERA(int, close, int); return vera_close(fd); }
 static int r_open(const char *p, int f, mode_t m) { VERA(int, open, const char *, int, ...); return vera_open(p, f, m); }
 
 /* ---------- configurazione ---------- */
-static char run_dir[512];
+static char run_dir[512], run_rete[512];
 static int pronto;
 static pthread_mutex_t gl = PTHREAD_MUTEX_INITIALIZER;
 /* Il processo a cui appartengono le tabelle (file del disco aperti, avvisi). Un figlio di vfork (Python,
@@ -82,8 +90,22 @@ static void avvia(void) {
     const char *r = getenv("TOD_FS_RUN");
     if (r && *r) snprintf(run_dir, sizeof run_dir, "%s", r);
     else { const char *t = getenv("TMPDIR"); snprintf(run_dir, sizeof run_dir, "%s/tod-usb", t && *t ? t : "/tmp"); }
+    const char *rr = getenv("TOD_FS_RETE");   /* sennò accanto a quella dei dischi (nel container /tmp/tod-rete) */
+    if (rr && *rr) snprintf(run_rete, sizeof run_rete, "%s", rr);
+    else {
+        const char *b = strrchr(run_dir, '/');
+        snprintf(run_rete, sizeof run_rete, "%.*s/tod-rete", b ? (int)(b - run_dir) : 0, run_dir);
+    }
     pronto = 1;
 }
+
+static int radice_di(const char *v) {   /* 0 = /media/usb[/...], 1 = /media/rete[/...], -1 = altro */
+    if (!strncmp(v, RADICE, LRAD) && (!v[LRAD] || v[LRAD] == '/')) return 0;
+    if (!strncmp(v, RETE, LRETE) && (!v[LRETE] || v[LRETE] == '/')) return 1;
+    return -1;
+}
+static const char *run_di(const char *vol) { return vol[0] == SEGNO_RETE ? run_rete : run_dir; }
+static const char *nome_di(const char *vol) { return vol[0] == SEGNO_RETE ? vol + 1 : vol; }
 
 /* ---------- percorsi: virtuale o no ---------- */
 static char vcwd[PATH_MAX];   /* cartella di lavoro dentro /media/usb ("" se è una vera) */
@@ -116,8 +138,8 @@ static unsigned char reali[4096];
 static unsigned char cwd_reale;   /* la cartella di lavoro vera è "/" (1) o "/media" (2): mkdir -p di Debian fa chdir("/") */
 static const char *percorso_reale(int fd) { return fd >= 0 && fd < 4096 ? (reali[fd] == 1 ? "/" : reali[fd] == 2 ? "/media" : NULL) : NULL; }
 
-static int nostro_percorso(const char *v) {   /* /media/usb/..., o /media se in Termux non c'è */
-    if (!strncmp(v, RADICE, LRAD) && (!v[LRAD] || v[LRAD] == '/')) return 1;
+static int nostro_percorso(const char *v) {   /* /media/usb/..., /media/rete/..., o /media se in Termux non c'è */
+    if (radice_di(v) >= 0) return 1;
     return !strcmp(v, "/media") && media_finto(v);
 }
 
@@ -142,24 +164,30 @@ static int virtuale(int dirfd, const char *p, char *out, size_t n) {
     return 1;
 }
 
-/* "/media/usb/NOME/resto" → volume NOME, dentro "/resto": 1. 0 = la radice /media/usb, 2 = /media */
+/* "/media/usb/NOME/resto" → volume NOME, dentro "/resto": 1. 0 = la radice /media/usb, 2 = /media.
+ * "/media/rete/PC/resto" → volume SEGNO_RETE PC; la radice /media/rete: 0, con VOL = SEGNO_RETE */
 static int dividi(const char *v, char *vol, size_t nv, char *dentro, size_t nd) {
-    if (strncmp(v, RADICE, LRAD)) return 2;
-    const char *q = v + LRAD;
+    int k = radice_di(v);
+    if (k < 0) return 2;
+    const char *q = v + (k ? LRETE : LRAD);
+    char *o = vol;
+    vol[0] = 0;
+    if (k) { vol[0] = SEGNO_RETE; vol[1] = 0; o++; nv--; }
     if (!*q || !strcmp(q, "/")) return 0;
     q++;
     const char *s = strchr(q, '/');
     size_t l = s ? (size_t)(s - q) : strlen(q);
     if (l >= nv) l = nv - 1;
-    memcpy(vol, q, l); vol[l] = 0;
+    memcpy(o, q, l); o[l] = 0;
     snprintf(dentro, nd, "%s", s ? s : "/");
     return 1;
 }
 
-/* ---------- i volumi ($RUN/volumi) ---------- */
-static int volume_esiste(const char *nome) {
+/* ---------- i volumi ($RUN/volumi; quelli di rete in tod-rete/volumi) ---------- */
+static int volume_esiste(const char *vol) {
     char p[600], riga[1024];
-    snprintf(p, sizeof p, "%s/volumi", run_dir);
+    const char *nome = nome_di(vol);
+    snprintf(p, sizeof p, "%s/volumi", run_di(vol));
     VERA(FILE *, fopen, const char *, const char *);
     FILE *f = vera_fopen(p, "r");
     if (!f) return 0;
@@ -172,9 +200,9 @@ static int volume_esiste(const char *nome) {
     return ok;
 }
 
-static int elenca_volumi(char nomi[][256], int max) {
+static int elenca_volumi(const char *vol, char nomi[][256], int max) {   /* VOL: "" i dischi, SEGNO_RETE i PC */
     char p[600], riga[1024];
-    snprintf(p, sizeof p, "%s/volumi", run_dir);
+    snprintf(p, sizeof p, "%s/volumi", run_di(vol));
     VERA(FILE *, fopen, const char *, const char *);
     FILE *f = vera_fopen(p, "r");
     if (!f) return 0;
@@ -260,8 +288,8 @@ static int collega(struct conn *c) {
     if (c->fd >= 0 && c->pid == me) return 1;
     if (c->fd >= 0) { r_close(c->fd); c->fd = -1; }
     char a[256], p[800];
-    alias_di(c->vol, a, sizeof a);
-    snprintf(p, sizeof p, "%s/lkl-%s.sock", run_dir, a);
+    alias_di(nome_di(c->vol), a, sizeof a);
+    snprintf(p, sizeof p, "%s/lkl-%s.sock", run_di(c->vol), a);
     int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     struct sockaddr_un sa = {.sun_family = AF_UNIX};
     snprintf(sa.sun_path, sizeof sa.sun_path, "%s", p);
@@ -1025,7 +1053,7 @@ __attribute__((constructor)) static void inizio(void) {
         if (vera_getcwd(c0, sizeof c0)) cwd_reale = !strcmp(c0, "/") ? 1 : !strcmp(c0, "/media") ? 2 : 0;
     }
     const char *pwd = getenv("PWD");
-    if (!pwd || strncmp(pwd, RADICE, LRAD) || (pwd[LRAD] && pwd[LRAD] != '/')) return;
+    if (!pwd || radice_di(pwd) < 0) return;
     char r[600], c[PATH_MAX];
     cwd_riserva(r, sizeof r);
     VERA(char *, getcwd, char *, size_t);
@@ -1045,10 +1073,10 @@ static int carica_dir(struct vdir *dd, const char *v) {
         char _p[PATH_MAX]; snprintf(_p, sizeof _p, "%s/%s", v, N); dd->v[dd->n].ino = hash(_p) & 0x7fffffffffffffffULL; dd->n++; } while (0)
     AGGIUNGI(".", DT_DIR); AGGIUNGI("..", DT_DIR);
     int livello = dividi(v, vol, sizeof vol, d, sizeof d);
-    if (livello == 2) { AGGIUNGI("usb", DT_DIR); return 0; }   /* /media (finta) */
-    if (livello != 1) {   /* /media/usb: le partizioni */
+    if (livello == 2) { AGGIUNGI("usb", DT_DIR); AGGIUNGI("rete", DT_DIR); return 0; }   /* /media (finta) */
+    if (livello != 1) {   /* /media/usb: le partizioni; /media/rete: i PC */
         static char nomi[64][256];
-        int k = elenca_volumi(nomi, 64);
+        int k = elenca_volumi(vol, nomi, 64);
         for (int i = 0; i < k; i++) AGGIUNGI(nomi[i], DT_DIR);
         return 0;
     }
@@ -1092,24 +1120,35 @@ static DIR *vopendir_fd(int fd) {
     if (e) { free(dd->v); free(dd); errno = -e; return NULL; }
     return (DIR *)dd;
 }
-/* Elenchi veri con una voce in più: "media" in "/" (Termux: /media è finta) e "usb" in "/media" (container:
- * /media c'è ma vuota). Senza, navigando da "/" in Esplora file i dischi non si trovano. */
+/* Elenchi veri con voci in più: "media" in "/" (Termux: /media è finta), "usb" e "rete" in "/media" (container:
+ * /media c'è ma vuota). Senza, navigando da "/" in Esplora file dischi e PC non si trovano. */
 struct aggiunta { DIR *d; const char *nome; int dato; struct dirent e; struct dirent64 e64; };
 static struct aggiunta aggiunte[16];
 static int aggiunte_attive;   /* 1 dalla prima voce in più: prima readdir va dritto, senza lucchetto */
-static void aggiungi_voce(DIR *d, int quale) {   /* quale: 1 = "/", 2 = "/media" */
-    if (!d) return;
-    const char *nome = NULL;
-    if (quale == 1 && media_finto("/media")) nome = "media";
-    else if (quale == 2 && !media_finto("/media") && syscall(SYS_faccessat, AT_FDCWD, RADICE, F_OK, 0) != 0) nome = "usb";
-    if (!nome) return;
+static void aggiungi_nome(DIR *d, const char *nome) {
     pthread_mutex_lock(&gl);
     for (int i = 0; i < 16; i++) if (!aggiunte[i].d) { aggiunte[i].d = d; aggiunte[i].nome = nome; aggiunte[i].dato = 0; aggiunte_attive = 1; break; }
     pthread_mutex_unlock(&gl);
 }
-static struct aggiunta *aggiunta_di(DIR *d) {
-    for (int i = 0; i < 16; i++) if (aggiunte[i].d == d) return &aggiunte[i];
-    return NULL;
+static void aggiungi_voce(DIR *d, int quale) {   /* quale: 1 = "/", 2 = "/media" */
+    if (!d) return;
+    if (quale == 1 && media_finto("/media")) aggiungi_nome(d, "media");
+    if (quale == 2 && !media_finto("/media")) {
+        if (syscall(SYS_faccessat, AT_FDCWD, RADICE, F_OK, 0) != 0) aggiungi_nome(d, "usb");
+        if (syscall(SYS_faccessat, AT_FDCWD, RETE, F_OK, 0) != 0) aggiungi_nome(d, "rete");
+    }
+}
+/* con gl preso: VISTO (una voce dell'elenco vero) segna le voci in più con quel nome come già date; senza VISTO
+ * (elenco vero finito) la prossima da dare */
+static struct aggiunta *da_dare(DIR *d, const char *visto) {
+    struct aggiunta *libera = NULL;
+    for (int i = 0; i < 16; i++) {
+        struct aggiunta *a = &aggiunte[i];
+        if (a->d != d) continue;
+        if (visto && !strcmp(visto, a->nome)) a->dato = 1;
+        if (!visto && !a->dato && !libera) libera = a;
+    }
+    return libera;
 }
 static int quale_reale(const char *p) {
     char t[PATH_MAX], n[PATH_MAX];
@@ -1142,12 +1181,11 @@ DIR *fdopendir(int fd) {
     if (d && fd >= 0 && fd < 4096 && reali[fd]) aggiungi_voce(d, reali[fd]);
     return d;
 }
-/* la voce in più, a elenco vero finito (se l'elenco vero non l'aveva già) */
+/* le voci in più, a elenco vero finito (se l'elenco vero non le aveva già) */
 static struct dirent *voce_in_piu(DIR *d, struct dirent *e) {
     pthread_mutex_lock(&gl);
-    struct aggiunta *a = aggiunta_di(d);
-    if (a && e && !strcmp(e->d_name, a->nome)) a->dato = 1;
-    if (a && !e && !a->dato) {
+    struct aggiunta *a = da_dare(d, e ? e->d_name : NULL);
+    if (a && !e) {
         a->dato = 1;
         memset(&a->e, 0, sizeof a->e);
         a->e.d_ino = 0x6d65646961; a->e.d_type = DT_DIR; a->e.d_reclen = sizeof a->e;
@@ -1174,9 +1212,8 @@ struct dirent64 *readdir64(DIR *d) {
         struct dirent64 *e = vera_readdir64(d);
         if (!aggiunte_attive) return e;
         pthread_mutex_lock(&gl);
-        struct aggiunta *a = aggiunta_di(d);
-        if (a && e && !strcmp(e->d_name, a->nome)) a->dato = 1;
-        if (a && !e && !a->dato) {
+        struct aggiunta *a = da_dare(d, e ? e->d_name : NULL);
+        if (a && !e) {
             a->dato = 1;
             memset(&a->e64, 0, sizeof a->e64);
             a->e64.d_ino = 0x6d65646961; a->e64.d_type = DT_DIR; a->e64.d_reclen = sizeof a->e64;
@@ -1207,7 +1244,7 @@ int readdir_r(DIR *d, struct dirent *e, struct dirent **r) {
 int closedir(DIR *d) {
     struct vdir *v = mio_dir(d);
     if (!v) {
-        if (aggiunte_attive) { pthread_mutex_lock(&gl); struct aggiunta *a = aggiunta_di(d); if (a) a->d = NULL; pthread_mutex_unlock(&gl); }
+        if (aggiunte_attive) { pthread_mutex_lock(&gl); for (int i = 0; i < 16; i++) if (aggiunte[i].d == d) aggiunte[i].d = NULL; pthread_mutex_unlock(&gl); }
         VERA(int, closedir, DIR *); return vera_closedir(d);
     }
     int fd = v->fd; v->magia = 0; free(v->v); free(v);
@@ -1216,7 +1253,7 @@ int closedir(DIR *d) {
 int dirfd(DIR *d) { struct vdir *v = mio_dir(d); if (v) return v->fd; VERA(int, dirfd, DIR *); return vera_dirfd(d); }
 void rewinddir(DIR *d) {
     struct vdir *v = mio_dir(d); if (v) { v->i = 0; return; }
-    if (aggiunte_attive) { pthread_mutex_lock(&gl); struct aggiunta *a = aggiunta_di(d); if (a) a->dato = 0; pthread_mutex_unlock(&gl); }
+    if (aggiunte_attive) { pthread_mutex_lock(&gl); for (int i = 0; i < 16; i++) if (aggiunte[i].d == d) aggiunte[i].dato = 0; pthread_mutex_unlock(&gl); }
     VERA(void, rewinddir, DIR *); vera_rewinddir(d);
 }
 long telldir(DIR *d) { struct vdir *v = mio_dir(d); if (v) return v->i; VERA(long, telldir, DIR *); return vera_telldir(d); }
@@ -1666,11 +1703,11 @@ static int istantanea(const char *v, struct elem **out, int *file, struct attr *
     #define METTI(N, D, S, M) do { if (n == cap) { cap *= 2; el = realloc(el, cap * sizeof *el); } \
         snprintf(el[n].nome, 256, "%s", N); el[n].dir = D; el[n].size = S; el[n].mt = M; n++; } while (0)
     int livello = dividi(v, vol, sizeof vol, d, sizeof d);
-    if (livello == 2) METTI("usb", 1, 0, 0);
+    if (livello == 2) { METTI("rete", 1, 0, 0); METTI("usb", 1, 0, 0); }   /* già in ordine di nome */
     else if (livello != 1) {
         static char nomi[64][256]; static pthread_mutex_t mn = PTHREAD_MUTEX_INITIALIZER;
         pthread_mutex_lock(&mn);
-        int k = elenca_volumi(nomi, 64);
+        int k = elenca_volumi(vol, nomi, 64);
         for (int i = 0; i < k; i++) METTI(nomi[i], 1, 0, 0);
         pthread_mutex_unlock(&mn);
     } else {

@@ -29,10 +29,13 @@ import os
 import re
 import signal
 import socket
-import struct
 import subprocess
 import sys
 import time
+
+# la ricerca in rete (Bonjour) è in comune con share/rete/tod-rete.py
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scoperta import A, MDNS, PTR, SRV, TXT, analizza, chiedi_bonjour, domanda, leggi_nome, nome_dns  # noqa: E402,F401
 
 PREFIX = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
 TMP = os.environ.get("TMPDIR", os.path.join(PREFIX, "tmp"))
@@ -311,76 +314,7 @@ def crea_coda(nome, uri, descr, luogo, modello="everywhere"):
 
 # --- Wi-Fi: Bonjour (mDNS) --------------------------------------------------------------------------------------
 
-MDNS = ("224.0.0.251", 5353)
 TIPI = ("_ipp._tcp.local", "_ipps._tcp.local")
-PTR, TXT, SRV, A = 12, 16, 33, 1
-
-
-def nome_dns(n):
-    return b"".join(bytes([len(p)]) + p.encode() for p in n.rstrip(".").split(".")) + b"\0"
-
-
-def domanda(richieste):
-    """Una domanda mDNS: [(nome, tipo)], tutte con il bit QU (risposta diretta a chi chiede)."""
-    q = struct.pack(">HHHHHH", 0, 0, len(richieste), 0, 0, 0)
-    for nome, tipo in richieste:
-        q += nome_dns(nome) + struct.pack(">HH", tipo, 0x8001)
-    return q
-
-
-def leggi_nome(d, i, salti=0):
-    parti = []
-    while i < len(d):
-        n = d[i]
-        if n == 0:
-            return ".".join(parti), i + 1
-        if n & 0xC0 == 0xC0:   # puntatore: il resto del nome è altrove nel messaggio
-            if salti > 20 or i + 1 >= len(d):
-                break
-            resto, _ = leggi_nome(d, ((n & 0x3F) << 8) | d[i + 1], salti + 1)
-            return ".".join(parti + ([resto] if resto else [])), i + 2
-        parti.append(d[i + 1:i + 1 + n].decode("utf-8", "replace"))
-        i += 1 + n
-    raise ValueError("nome DNS troncato")
-
-
-def analizza(d):
-    """I record di una risposta DNS: [(nome, tipo, dati)]. PTR → nome; SRV → (porta, destinazione);
-    TXT → {chiave: valore}; A → indirizzo. Gli altri tipi si saltano."""
-    if len(d) < 12:
-        return []
-    _, flag, nq, na, nn, nr = struct.unpack(">HHHHHH", d[:12])
-    if not flag & 0x8000:   # una domanda (anche la nostra, rimandata dal multicast), non una risposta
-        return []
-    i = 12
-    for _ in range(nq):
-        _, i = leggi_nome(d, i)
-        i += 4
-    out = []
-    for _ in range(na + nn + nr):
-        nome, i = leggi_nome(d, i)
-        if i + 10 > len(d):
-            break
-        tipo, _, _, lung = struct.unpack(">HHIH", d[i:i + 10])
-        i += 10
-        dati = d[i:i + lung]
-        if tipo == PTR:
-            out.append((nome, PTR, leggi_nome(d, i)[0]))
-        elif tipo == SRV and lung >= 7:
-            out.append((nome, SRV, (struct.unpack(">H", dati[4:6])[0], leggi_nome(d, i + 6)[0])))
-        elif tipo == TXT:
-            kv, j = {}, 0
-            while j < len(dati):
-                s = dati[j + 1:j + 1 + dati[j]].decode("utf-8", "replace")
-                j += 1 + dati[j]
-                if "=" in s:
-                    k, v = s.split("=", 1)
-                    kv[k.lower()] = v
-            out.append((nome, TXT, kv))
-        elif tipo == A and lung == 4:
-            out.append((nome, A, socket.inet_ntoa(dati)))
-        i += lung
-    return out
 
 
 def stampanti_da(record, sorgenti):
@@ -423,49 +357,9 @@ def stampanti_da(record, sorgenti):
 
 def cerca(attesa=2.0):
     """Le stampanti IPP in rete (Bonjour). [] senza rete locale (dati mobili): nessuno risponde."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
-    record, sorgenti = [], {}
-
-    def raccogli(secondi):
-        fine = time.time() + secondi
-        while True:
-            resta = fine - time.time()
-            if resta <= 0:
-                return
-            s.settimeout(resta)
-            try:
-                d, (ip, _) = s.recvfrom(9000)
-            except OSError:
-                return
-            try:
-                rr = analizza(d)
-            except (ValueError, IndexError, struct.error):
-                continue
-            record.extend(rr)
-            for nome, tipo, dati in rr:
-                if tipo in (SRV, TXT):
-                    sorgenti.setdefault(nome.lower(), ip)
-
-    try:
-        s.bind(("", 0))
-        for _ in range(2):
-            s.sendto(domanda([(t, PTR) for t in TIPI]), MDNS)
-            raccogli(attesa / 2)
-        # chi ha risposto solo con il nome: si chiedono indirizzo e dettagli
-        nomi = {d for n, t, d in record if t == PTR and n.lower() in TIPI}
-        con_srv = {n.lower() for n, t, _ in record if t == SRV}
-        manca = [(n, SRV) for n in nomi if n.lower() not in con_srv] + [(n, TXT) for n in nomi if n.lower() not in con_srv]
-        dest = {d[1] for n, t, d in record if t == SRV}
-        con_a = {n.lower() for n, t, _ in record if t == A}
-        manca += [(d, A) for d in dest if d.lower() not in con_a]
-        if manca:
-            s.sendto(domanda(manca[:30]), MDNS)
-            raccogli(attesa / 2)
-    except OSError as e:
-        log(f"ricerca in rete: {e}")
-    finally:
-        s.close()
+    record, sorgenti, errore = chiedi_bonjour(TIPI, attesa)
+    if errore:
+        log(f"ricerca in rete: {errore}")
     return stampanti_da(record, sorgenti)
 
 

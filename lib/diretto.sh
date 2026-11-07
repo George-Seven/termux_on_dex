@@ -183,7 +183,7 @@ diretto_run() { # diretto_run comando [argomenti] → esce come l'app; 97 = senz
   # /media/usb resta fuori da fakechroot: lo traduce tod-fs
   if [[ -f $TMPDIR/tod-usb/lkl-attivo && -f $(usb_data)/tod-fs-glibc.so ]]; then
     pre+=" $(usb_data)/tod-fs-glibc.so"
-    fuori+=:/media/usb
+    fuori+=:/media/usb:/media/rete
   fi
   local -a amb=(
     GLIBC_TUNABLES=glibc.pthread.rseq=0
