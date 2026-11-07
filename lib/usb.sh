@@ -16,8 +16,8 @@
 # nmap (ncat: comandi a tod-lkl), util-linux (flock: un solo servizio), libusb (tod-lkl), termux-api (termux-usb),
 # e gli strumenti dei dischi di ogni distribuzione (fdisk, mkfs, fsck: Dischi e il terminale)
 USB_PKGS="nmap util-linux libusb termux-api fdisk dosfstools exfatprogs e2fsprogs"
-LKL_VERSIONE=2
-LKL_SHA256=a4b0706dc7fc995933ab22a8befd795bf8a624fb1dc416543a2e4b47427e89f6
+LKL_VERSIONE=3
+LKL_SHA256=e8477f6b1368893453b3a5f8cb92d54ee9578c1e59aaaa3a4a5dafff709572ab
 # TOD_LKL_URL: un'altra fonte per le prove prima di pubblicare (l'impronta vale lo stesso)
 LKL_URL=${TOD_LKL_URL:-"https://github.com/PietroCav501/termux_on_dex/releases/download/lkl-$LKL_VERSIONE/tod-lkl-aarch64.tar.xz"}
 LKL_FILE="liblkl.so tod-lkl tod-disco.so tod-fs.so tod-disco-glibc.so tod-fs-glibc.so"
