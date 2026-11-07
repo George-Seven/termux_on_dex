@@ -32,7 +32,7 @@ NAMES = {"light": "DeX-OS", "dark": "DeX-OS-Dark"}
 FLUENT_HUE = 214.0          # il blu di Fluent (#1A73E8, #3281EA, #1567d3...)
 FLUENT_SL = (0.818, 0.506)  # saturazione e luminosità di #1A73E8
 DEFAULT_ACCENT = "#0067c0"
-VERSION = 11   # nel nome dei temi: cambiando il disegno si rifanno da soli
+VERSION = 12   # nel nome dei temi: cambiando il disegno si rifanno da soli
 
 
 # --- colori ---------------------------------------------------------------------------------
@@ -397,6 +397,9 @@ menu separator, .menu separator, .context-menu separator {
   margin: 5px 10px; min-height: 1px; background-color: {linea};
 }
 menu menuitem check:checked, menu menuitem radio:checked { color: {accento}; }
+/* sulla voce nell'accento la casella spuntata è bianca (vince sul colore "al passaggio" di Fluent) */
+menu menuitem:hover > check:checked, menu menuitem:hover > check:indeterminate,
+menu menuitem:hover > radio:checked, menu menuitem:hover > radio:indeterminate { color: #ffffff; }
 popover, popover.background {
   background-color: {fondo}; border: 1px solid {bordo}; border-radius: 14px;
   box-shadow: 0 10px 28px {ombra};
@@ -409,10 +412,10 @@ tooltip, tooltip.background, tooltip.background.csd {
 tooltip.csd decoration { border-radius: 8px; box-shadow: 0 4px 14px {ombra}, 0 0 0 1px {bordo}; }
 tooltip label { color: {testo}; font-family: Inter, sans-serif; font-size: 9pt; }
 tooltip > box { padding: 5px 9px; }
-/* caselle, scelte, interruttori e cursori: sempre nel colore di sistema */
-check:checked, radio:checked, check:indeterminate, radio:indeterminate {
-  background-color: {accento}; border-color: {accento}; color: #ffffff;
-}
+/* caselle, scelte, interruttori e cursori: sempre nel colore di sistema. In Fluent la casella spuntata è
+   un'icona (quadrato pieno col segno ritagliato) nel colore del testo, sopra un quadratino bianco che si
+   vede dal ritaglio: l'accento va nel colore, mai il bianco (la spunta sparisce) né un fondo */
+check:checked, radio:checked, check:indeterminate, radio:indeterminate { color: {accento}; }
 switch:checked { background-color: {accento}; border-color: {accento}; }
 scale highlight, scale trough highlight, progressbar progress, levelbar block.filled { background-color: {accento}; }
 """

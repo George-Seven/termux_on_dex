@@ -2329,7 +2329,7 @@ EOF
 import importlib.util as u
 s = u.spec_from_file_location('dx', '$ROOT/share/dexos/dexos-theme.py'); m = u.module_from_spec(s); s.loader.exec_module(m)
 print(' '.join(m.names('#8A5CF5', 1.125).values()), '|', ' '.join(m.names('#0067c0', 1.0).values()))")
-  eq "nomi" "DeX-OS-8a5cf5-v11 DeX-OS-Dark-8a5cf5-v11 DeX-OS-WM-1.125-v11 DeX-OS-WM-Dark-1.125-v11 | DeX-OS-0067c0-v11 DeX-OS-Dark-0067c0-v11 DeX-OS-WM-1-v11 DeX-OS-WM-Dark-1-v11" "$nm"
+  eq "nomi" "DeX-OS-8a5cf5-v12 DeX-OS-Dark-8a5cf5-v12 DeX-OS-WM-1.125-v12 DeX-OS-WM-Dark-1.125-v12 | DeX-OS-0067c0-v12 DeX-OS-Dark-0067c0-v12 DeX-OS-WM-1-v12 DeX-OS-WM-Dark-1-v12" "$nm"
   # menu, popup e suggerimenti nello stile di DeX OS: fondi pieni (niente vetro), voce attiva nell'accento
   local menu
   menu=$(python3 -c "
@@ -2338,6 +2338,12 @@ s = u.spec_from_file_location('dx', '$ROOT/share/dexos/dexos-theme.py'); m = u.m
 print(m.vetro_css('light', '#8a5cf5'))")
   has "voce del menu nell'accento" "background-color: #8a5cf5; color: #ffffff;" "$menu"
   eq "menu con fondo pieno" 0 "$(grep -A3 '^menu, .menu, .context-menu {' <<<"$menu" | grep -c 'rgba(2')"
+  # casella spuntata vuota (7 novembre): la spunta di Fluent è un ritaglio nell'icona colorata con color, sopra un
+  # quadratino bianco; con color bianco (e un fondo nell'accento) restava un quadrato bianco col bordo blu
+  has "casella spuntata nell'accento" "check:checked, radio:checked, check:indeterminate, radio:indeterminate { color: #8a5cf5; }" "$menu"
+  eq "mai bianca né con un fondo" 0 "$(sed -n '/^check:checked/,/}/{p;/}/q}' <<<"$menu" | grep -c 'background\|#ffffff')"
+  has "nel menu, sulla voce nell'accento, bianca anche spuntata" \
+    "menu menuitem:hover > radio:checked, menu menuitem:hover > radio:indeterminate { color: #ffffff; }" "$menu"
   eq "niente più passaggio da Adwaita/Default (il lampo di XFCE puro)" 0 "$(declare -f look_theme_reload | grep -c 'Adwaita\|Default')"
   conf_set TEMA chiaro
   DISPLAY= look_accent_cli viola
