@@ -2176,6 +2176,13 @@ test_rete_segnalibro() { # "Rete" nella barra di Esplora file solo con tod-smb e
   printf 'x/media/rete\0y' >"$d/tod-fs.so"
   files_bookmarks
   has "Rete nella barra" "file:///media/rete Rete" "$(cat "$(files_termux_home)/.config/gtk-3.0/bookmarks")"
+  # "Esplora la rete" di Thunar (vuota qui) si nasconde, senza toccare le altre voci nascoste
+  local x="$WORK/sgn_xfconf"
+  mkdir -p "$x"
+  printf '#!/bin/sh\nif [ "$5" = "" ]; then printf "Value is an array with 1 items:\\n\\ncomputer:///\\n"; else echo "$*" >>"%s/set"; fi\n' "$x" >"$x/xfconf-query"
+  chmod +x "$x/xfconf-query"
+  PATH="$x:$PATH" rete_nascondi_di_serie
+  eq "network:/// aggiunta" "-c thunar -p /hidden-bookmarks -n -a -t string -s computer:/// -t string -s network:///" "$(cat "$x/set")"
 }
 
 test_usb_non_dischi() { # un errore nel chiedere al dispositivo non deve farlo ignorare per sempre

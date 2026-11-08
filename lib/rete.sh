@@ -51,10 +51,26 @@ rete_install() { # tod rete prepara (e l'installazione): Samba, tod-smb
   rete_compila
 }
 
+rete_nascondi_di_serie() { # "Esplora la rete" di Esplora file (network:///, di gvfs) qui non trova niente: c'è la nostra
+  # "Rete". 8 novembre: Pietro ha aperto quella e l'ha trovata vuota. Thunar tiene le voci nascoste in /hidden-bookmarks
+  # (la regola di files_session vale una volta sola, e l'elenco poi cambia): si aggiunge, senza togliere le altre
+  have xfconf-query || return 0
+  local v x
+  local -a voci=()
+  v=$(xfconf-query -c thunar -p /hidden-bookmarks 2>/dev/null | sed '1,/^$/d')
+  if grep -qxF 'network:///' <<<"$v"; then return 0; fi
+  while IFS= read -r x; do
+    if [[ -n $x ]]; then voci+=(-t string -s "$x"); fi
+  done <<<"$v"
+  voci+=(-t string -s network:///)
+  xfconf-query -c thunar -p /hidden-bookmarks -n -a "${voci[@]}" 2>/dev/null || true
+}
+
 rete_start() { # dall'hook di sessione: il servizio della rete
   rete_on || return 0
   rete_compila || true   # un tod-smb.c nuovo (aggiornamento): si ricompila
   rete_pronta || return 0
+  rete_nascondi_di_serie
   (setsid python3 "$TOD_ROOT/share/rete/tod-rete.py" sorveglia </dev/null >>"$TOD_STATE_DIR/rete.log" 2>&1 &)
 }
 
