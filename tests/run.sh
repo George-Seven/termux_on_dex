@@ -2154,6 +2154,53 @@ EOF
   eq "una finestra sola per PC, poi di nuovo" "['NO', 'NO', 'NO', 'NO', 'NO', 'NO'] ['fritz-box', 'PC-PIETRO', 'fritz-box']" "$out"
 }
 
+test_rete_ricordati() { # 8 novembre: DESKTOP-I78AUDA risponde alla ricerca 3 volte su 4, e dopo l'avvio compariva dopo un
+  # minuto. I PC con la password salvata si provano subito al loro ultimo indirizzo (se lì risponde ancora lo stesso PC);
+  # l'indirizzo si ricorda con la password e segue il PC
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(TMPDIR="$WORK/rete_tmp_ric" TOD_TERMUX_HOME="$WORK/rete_home_ric" TOD_SMB_BIN=/nessuno \
+    _stampa_py "$ROOT/share/rete/tod-rete.py" <<'EOF'
+import os
+os.makedirs(m.RUN, exist_ok=True)
+m.log = lambda *a: None
+m.password_di = lambda pc, u: None
+m.ricorda_password = lambda pc, u, p: True
+m.scoperta.chiedi_bonjour = lambda tipi, attesa: ([], {}, None)
+m.scoperta.chiedi_wsd = lambda attesa: {}
+aperte = {"192.168.178.43", "192.168.178.50", "192.168.178.60", "192.168.178.61"}
+m.porta_aperta = lambda ip, porta, attesa=1.0: ip in aperte
+nb = {"192.168.178.43": "DESKTOP-I78AUDA", "192.168.178.50": "ALTRO-PC", "192.168.178.61": "PC-DI-PIETRO-ST"}
+m.scoperta.nome_netbios = lambda ip, attesa=1.0: nb.get(ip, "")
+def c(ip):
+    return {"utente": "Pietro", "dominio": "", "indirizzo": ip, "porta": 445}
+m.salva_conf({"pc": [{"nome": "MANUALE", "indirizzo": "192.168.178.90", "porta": 445}],
+              "credenziali": {"DESKTOP-I78AUDA": c("192.168.178.43"), "PC-VECCHIO": c("192.168.178.50"),
+                              "NAS": c("192.168.178.60"), "PC-DI-PIETRO-STUDIO": c("192.168.178.61"),
+                              "SPENTO": c("192.168.178.70"), "MANUALE": c("192.168.178.90"),
+                              "SENZA": {"utente": "x", "dominio": ""}}})
+r = m.pc_ricordati(m.carica_conf())
+print(sorted(r))
+print([(p["nome"], p["ip"], p["da"]) for p in m.cerca_pc(ricordati=r)])
+m.scoperta.chiedi_wsd = lambda attesa: {"192.168.178.43": "pub:Computer"}
+print([(p["nome"], p["da"]) for p in m.cerca_pc(ricordati=r)][:1])
+s = m.Servizio()
+s.aggiorna([{"nome": "DESKTOP-I78AUDA", "ip": "192.168.178.44", "porta": 445, "da": "wsd"},
+            {"nome": "PC-NUOVO", "ip": "192.168.178.80", "porta": 445, "da": "wsd"}])
+print(m.carica_conf()["credenziali"]["DESKTOP-I78AUDA"]["indirizzo"], "PC-NUOVO" in m.carica_conf()["credenziali"])
+chiedi = lambda nome, u, d, e: {"utente": "pietro", "password": "x", "dominio": "", "ricorda": True}
+s.risposta("AUTH\tPC-NUOVO\t192.168.178.80\tIPC$\tospite\n", chiedi)
+print(m.carica_conf()["credenziali"]["PC-NUOVO"])
+s.chiudi()
+EOF
+)
+  eq "ricordati: subito, solo se è lo stesso PC; l'indirizzo segue" "['DESKTOP-I78AUDA', 'NAS', 'PC-DI-PIETRO-STUDIO', 'PC-VECCHIO', 'SPENTO']
+[('DESKTOP-I78AUDA', '192.168.178.43', 'ricordato'), ('NAS', '192.168.178.60', 'ricordato'), ('PC-DI-PIETRO-STUDIO', '192.168.178.61', 'ricordato')]
+[('DESKTOP-I78AUDA', 'wsd')]
+192.168.178.44 False
+{'utente': 'pietro', 'dominio': '', 'indirizzo': '192.168.178.80', 'porta': 445}" "$out"
+}
+
 test_rete_elenco_pc() { # i PC trovati e quelli aggiunti a mano: elenco per tod-fs, un tod-smb per PC, i PC spariti via
   command -v python3 >/dev/null || return 0
   local smb="$WORK/rete_smb_finto" out

@@ -76,8 +76,11 @@ def carica_conf():
     except (OSError, ValueError):
         c = {}
     c.setdefault("pc", [])            # [{"nome", "indirizzo"}]
-    c.setdefault("credenziali", {})   # nome → {"utente", "dominio"}
+    c.setdefault("credenziali", {})   # nome → {"utente", "dominio", "indirizzo", "porta"} (l'ultimo indirizzo visto)
     return c
+
+
+CONF_M = threading.Lock()   # le scritture del servizio (fili diversi): carica, cambia e salva insieme
 
 
 def salva_conf(c):
@@ -119,6 +122,25 @@ def ricorda_password(pc, utente, password):
                                         T(f"Cartelle condivise di {pc}", f"Shared folders on {pc}"), password, None)
     except Exception:
         return False
+
+
+def pc_ricordati(conf):
+    """I PC con la password salvata e il loro ultimo indirizzo, {nome: (ip, porta)}: la ricerca li prova subito. 8 novembre:
+    DESKTOP-I78AUDA di Pietro risponde alla ricerca 3 volte su 4, e dopo l'avvio compariva solo dopo un minuto."""
+    manuali = {nome_cartella(m["nome"]) for m in conf["pc"]}   # (quelli aggiunti a mano ci sono sempre)
+    return {n: (c["indirizzo"], int(c.get("porta", 445))) for n, c in conf["credenziali"].items()
+            if c.get("indirizzo") and n not in manuali}
+
+
+def ricorda_indirizzo(nome, ip, porta):
+    """L'ultimo indirizzo di un PC con la password salvata (il router può dargliene un altro)."""
+    with CONF_M:
+        conf = carica_conf()
+        c = conf["credenziali"].get(nome)
+        if c is None or (c.get("indirizzo"), int(c.get("porta", 445))) == (ip, porta):
+            return
+        c["indirizzo"], c["porta"] = ip, porta
+        salva_conf(conf)
 
 
 def dimentica_password(pc, utente):
@@ -189,15 +211,29 @@ def porta_aperta(ip, porta, attesa=1.0):
         return False
 
 
-def cerca_pc(attesa=2.0):
-    """I PC e i NAS in rete con le cartelle condivise (porta SMB aperta): [{"nome", "ip", "porta", "da"}]."""
+def stesso_pc(nome, netbios):
+    """Il nome NetBIOS (al più 15 lettere) è di questo PC? Vuoto o solo l'indirizzo: non si sa, si tiene."""
+    if not netbios or solo_indirizzo(netbios):
+        return True
+    base, nb = nome.split(" (")[0].lower(), netbios.lower()
+    return base == nb or (len(nb) == 15 and base.startswith(nb))
+
+
+def cerca_pc(attesa=2.0, ricordati=None):
+    """I PC e i NAS in rete con le cartelle condivise (porta SMB aperta): [{"nome", "ip", "porta", "da"}]. RICORDATI
+    (pc_ricordati) si provano anche al loro ultimo indirizzo, se la ricerca non li ha trovati."""
     record, sorgenti, _ = scoperta.chiedi_bonjour(["_smb._tcp.local"], attesa)
     trovati = candidati(record, sorgenti, scoperta.chiedi_wsd(attesa))
+    for nome, (ip, porta) in (ricordati or {}).items():
+        if ip not in trovati:
+            trovati[ip] = {"nomi": [nome], "porta": porta, "da": "ricordato"}
     out, m = [], threading.Lock()
 
     def uno(ip, c):
         if not porta_aperta(ip, c["porta"]):
             return
+        if c["da"] == "ricordato" and not stesso_pc(c["nomi"][0], scoperta.nome_netbios(ip)):
+            return   # a quell'indirizzo ora c'è un altro PC
         nomi = list(c["nomi"])
         if not any(not solo_indirizzo(n) for n in nomi):   # il nome dei Windows, poi quello del router (DNS)
             nomi += [scoperta.nome_netbios(ip), nome_da_dns(ip)]
@@ -296,6 +332,9 @@ class Servizio:
                 if nome not in self.proc or self.proc[nome].poll() is not None:
                     self.avvia_smb(nome, q)
             self.scrivi_volumi()
+        for p in trovati:
+            if p["nome"] in conf["credenziali"]:
+                ricorda_indirizzo(p["nome"], p["ip"], p["porta"])
 
     def giro_ricerca(self):
         ultima = 0.0
@@ -307,7 +346,7 @@ class Servizio:
             if time.time() - ultima >= OGNI:
                 ultima = time.time()
                 try:
-                    self.aggiorna(tutti_i_nomi(cerca_pc()))
+                    self.aggiorna(tutti_i_nomi(cerca_pc(ricordati=pc_ricordati(carica_conf()))))
                 except Exception as e:
                     log(f"ricerca: {type(e).__name__}: {e}")
             elif mt != self.conf_mtime:   # un PC aggiunto o tolto (tod rete aggiungi, Impostazioni)
@@ -364,9 +403,13 @@ class Servizio:
             self.rifiutate.discard(nome)
             self.memoria[nome] = nuove
             if nuove.pop("ricorda", False):
-                conf = carica_conf()
-                conf["credenziali"][nome] = {"utente": nuove["utente"], "dominio": nuove.get("dominio", "")}
-                salva_conf(conf)
+                q = self.pc.get(nome, {})
+                with CONF_M:
+                    conf = carica_conf()
+                    c = conf["credenziali"][nome] = {"utente": nuove["utente"], "dominio": nuove.get("dominio", "")}
+                    if q.get("ip"):
+                        c.update(indirizzo=q["ip"], porta=q.get("porta", 445))
+                    salva_conf(conf)
                 ricorda_password(nome, nuove["utente"], nuove["password"])
             return self.ok(nuove)
 
@@ -578,7 +621,7 @@ def principale(argv):
             print(f"  {p['nome']} ({p['ip']}){' *' if p['password'] else ''}")
         return 0
     if cmd == "cerca":
-        trovati = tutti_i_nomi(cerca_pc())
+        trovati = tutti_i_nomi(cerca_pc(ricordati=pc_ricordati(carica_conf())))
         if js:
             print(json.dumps(trovati, ensure_ascii=False))
         else:
