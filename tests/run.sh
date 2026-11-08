@@ -2161,28 +2161,28 @@ EOF
   eq "elenco e tod-smb" $'NAS di casa\t192.168.1.9\nPC-PIETRO\t192.168.1.23\nPC-PIETRO (192.168.1.24)\t192.168.1.24\n'"['', '$r nas-di-casa 192.168.1.9:4450 NAS di casa', '$r pc-pietro 192.168.1.23 PC-PIETRO', '$r pc-pietro--192.168.1.24- 192.168.1.24 PC-PIETRO (192.168.1.24)']"$'\nNAS di casa\t192.168.1.9\nPC-PIETRO (192.168.1.24)\t192.168.1.24\n'"['NAS di casa', 'PC-PIETRO (192.168.1.24)']"$'\n'"'PC-PIETRO (192.168.1.24)\\t192.168.1.24\\n' []" "$out"
 }
 
-test_rete_segnalibro() { # "Rete" nella barra di Esplora file solo con tod-smb e un tod-fs.so che conosce /media/rete
-  local d
+test_rete_esplora() { # 8 novembre, Pietro: "su Esplora rete non c'è niente, hai messo tutto su media/rete". La Rete è la voce
+  # "Esplora la rete" di Esplora file (tod-gettext.c la porta su /media/rete), visibile; niente voce "Rete" doppia
+  has "Esplora la rete apre /media/rete" 'per_percorso("/media/rete")' "$(sed -n '/^void \*g_file_new_for_uri(/,/^}/p' "$ROOT/share/tod-gettext.c")"
+  local d f
   d=$(usb_data)
   mkdir -p "$d" "${TOD_TERMUX_HOME:-$HOME}/.local/share/tod-rete"
+  printf '#!/bin/sh\n' >"$(rete_bin)"; chmod +x "$(rete_bin)"
+  printf 'x/media/rete\0y' >"$d/tod-fs.so"
   files_user_home() { echo "$HOME/utente"; }
   files_user_folders() { :; }
   files_sdcards() { :; }
+  f="$(files_termux_home)/.config/gtk-3.0/bookmarks"
+  mkdir -p "${f%/*}"
+  printf 'file:///media/rete Rete\nfile:///altro Altro\n' >"$f"
   files_bookmarks
-  if grep -q "media/rete" "$(files_termux_home)/.config/gtk-3.0/bookmarks" 2>/dev/null; then
-    echo "  ✗ Rete senza tod-smb" >&2; return 1
-  fi
-  printf '#!/bin/sh\n' >"$(rete_bin)"; chmod +x "$(rete_bin)"
-  printf 'x/media/rete\0y' >"$d/tod-fs.so"
-  files_bookmarks
-  has "Rete nella barra" "file:///media/rete Rete" "$(cat "$(files_termux_home)/.config/gtk-3.0/bookmarks")"
-  # "Esplora la rete" di Thunar (vuota qui) si nasconde, senza toccare le altre voci nascoste
+  eq "la vecchia voce Rete via, le altre restano" "file:///altro Altro" "$(cat "$f")"
   local x="$WORK/sgn_xfconf"
   mkdir -p "$x"
-  printf '#!/bin/sh\nif [ "$5" = "" ]; then printf "Value is an array with 1 items:\\n\\ncomputer:///\\n"; else echo "$*" >>"%s/set"; fi\n' "$x" >"$x/xfconf-query"
+  printf '#!/bin/sh\nif [ "$5" = "" ]; then printf "Value is an array with 2 items:\\n\\ncomputer:///\\nnetwork:///\\n"; else echo "$*" >>"%s/set"; fi\n' "$x" >"$x/xfconf-query"
   chmod +x "$x/xfconf-query"
-  PATH="$x:$PATH" rete_nascondi_di_serie
-  eq "network:/// aggiunta" "-c thunar -p /hidden-bookmarks -n -a -t string -s computer:/// -t string -s network:///" "$(cat "$x/set")"
+  PATH="$x:$PATH" rete_mostra_esplora
+  eq "network:/// non più nascosta, computer:/// sì" "-c thunar -p /hidden-bookmarks -n -a -t string -s computer:///" "$(cat "$x/set")"
 }
 
 test_usb_non_dischi() { # un errore nel chiedere al dispositivo non deve farlo ignorare per sempre

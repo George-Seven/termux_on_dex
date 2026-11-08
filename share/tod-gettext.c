@@ -1620,6 +1620,21 @@ static int tod_telefono_cartella(void *enumeratore) {   /* i figli di una cartel
     return r;
 }
 
+/* "Esplora la rete" di Esplora file (network://: il gvfs di Termux, senza Samba, la lascia vuota) apre la Rete di
+ * tod, i PC e i NAS in /media/rete (share/rete, tod-fs.so). 8 novembre, Pietro: "su Esplora rete non c'è niente".
+ * Solo se /media/rete c'è (tod-fs.so caricato): sennò resta quella di gvfs */
+void *g_file_new_for_uri(const char *uri) {
+    static void *(*real)(const char *), *(*per_percorso)(const char *);
+    if (!real) real = (void *(*)(const char *))tod_next("g_file_new_for_uri");
+    if (!real) return NULL;
+    if (uri && !strncmp(uri, "network:", 8) && (!uri[8] || !strcmp(uri + 8, "//") || !strcmp(uri + 8, "///")) &&
+        tod_file_manager() && access("/media/rete", F_OK) == 0) {
+        if (!per_percorso) per_percorso = (void *(*)(const char *))tod_next("g_file_new_for_path");
+        if (per_percorso) return per_percorso("/media/rete");
+    }
+    return real(uri);
+}
+
 void *g_file_query_info(void *file, const char *attributes, int flags, void *cancellable, void **error) {
     static void *(*real)(void *, const char *, int, void *, void **);
     if (!real) real = (void *(*)(void *, const char *, int, void *, void **))tod_next("g_file_query_info");

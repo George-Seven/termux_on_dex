@@ -97,14 +97,14 @@ files_bookmarks() { # barra laterale: le cartelle dell'utente, le schede SD, poi
     k=$((k + 1))
     ours+="file://$d $(t fm_sdcard)$( ((k > 1)) && printf ' %s' "$k")"$'\n'
   done < <(files_sdcards)
-  # la Rete: i PC e i NAS di casa (lib/rete.sh)
-  if rete_on && rete_pronta; then ours+="file:///media/rete $(t fm_rete)"$'\n'; fi
   # da togliere: i nostri (anche di versioni precedenti: Telefono, Fotocamera, Debian),
   # riconosciuti dal percorso reale
   skip=$(
     readlink -f "$FILES_PHONE" 2>/dev/null || true
     readlink -f "$FILES_PHONE/DCIM/Camera" 2>/dev/null || true
     r=$(cx_rootfs 2>/dev/null) && readlink -f "$r/home/$(cx_user)" 2>/dev/null || true
+    # la vecchia voce "Rete" (7-8 novembre): ora la Rete è "Esplora la rete" di Esplora file (tod-gettext.c)
+    printf '%s\n' /media/rete
     cut -d' ' -f1 <<<"$ours" | sed '/^$/d; s|^file://||' | while IFS= read -r d; do readlink -f "$d" 2>/dev/null || printf '%s\n' "$d"; done
   )
   mkdir -p "${f%/*}"
