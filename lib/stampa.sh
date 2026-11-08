@@ -77,11 +77,16 @@ stampa_cli() { # tod stampa [stato|prepara|cerca|aggiungi|togli|predefinita|prov
   if (($#)); then shift; fi
   case $sub in
     prepara | install) stampa_prepara ;;
-    on | si | sì) conf_set STAMPA 1; stampa_start ;;
-    off | no) conf_set STAMPA 0; stampa_stop ;;
+    on | si | sì) conf_set STAMPA 1; desktop_scanner_entry; stampa_start ;;
+    off | no) conf_set STAMPA 0; desktop_scanner_entry; stampa_stop ;;
     riavvia | restart) stampa_stop; stampa_start ;;
     stato | status | cerca | elenco | aggiungi | togli | predefinita | prova | annulla)
       LANGUAGE=$TOD_LANG python3 "$TOD_ROOT/share/stampa/tod-stampa.py" "$sub" "$@" ;;
     *) die "tod stampa stato|prepara|cerca|aggiungi INDIRIZZO|togli NOME|predefinita NOME|prova NOME|riavvia|on|off" ;;
   esac
+}
+
+scanner_cli() { # tod scanner [elenco|aggiungi INDIRIZZO|togli CHIAVE|scansiona FILE …]: senza niente la finestra
+  # (share/stampa/tod-scanner.py: eSCL, Wi-Fi e multifunzione USB; niente servizio, niente container)
+  LANGUAGE=$TOD_LANG python3 "$TOD_ROOT/share/stampa/tod-scanner.py" "$@"
 }

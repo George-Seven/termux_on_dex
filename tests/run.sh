@@ -2047,6 +2047,156 @@ test_stampa_client_conf() { # le app di Termux e del container trovano il nostro
   else echo "  ✗ filtro URF non installato nel container" >&2; return 1; fi
 }
 
+_scanner_py() { # _scanner_py: share/stampa/escl.py caricato come m (FINTO: tests/escl_finto.py); il codice da stdin
+  FINTO="$ROOT/tests/escl_finto.py" TMPDIR="$WORK/scanner_tmp" TOD_TERMUX_HOME="$WORK/scanner_home" \
+    _stampa_py "$ROOT/share/stampa/escl.py"
+}
+
+test_scanner_bonjour() { # scanner Wi-Fi (8 novembre, "stampanti e scanner"): Bonjour _uscan/_uscans, HTTP preferito a
+  # HTTPS, uno per UUID, il percorso da rs; chi non ha indirizzo resta fuori
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(_scanner_py <<'EOF'
+rec = [("_uscan._tcp.local", 12, "HP OfficeJet [AB12]._uscan._tcp.local"),
+       ("HP OfficeJet [AB12]._uscan._tcp.local", 33, (80, "hp.local")),
+       ("HP OfficeJet [AB12]._uscan._tcp.local", 16, {"rs": "eSCL", "ty": "HP OfficeJet Pro 9010", "uuid": "ABC-1"}),
+       ("_uscans._tcp.local", 12, "HP OfficeJet [AB12]._uscans._tcp.local"),
+       ("HP OfficeJet [AB12]._uscans._tcp.local", 33, (443, "hp.local")),
+       ("HP OfficeJet [AB12]._uscans._tcp.local", 16, {"rs": "/eSCL/", "ty": "HP OfficeJet Pro 9010", "uuid": "abc-1"}),
+       ("hp.local", 1, "192.168.1.50"),
+       ("_uscans._tcp.local", 12, "Canon TS5300._uscans._tcp.local"),
+       ("Canon TS5300._uscans._tcp.local", 33, (443, "canon.local")),
+       ("Canon TS5300._uscans._tcp.local", 16, {"rs": "eSCL"}),
+       ("_uscan._tcp.local", 12, "Senza indirizzo._uscan._tcp.local"),
+       ("Senza indirizzo._uscan._tcp.local", 33, (80, "boh.local"))]
+for s in m.scanner_da(rec, {"canon ts5300._uscans._tcp.local": "192.168.1.60"}):
+    print(s["chiave"], "|", s["nome"], "|", s["url"], "|", s["dove"])
+EOF
+)
+  eq "HP in HTTP (una volta), Canon in HTTPS" "https://192.168.1.60:443/escl | Canon TS5300 | https://192.168.1.60:443/eSCL | wifi
+abc-1 | HP OfficeJet Pro 9010 | http://192.168.1.50:80/eSCL | wifi" "$out"
+}
+
+test_scanner_capacita() { # cosa sa fare lo scanner (vetro, alimentatore fronte-retro, risoluzioni elencate o a
+  # intervallo) e le impostazioni di una scansione: il foglio mai più grande dello scanner
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(_scanner_py <<'EOF'
+import importlib.util as u, os
+s = u.spec_from_file_location("finto", os.environ["FINTO"]); f = u.module_from_spec(s); s.loader.exec_module(f)
+c = m.analizza_capacita(f.CAPACITA.encode())
+p, a = c["fonti"]["Platen"], c["fonti"]["Feeder"]
+print(c["modello"], c["versione"], sorted(c["fonti"]))
+print(p["colori"], p["dpi"], p["max_l"], p["max_a"])
+print(a["dpi"], a["fronte_retro"], a["max_a"])
+print(m.area(p, "a4"), m.area(p, "vetro"), m.area(a, "lettera"), m.area({"max_l": 2000, "max_a": 3000}, "a4"))
+x = m.impostazioni_xml("Feeder", "Grayscale8", 150, 2480, 3508, versione="2.63", fronte_retro=True)
+print([r.strip() for r in x.splitlines() if any(k in r for k in ("InputSource", "ColorMode", "Resolution", "Duplex", "FormatExt", "Width"))])
+x = m.impostazioni_xml("Platen", "RGB24", 300, 2550, 3508, versione="2.0")
+print("FormatExt" in x, "Duplex" in x, "<pwg:InputSource>Platen</pwg:InputSource>" in x)
+try:
+    m.analizza_capacita(b"<x")
+except m.Errore:
+    print("risposta rotta: errore")
+EOF
+)
+  eq "capacità e impostazioni" "Multifunzione finta MF-100 2.63 ['Feeder', 'Platen']
+['BlackAndWhite1', 'Grayscale8', 'RGB24'] [75, 150, 300, 600] 2550 3508
+[100, 150, 200, 300] True 4200
+(2480, 3508) (2550, 3508) (2550, 3300) (2000, 3000)
+['<pwg:Width>2480</pwg:Width>', '<pwg:InputSource>Feeder</pwg:InputSource>', '<scan:ColorMode>Grayscale8</scan:ColorMode>', '<scan:XResolution>150</scan:XResolution>', '<scan:YResolution>150</scan:YResolution>', '<scan:DocumentFormatExt>image/jpeg</scan:DocumentFormatExt>', '<scan:Duplex>true</scan:Duplex>']
+False False True
+risposta rotta: errore" "$out"
+}
+
+test_scanner_pdf() { # il PDF senza librerie: i JPEG dello scanner così come sono (colori e grigi), pagine grandi
+  # quanto il foglio (il dpi del JPEG, sennò quello chiesto), indice (xref) giusto
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(_scanner_py <<'EOF'
+import importlib.util as u, os, re
+s = u.spec_from_file_location("finto", os.environ["FINTO"]); f = u.module_from_spec(s); s.loader.exec_module(f)
+j1, j2 = f.jpeg_finto(1240, 1754, 3, 150), f.jpeg_finto(600, 800, 1, 0)
+print(m.misure_jpeg(j1), m.misure_jpeg(j2), m.misure_jpeg(b"non un jpeg"))
+d = m.pdf([(j1, 300), (j2, 100)])
+print(d[:8], d.count(b"/Type /Page "), re.findall(rb"/MediaBox \[([^\]]*)\]", d), re.findall(rb"/ColorSpace (/\w+)", d))
+x = int(d.rsplit(b"startxref\n", 1)[1].split(b"\n")[0])
+voci = d[x:].split(b"\n")
+n = int(voci[1].split()[1])
+print(n, all(d[int(voci[2 + i][:10]):].startswith(b"%d 0 obj" % i) for i in range(1, n)), d.endswith(b"%%EOF\n"))
+EOF
+)
+  eq "PDF da due JPEG" "(1240, 1754, 3, 150) (600, 800, 1, 0) None
+b'%PDF-1.4' 2 [b'0 0 595.20 841.92', b'0 0 432.00 576.00'] [b'/DeviceRGB', b'/DeviceGray']
+9 True True" "$out"
+}
+
+test_scanner_flusso() { # una scansione vera con lo scanner finto (tests/escl_finto.py): alimentatore fronte-retro in
+  # grigi (si scalda: 503, poi 3 pagine in un PDF), vetro in JPEG; Location "localhost" del ponte USB; Host: localhost;
+  # ogni lavoro cancellato alla fine. Poi gli scanner USB (ponte IPP via USB), quelli con l'indirizzo, e nessuno
+  command -v python3 >/dev/null || return 0
+  local d="$WORK/scanner_flusso" porta pid out u
+  mkdir -p "$d"
+  _sc() { TMPDIR="$WORK/scanner_tmp" TOD_TERMUX_HOME="$WORK/scanner_home" TOD_SCANNER_SENZA_RETE=1 TOD_SCANNER_PAUSA=0.05 \
+    LANGUAGE=it python3 "$ROOT/share/stampa/tod-scanner.py" "$@"; }
+  out=$(_sc scansiona "$d/niente.pdf" 2>&1) && { echo "  ✗ scansione senza scanner" >&2; return 1; }
+  eq "senza scanner" "Nessuno scanner trovato" "$out"
+  # (niente uscita del test aperta e 60 s al massimo: se un controllo fallisce prima del kill, non resta appeso)
+  python3 "$ROOT/tests/escl_finto.py" --pagine 3 --occupato 1 --registro "$d/registro" --per 60 \
+    </dev/null >"$d/porta" 2>"$d/errori" &
+  pid=$!
+  for _ in $(seq 50); do if [[ -s $d/porta ]]; then break; fi; sleep 0.1; done
+  porta=$(cat "$d/porta")
+  u="http://127.0.0.1:$porta/eSCL"
+  out=$(_sc scansiona "$d/a.pdf" --scanner "$u" --alimentatore --fronte-retro --grigi --dpi 200 2>&1)
+  eq "alimentatore: il PDF" "$d/a.pdf" "$out"
+  eq "tre pagine" 3 "$(grep -ac '/Type /Page ' "$d/a.pdf")"
+  out=$(_sc scansiona "$d/b.jpg" --scanner "$u" --foglio vetro 2>&1)
+  eq "vetro: un JPEG" "$d/b.jpg" "$out"
+  [[ ! -e "$d/b (2).jpg" ]] || { echo "  ✗ dal vetro più di una pagina" >&2; return 1; }
+  out=$(cat "$d/registro")
+  has "fronte-retro in grigi" $'<pwg:InputSource>Feeder</pwg:InputSource>\n  <scan:ColorMode>Grayscale8</scan:ColorMode>\n  <scan:XResolution>200</scan:XResolution>' "$out"
+  has "fronte-retro chiesto" "<scan:Duplex>true</scan:Duplex>" "$out"
+  has "tutto il vetro, a colori" $'<pwg:Width>2550</pwg:Width>\n      <pwg:Height>3508</pwg:Height>' "$out"
+  has "vetro a colori" $'<pwg:InputSource>Platen</pwg:InputSource>\n  <scan:ColorMode>RGB24</scan:ColorMode>' "$out"
+  eq "lavori cancellati alla fine" "DELETE /eSCL/ScanJobs/1 Host=localhost
+DELETE /eSCL/ScanJobs/2 Host=localhost" "$(grep '^DELETE' <<<"$out")"
+  eq "sempre Host: localhost" "" "$(grep -E '^(GET|POST|DELETE) ' <<<"$out" | grep -v 'Host=localhost$')"
+  local usb="$WORK/scanner_tmp/tod-stampa/usb"
+  mkdir -p "$usb"
+  printf '{"id":"001","tipo":"ipp","porta":%s,"nome":"Multifunzione USB","seriale":"SN1"}' "$porta" >"$usb/001.json"
+  printf '{"id":"002","tipo":"raw","porta":1,"nome":"Solo stampa"}' >"$usb/002.json"
+  out=$(_sc aggiungi "127.0.0.1:1" 2>&1) && { echo "  ✗ aggiunto uno scanner che non c'è" >&2; return 1; }
+  eq "indirizzo sbagliato" "Nessuno scanner eSCL a «127.0.0.1:1»" "$out"
+  eq "con l'indirizzo" "Multifunzione finta MF-100 · http://localhost:$porta/eSCL" "$(_sc aggiungi "localhost:$porta" 2>&1)"
+  out=$(_sc elenco --json | python3 -c 'import json, sys
+for s in json.load(sys.stdin):
+    print(s["chiave"], s["nome"], s["url"], s["dove"])')
+  eq "USB (IPP via USB) e con l'indirizzo; la solo stampa no" "usb:sn1 Multifunzione USB $u usb
+indirizzo:http://localhost:$porta/escl Multifunzione finta MF-100 http://localhost:$porta/eSCL indirizzo" "$out"
+  _sc togli "indirizzo:http://localhost:$porta/escl"
+  eq "tolto" "usb:sn1" "$(_sc elenco --json | python3 -c 'import json, sys; print(" ".join(s["chiave"] for s in json.load(sys.stdin)))')"
+  out=$(_sc scansiona "$d/c.pdf" 2>&1)
+  eq "senza --scanner: quello che c'è (USB)" "$d/c.pdf" "$out"
+  kill "$pid" 2>/dev/null || true
+}
+
+test_scanner_voce() { # "Scanner" nello Start solo con la stampa accesa; tod scanner arriva a tod-scanner.py; la pagina
+  # delle Impostazioni ha il gruppo Scanner
+  local f="$HOME/.local/share/applications/tod-scanner.desktop"
+  desktop_scanner_entry
+  has "voce nello Start" "Exec=python3 $ROOT/share/stampa/tod-scanner.py" "$(cat "$f")"
+  has "riconosciuta dalla barra" "StartupWMClass=tod-scanner" "$(cat "$f")"
+  conf_set STAMPA 0
+  desktop_scanner_entry
+  conf_set STAMPA 1
+  [[ ! -e $f ]] || { echo "  ✗ voce rimasta con la stampa spenta" >&2; return 1; }
+  has "tod scanner" "scanner | scan) scanner_cli" "$(cat "$ROOT/tod")"
+  has "Impostazioni: gruppo Scanner" "self.fill_scanner()" "$(sed -n '/def pane_stampanti/,/def fill_stampanti/p' "$ROOT/share/tod-settings.py")"
+  command -v python3 >/dev/null || return 0
+  python3 -m py_compile "$ROOT/share/stampa/tod-scanner.py" "$ROOT/share/stampa/escl.py" "$ROOT/share/tod-settings.py"
+}
+
 test_scoperta_wsd_netbios() { # i PC Windows: la risposta WS-Discovery (Computer sì, stampanti no) e il nome NetBIOS
   command -v python3 >/dev/null || return 0
   local out

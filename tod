@@ -58,6 +58,7 @@ tod_main() {
     cartelle | folders) files_cli ;;
     usb) usb_cli "$@" ;;
     stampa | stampanti | print) stampa_cli "$@" ;;
+    scanner | scan) scanner_cli "$@" ;;
     rete | network) rete_cli "$@" ;;
     diretto) diretto_cli "$@" ;;
     audio) audio_cli "$@" ;;

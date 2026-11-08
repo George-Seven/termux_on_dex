@@ -43,6 +43,7 @@ BARRA = os.path.join(HOME, ".config/tod/barra.json")   # impostazioni della barr
 STATE = os.path.join(HOME, ".local/state/tod")
 HERE = os.path.dirname(os.path.abspath(__file__))
 STAMPA = os.path.join(HERE, "stampa/tod-stampa.py")   # il servizio di stampa (lib/stampa.sh)
+SCANNER = os.path.join(HERE, "stampa/tod-scanner.py")  # gli scanner (eSCL) e la loro finestra
 RETE = os.path.join(HERE, "rete/tod-rete.py")         # la Rete in Esplora file (lib/rete.sh)
 ITALIAN = os.environ.get("LANGUAGE", os.environ.get("LANG", "")).startswith("it")
 
@@ -944,6 +945,116 @@ class Settings(Gtk.Window):
         self.st_box.pack_start(self.row(T("Cerco le stampanti…", "Looking for printers…"), Gtk.Spinner(active=True)),
                                False, False, 0)
         self.fill_stampanti()
+        self.sc_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.pack_start(self.sc_box, False, False, 0)
+        self.sc_msg = Gtk.Label(xalign=0, wrap=True)
+        self.sc_msg.get_style_context().add_class("hint")
+        box.pack_start(self.sc_msg, False, False, 0)
+        self.fill_scanner()
+
+    # --- scanner: share/stampa/tod-scanner.py (eSCL: Wi-Fi e multifunzione USB) ---------------
+    def fill_scanner(self, msg=None):
+        if msg is not None:
+            self.sc_msg.set_text(msg)
+        for c in self.sc_box.get_children():
+            self.sc_box.remove(c)
+        self.group(self.sc_box, T("Scanner", "Scanners"), [
+            self.row(T("Cerco gli scanner…", "Looking for scanners…"), Gtk.Spinner(active=True))])
+        self.sc_box.show_all()
+
+        def carica():   # la ricerca in rete dura un paio di secondi: le stampanti intanto ci sono già
+            try:
+                lista = json.loads(subprocess.run([sys.executable, SCANNER, "elenco", "--json"], capture_output=True,
+                                                  text=True, timeout=40, stdin=subprocess.DEVNULL).stdout or "[]")
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                lista = []
+            GLib.idle_add(lambda: self.show_scanner(lista) and False)
+        threading.Thread(target=carica, daemon=True).start()
+
+    def apri_scanner(self, chiave=None):
+        try:
+            subprocess.Popen([sys.executable, SCANNER] + (["--scanner", chiave] if chiave else []),
+                             stdin=subprocess.DEVNULL, start_new_session=True)
+        except OSError as e:
+            self.sc_msg.set_text(str(e))
+
+    def show_scanner(self, lista):
+        for c in self.sc_box.get_children():
+            self.sc_box.remove(c)
+        righe = []
+        for s in lista:
+            h = Gtk.Box(spacing=12)
+            h.get_style_context().add_class("group-row")
+            img = Gtk.Image.new_from_icon_name("scanner", Gtk.IconSize.DND)
+            img.set_pixel_size(32)
+            h.pack_start(img, False, False, 0)
+            v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, valign=Gtk.Align.CENTER)
+            v.pack_start(Gtk.Label(label=s["nome"], xalign=0), False, False, 0)
+            dove = {"usb": "USB", "wifi": "Wi-Fi", "indirizzo": T("Aggiunto con l'indirizzo", "Added by address")}
+            sl = Gtk.Label(label=" · ".join(x for x in (dove.get(s["dove"], ""), s.get("ip", "")) if x), xalign=0)
+            sl.get_style_context().add_class("hint")
+            v.pack_start(sl, False, False, 0)
+            h.pack_start(v, True, True, 0)
+            if s["dove"] == "indirizzo":
+                menu = Gtk.Menu()
+                mi = Gtk.MenuItem(label=T("Rimuovi", "Remove"))
+                mi.connect("activate", lambda _w, k=s["chiave"]: self.togli_scanner(k))
+                menu.append(mi)
+                menu.show_all()
+                mb = Gtk.MenuButton(popup=menu, valign=Gtk.Align.CENTER)
+                mb.add(Gtk.Image.new_from_icon_name("view-more-symbolic", Gtk.IconSize.BUTTON))
+                h.pack_end(mb, False, False, 0)
+            b = self.button(T("Scansiona", "Scan"), lambda k=s["chiave"]: self.apri_scanner(k))
+            b.set_valign(Gtk.Align.CENTER)
+            h.pack_end(b, False, False, 0)
+            righe.append(h)
+        if not righe:
+            righe.append(self.row(T("Nessuno scanner", "No scanners"),
+                                  self.button(T("Apri Scanner", "Open Scanner"), self.apri_scanner),
+                                  T("Accendi la multifunzione Wi-Fi (nella stessa rete) o collega quella USB.",
+                                    "Turn on your Wi-Fi multifunction printer (same network) or plug in the USB one.")))
+        voce = Gtk.Entry(placeholder_text=T("192.168.1.50", "192.168.1.50"), width_chars=24)
+        voce.connect("activate", lambda w: self.aggiungi_scanner(w.get_text()))
+        hb = Gtk.Box(spacing=6)
+        hb.pack_start(voce, False, False, 0)
+        hb.pack_start(self.button(T("Aggiungi", "Add"), lambda: self.aggiungi_scanner(voce.get_text())), False, False, 0)
+        righe.append(self.row(T("Con l'indirizzo", "By address"), hb,
+                              T("Per uno scanner di rete che non compare qui sopra.", "For a network scanner not listed above.")))
+        righe.append(self.row(T("Cerca di nuovo", "Search again"), self.button(T("Cerca", "Search"),
+                                                                                lambda: self.fill_scanner(""))))
+        self.group(self.sc_box, T("Scanner", "Scanners"), righe)
+        nota = Gtk.Label(label=T("Gli scanner delle multifunzione Wi-Fi e USB (AirScan/eSCL, quasi tutte quelle degli "
+                                 "ultimi anni) si usano senza driver. Gli scanner USB più vecchi, con un driver proprio, "
+                                 "non sono supportati.",
+                                 "Scanners in Wi-Fi and USB multifunction printers (AirScan/eSCL, almost all recent ones) "
+                                 "work without drivers. Older USB scanners that need their own driver are not supported."),
+                             xalign=0, wrap=True)
+        nota.get_style_context().add_class("hint")
+        self.sc_box.pack_start(nota, False, False, 0)
+        self.sc_box.show_all()
+        return False
+
+    def aggiungi_scanner(self, cosa):
+        cosa = cosa.strip()
+        if not cosa:
+            return
+        self.sc_msg.set_text(T("Provo l'indirizzo…", "Trying the address…"))
+
+        def work():
+            try:
+                r = subprocess.run([sys.executable, SCANNER, "aggiungi", cosa], capture_output=True, text=True,
+                                   timeout=60, stdin=subprocess.DEVNULL)
+                esito = (r.returncode, (r.stdout + r.stderr).strip())
+            except (OSError, subprocess.TimeoutExpired) as e:
+                esito = (1, str(e))
+            GLib.idle_add(lambda: self.fill_scanner(
+                T("Scanner aggiunto.", "Scanner added.") if esito[0] == 0 else esito[1]) and False)
+        threading.Thread(target=work, daemon=True).start()
+
+    def togli_scanner(self, chiave):
+        subprocess.run([sys.executable, SCANNER, "togli", chiave], capture_output=True, timeout=30,
+                       stdin=subprocess.DEVNULL)
+        self.fill_scanner(T("Scanner rimosso.", "Scanner removed."))
 
     def fill_stampanti(self, msg=None):
         if msg is not None:

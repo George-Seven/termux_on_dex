@@ -85,6 +85,18 @@ desktop_dischi_entry() { # "Dischi" nello Start (share/tod-dischi.py, via tod-us
   printf 'StartupWMClass=tod-dischi\nComment=Formatta e partiziona chiavette, schede e dischi\n' >>"$f"
 }
 
+desktop_scanner_entry() { # "Scanner" nello Start (share/stampa/tod-scanner.py), con la stampa (STAMPA=1)
+  local f="$HOME/.local/share/applications/tod-scanner.desktop"
+  if ! stampa_on; then
+    rm -f "$f"
+    return 0
+  fi
+  mkdir -p "${f%/*}"
+  desktop_entry "$f" "Scanner" "Scanner" "python3 $TOD_ROOT/share/stampa/tod-scanner.py" scanner false
+  sed -i 's/^Categories=.*/Categories=Graphics;Scanning;Office;/' "$f"
+  printf 'StartupWMClass=tod-scanner\nComment=Scan documents and photos with your Wi-Fi or USB scanner\nComment[it]=Scansiona documenti e foto con lo scanner Wi-Fi o USB\n' >>"$f"
+}
+
 desktop_install_entries() {
   local apps="$HOME/.local/share/applications" auto="$HOME/.config/autostart" tod="$PREFIX/bin/tod"
   mkdir -p "$apps" "$auto"
@@ -101,6 +113,7 @@ desktop_install_entries() {
     "python3 $TOD_ROOT/share/tod-updates.py" system-software-update false
   sed -i 's/^Categories=.*/Categories=Settings;X-XFCE-SettingsDialog;X-XFCE-SystemSettings;/' "$apps/tod-updates.desktop"
   desktop_dischi_entry
+  desktop_scanner_entry
   # "Spegni": chiude desktop, audio e server X e torna ad Android. Nel menu no: c'è già il pulsante
   # di accensione dello Start
   desktop_entry "$apps/tod-stop.desktop" "Shut down" "Spegni" "$tod spegni" system-shutdown false true
