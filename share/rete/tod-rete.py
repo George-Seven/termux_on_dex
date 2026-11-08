@@ -39,6 +39,8 @@ SMB = os.environ.get("TOD_SMB_BIN") or os.path.join(TH, ".local/share/tod-rete/t
 ITALIAN = os.environ.get("LANGUAGE", os.environ.get("LANG", "")).startswith("it")
 OGNI = 60       # secondi tra una ricerca e l'altra
 SCADE = 600     # un PC che non risponde da 10 minuti sparisce
+PAUSA = 15      # dopo "Annulla" quel PC non chiede la password per 15 secondi: Esplora file riprova di continuo, e l'8
+                # novembre la FRITZ!Box ha riaperto la finestra 20 volte in 20 secondi
 SCHEMA = "org.termuxondex.Rete"
 
 
@@ -230,6 +232,7 @@ class Servizio:
         self.proc = {}        # nome → Popen di tod-smb
         self.memoria = {}     # nome → {"utente", "dominio", "password"}: le credenziali di questa sessione
         self.rifiutate = set()
+        self.annullate = {}   # nome → quando è stato premuto "Annulla" (PAUSA)
         self.lucchetti = {}   # nome → Lock: una finestra alla volta per PC
         self.m = threading.Lock()
         self.fine = False
@@ -348,12 +351,16 @@ class Servizio:
             if motivo == "primo" and not errore:
                 log(f"{nome}/{cartella}: da ospite")
                 return "NO\n"   # la prima volta da ospite: le cartelle aperte a tutti non chiedono niente
+            if time.monotonic() - self.annullate.get(nome, -PAUSA) < PAUSA:
+                return "NO\n"   # appena annullata: anche le richieste rimaste in coda intanto, senza finestra
             ultimo = carica_conf()["credenziali"].get(nome, {})
             log(f"{nome}/{cartella}: chiedo la password")
             nuove = chiedi(nome, ultimo.get("utente", ""), ultimo.get("dominio", ""), errore)
             if not nuove:
                 log(f"{nome}: password non data")
+                self.annullate[nome] = time.monotonic()
                 return "NO\n"
+            self.annullate.pop(nome, None)
             self.rifiutate.discard(nome)
             self.memoria[nome] = nuove
             if nuove.pop("ricorda", False):
@@ -449,6 +456,11 @@ def finestra_password(Gtk, nome, utente, dominio, errore):
     box.pack_start(nota, False, False, 0)
     ricorda = Gtk.CheckButton(label=T("Ricorda la password", "Remember the password"), active=True)
     box.pack_start(ricorda, False, False, 0)
+
+    def pieno(*_):   # "Connetti" solo con un nome utente: un Invio a vuoto non chiude la finestra
+        d.set_response_sensitive(Gtk.ResponseType.OK, bool(voci["utente"].get_text().strip()))
+    voci["utente"].connect("changed", pieno)
+    pieno()
     d.show_all()
     (voci["password"] if utente else voci["utente"]).grab_focus()
     r = d.run()

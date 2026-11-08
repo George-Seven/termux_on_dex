@@ -2132,6 +2132,28 @@ EOF
   eq "ospite, finestra, ricordata, rifiutata" $'NO\nOK\t-\tpietro\ta%09b%25c\n'"[('PC-PIETRO', '', False)] [('PC-PIETRO', 'pietro', 'a\\tb%c')] {'PC-PIETRO': {'utente': 'pietro', 'dominio': ''}}"$'\nOK\t-\tpietro\ta%09b%25c\nOK\t-\tpietro\ta%09b%25c'" ('PC-PIETRO', 'pietro', True)"$'\nNO' "$out"
 }
 
+test_rete_annulla() { # 8 novembre: "Annulla" sulla FRITZ!Box e la finestra tornava 20 volte in 20 secondi (Esplora file
+  # riprova). Dopo "Annulla" quel PC tace per PAUSA secondi, gli altri no; poi la finestra torna
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(_rete_py <<'EOF'
+chieste = []
+m.log = lambda *a: None
+m.password_di = lambda pc, u: None
+s = m.Servizio()
+def chiedi(nome, utente, dominio, errore):
+    chieste.append(nome)
+    return None
+r = [s.risposta(f"AUTH\tfritz-box\t192.168.178.1\tIPC$\t{x}\n", chiedi).strip() for x in ("ospite", "ospite", "rifiutate", "ospite")]
+r.append(s.risposta("AUTH\tPC-PIETRO\t192.168.178.43\tIPC$\tospite\n", chiedi).strip())
+s.annullate["fritz-box"] -= m.PAUSA
+r.append(s.risposta("AUTH\tfritz-box\t192.168.178.1\tIPC$\tospite\n", chiedi).strip())
+print(r, chieste)
+EOF
+)
+  eq "una finestra sola per PC, poi di nuovo" "['NO', 'NO', 'NO', 'NO', 'NO', 'NO'] ['fritz-box', 'PC-PIETRO', 'fritz-box']" "$out"
+}
+
 test_rete_elenco_pc() { # i PC trovati e quelli aggiunti a mano: elenco per tod-fs, un tod-smb per PC, i PC spariti via
   command -v python3 >/dev/null || return 0
   local smb="$WORK/rete_smb_finto" out
