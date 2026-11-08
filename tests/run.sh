@@ -2763,6 +2763,19 @@ test_inline_rename() { # rinomina in linea: il modulo compila, intercetta gtk_di
   has "scrivania: i lanciatori cambiano il nome mostrato e rinnovano il sigillo" "tod_desk_launcher_save" "$(cat "$ROOT/share/tod-gettext.c")"
   files_rename_css
   has "stile della casella" "window.tod-rename" "$(cat "$HOME/.config/gtk-3.0/gtk.css")"
+  # 8 novembre, come macOS: sotto il campo niente etichetta vera, Nuova cartella senza finestra
+  local src
+  src=$(cat "$ROOT/share/tod-gettext.c")
+  has "l'etichetta vera non si disegna mentre si scrive" "*slot = tod_render_hook;" "$src"
+  has "solo se GtkCellRendererClass è quella di GTK 3" "cr.class_size != obj.class_size + 16 * sizeof(void *)" "$src"
+  has "scrivania: il campo va a capo come l'etichetta" "3 /* GTK_WRAP_WORD_CHAR */" "$src"
+  has "Nuova cartella: niente finestra" "if (tod_create_inline(dialog, &response)) return response;" "$src"
+  has "Nuova cartella non viene scambiata per una rinomina" "if (tod_create_entry(dialog)) return 0;" "$src"
+  has "creazione riconosciuta dall'icona del tipo (la rinomina ha quella del file)" "!= 6 /* GTK_IMAGE_GICON */" "$src"
+  has "Thunar: poi la sua azione Rinomina" '"<Actions>/ThunarStandardView/rename"' "$src"
+  has "campo di un elemento appena creato: la vista si risistema (prima 1x1, invisibile)" "f_gtk_widget_size_allocate(view, a);" "$src"
+  has "menu come macOS" '"Nuova carte_lla"' "$src"
+  has "si può tornare alla finestra di creazione" "TOD_NUOVO_CLASSICO" "$src"
 }
 
 test_settings_uninstall() { # Impostazioni → App: disinstallare ogni tipo di app, mai i pezzi del desktop

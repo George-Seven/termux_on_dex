@@ -292,11 +292,11 @@ files_cx_link() { # al posto del vecchio punto di montaggio (cartella vuota) un 
   files_link "$1" "$2"
 }
 
-files_rename_css() { # rinomina in linea (tod-gettext.c), come Esplora file di Windows: riquadro squadrato
-  # bordato d'accento, compatto. Angoli dritti: senza compositore quelli tondi resterebbero neri
+files_rename_css() { # casella compatta della rinomina (tod-gettext.c, quando sul nome non si può): riquadro
+  # squadrato bordato d'accento. Il campo sul nome (Thunar e scrivania, come macOS) ha lo stile in tod_rename_css
   gtk_css_block "rinomina in linea" <<'EOF'
 window.tod-rename { background-color: @theme_selected_bg_color; border: none; border-radius: 0; padding: 1px; }
-window.tod-rename entry, iconview entry, treeview entry {
+window.tod-rename entry {
   min-height: 0; padding: 2px 5px; border-radius: 0; box-shadow: none;
   border: 1px solid @theme_selected_bg_color; background-color: @theme_base_color; color: @theme_text_color; }
 window.tod-rename entry { border: none; }

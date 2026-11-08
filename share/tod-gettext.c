@@ -171,10 +171,31 @@ static Catalog *domain_catalog(const char *domain) {
     return c;
 }
 
+/* Voci di menu di Thunar e della scrivania che aprivano la finestra del nome: ora si scrive sul nome (come macOS,
+ * tod_create_inline e tod_inline_rename), quindi niente puntini; in italiano "Nuova cartella" come macOS (Thunar
+ * diceva "Creare cartella…"). Con TOD_RINOMINA_CLASSICA / TOD_NUOVO_CLASSICO restano quelle di prima. */
+static const char *tod_voce_menu(const char *dom, const char *msgid, const char *t) {
+    static char buf[4][160];
+    if (!dom || (strcasecmp(dom, "thunar") != 0 && strcasecmp(dom, "xfdesktop") != 0)) return t;
+    int folder = !strcmp(msgid, "Create _Folder..."), ren = !strcmp(msgid, "_Rename...");
+    if ((!folder && !ren) || getenv("TOD_RINOMINA_CLASSICA") || (folder && getenv("TOD_NUOVO_CLASSICO"))) return t;
+    const char *lang = getenv("TOD_GETTEXT_LANG");
+    if (folder && lang && !strcmp(lang, "it")) return "Nuova carte_lla";
+    char *b = buf[(strcasecmp(dom, "thunar") == 0) * 2 + ren];
+    if (!*b) {
+        snprintf(b, sizeof buf[0], "%s", t ? t : msgid);
+        size_t n = strlen(b);
+        if (n >= 3 && !strcmp(b + n - 3, "...")) b[n - 3] = '\0';
+        else if (n >= 3 && !strcmp(b + n - 3, "\xe2\x80\xa6")) b[n - 3] = '\0';   /* … */
+    }
+    return b;
+}
+
 static const char *translate(const char *domain, const char *msgid) {
     if (!msgid || !*msgid) return NULL;
-    const Entry *e = cat_find(domain_catalog(domain ? domain : default_domain()), msgid);
-    return e ? e->val : NULL;
+    const char *dom = domain ? domain : default_domain();
+    const Entry *e = cat_find(domain_catalog(dom), msgid);
+    return tod_voce_menu(dom, msgid, e ? e->val : NULL);
 }
 
 static const char *translate_plural(const char *domain, const char *msgid, unsigned long n) {
@@ -511,6 +532,7 @@ int faccessat(int dirfd, const char *path, int mode, int flags) {
  * TOD_RINOMINA_CLASSICA=1 rimette il pannello di Thunar. */
 typedef unsigned long tod_gtype;
 typedef struct TodList { void *data; struct TodList *next, *prev; } TodList;
+typedef struct { tod_gtype type; const char *type_name; unsigned class_size, instance_size; } TodTypeQuery;
 
 #define GTKFN(ret, name, ...) \
     static ret (*f_##name)(__VA_ARGS__); \
@@ -553,6 +575,120 @@ static void *tod_scan(void *w, int *images, int *labels, int *entries, int hide)
     }
     f_g_list_free(kids);
     return entry;
+}
+
+/* il primo widget del tipo dato (nome esatto) dentro w, w compreso */
+static void *tod_find_type(void *w, const char *type) {
+    GTKFN(TodList *, gtk_container_get_children, void *)
+    GTKFN(void, g_list_free, TodList *)
+    if (!w) return NULL;
+    if (!strcmp(tod_type_name(w), type)) return w;
+    if (!tod_is_container(w)) return NULL;
+    void *found = NULL;
+    TodList *kids = f_gtk_container_get_children(w);
+    for (TodList *l = kids; l && !found; l = l->next) found = tod_find_type(l->data, type);
+    f_g_list_free(kids);
+    return found;
+}
+
+/* --- aspetto del nome in modifica, come macOS (8 novembre) ---
+ * Campo bianco (scuro col tema scuro) con angoli tondi e l'anello nel colore d'accento del sistema, testo scelto
+ * evidenziato nell'accento chiaro. Vale per la casella di Thunar (classe tod-rinomina) e per il campo della
+ * scrivania (finestra senza fondo + riquadro + testo). Priorità sopra gtk.css dell'utente. */
+static int tod_rename_css(void *screen) {
+    GTKFN(void *, gtk_css_provider_new, void)
+    GTKFN(int, gtk_css_provider_load_from_data, void *, const char *, long, void *)
+    GTKFN(void, gtk_style_context_add_provider_for_screen, void *, void *, unsigned)
+    static void *done_for;
+    if (!screen || done_for == screen) return 0;
+    static const char css[] =
+        "window.tod-rinomina-finestra, window.tod-rinomina-finestra.background {"
+        "  background-color: transparent; background-image: none; border: none; box-shadow: none; }\n"
+        ".tod-rinomina-campo {"
+        "  background-color: @theme_base_color; border-radius: 5px; margin: 4px; padding: 1px 4px;"
+        "  border: 1px solid alpha(@theme_selected_bg_color, 0.85);"
+        "  box-shadow: 0 0 0 3px alpha(@theme_selected_bg_color, 0.35), 0 1px 3px rgba(0, 0, 0, 0.25); }\n"
+        "textview.tod-rinomina-testo, textview.tod-rinomina-testo text {"
+        "  background-color: transparent; color: @theme_text_color; }\n"
+        "textview.tod-rinomina-testo text selection, textview.tod-rinomina-testo text selection:focus {"
+        "  background-color: alpha(@theme_selected_bg_color, 0.35); color: @theme_text_color; }\n"
+        "entry.tod-rinomina, iconview entry.tod-rinomina, treeview entry.tod-rinomina {"
+        "  min-height: 0; margin: 0; padding: 1px 4px; border-radius: 5px; background-image: none;"
+        "  background-color: @theme_base_color; color: @theme_text_color;"
+        "  border: 1px solid alpha(@theme_selected_bg_color, 0.85);"
+        "  box-shadow: 0 0 0 3px alpha(@theme_selected_bg_color, 0.35); }\n"
+        "entry.tod-rinomina selection, entry.tod-rinomina selection:focus {"
+        "  background-color: alpha(@theme_selected_bg_color, 0.35); color: @theme_text_color; }\n";
+    void *p = f_gtk_css_provider_new();
+    f_gtk_css_provider_load_from_data(p, css, -1, NULL);
+    f_gtk_style_context_add_provider_for_screen(screen, p, 900 /* sopra GTK_STYLE_PROVIDER_PRIORITY_USER */);
+    done_for = screen;
+    return 1;
+}
+
+/* --- l'etichetta vera sparisce mentre si scrive il nome (8 novembre) ---
+ * Pietro: "hai fatto un'etichetta sopra il reale". Sotto il campo di modifica restava disegnato il nome vecchio
+ * (sulla scrivania tutto, in Thunar le righe che il campo a una riga non copre). Qui si sostituisce, nella classe
+ * del disegnatore di quel testo (GtkCellRendererClass->render: struttura fissa di GTK 3, si controlla la misura),
+ * il disegno con uno che salta solo l'etichetta con quel testo in quella vista; tutto il resto passa all'originale. */
+typedef void (*TodRenderFn)(void *cell, void *cr, void *widget, const void *bg, const void *area, int flags);
+static struct { void *klass; TodRenderFn orig; } tod_render_saved[6];
+static int tod_render_n;
+static void *tod_hide_widget;
+static char *tod_hide_text;
+
+static TodRenderFn tod_render_orig(void *klass) {
+    GTKFN(void *, g_type_class_peek_parent, void *)
+    for (void *k = klass; k; k = f_g_type_class_peek_parent(k))
+        for (int i = 0; i < tod_render_n; i++)
+            if (tod_render_saved[i].klass == k) return tod_render_saved[i].orig;
+    return NULL;
+}
+
+static void tod_render_hook(void *cell, void *cr, void *widget, const void *bg, const void *area, int flags) {
+    static void (*get)(void *, const char *, ...);
+    static void (*gfree)(void *);
+    if (!get) get = (void (*)(void *, const char *, ...))dlsym(RTLD_DEFAULT, "g_object_get");
+    if (!gfree) gfree = (void (*)(void *))dlsym(RTLD_DEFAULT, "g_free");
+    if (tod_hide_text && widget == tod_hide_widget && get && gfree) {
+        char *t = NULL;
+        get(cell, "text", &t, NULL);
+        int same = t && !strcmp(t, tod_hide_text);
+        gfree(t);
+        if (same) return;
+    }
+    TodRenderFn orig = tod_render_orig(*(void **)cell);   /* la classe è il primo campo dell'istanza */
+    if (orig) orig(cell, cr, widget, bg, area, flags);
+}
+
+/* klass: classe del disegnatore delle etichette; text NULL = si torna a disegnare tutto */
+static int tod_hide_label(void *klass, void *widget, const char *text) {
+    GTKFN(tod_gtype, gtk_cell_renderer_get_type, void)
+    GTKFN(tod_gtype, g_object_get_type, void)
+    GTKFN(void, g_type_query, tod_gtype, TodTypeQuery *)
+    GTKFN(void, gtk_widget_queue_draw, void *)
+    if (text && klass) {
+        TodTypeQuery obj = {0}, cr = {0};
+        f_g_type_query(f_g_object_get_type(), &obj);
+        f_g_type_query(f_gtk_cell_renderer_get_type(), &cr);
+        if (!obj.class_size || cr.class_size != obj.class_size + 16 * sizeof(void *)) {
+            fprintf(stderr, "tod-rinomina: GtkCellRendererClass inattesa (%u), l'etichetta resta\n", cr.class_size);
+            return 0;
+        }
+        TodRenderFn *slot = (TodRenderFn *)((char *)klass + obj.class_size + 7 * sizeof(void *));   /* ->render */
+        if (*slot != tod_render_hook) {
+            if (tod_render_n >= (int)(sizeof tod_render_saved / sizeof tod_render_saved[0]) || !*slot) return 0;
+            tod_render_saved[tod_render_n].klass = klass;
+            tod_render_saved[tod_render_n].orig = *slot;
+            tod_render_n++;
+            *slot = tod_render_hook;
+        }
+    }
+    free(tod_hide_text);
+    tod_hide_text = text ? strdup(text) : NULL;
+    tod_hide_widget = text ? widget : NULL;
+    if (widget) f_gtk_widget_queue_draw(widget);
+    return 1;
 }
 
 static int tod_commit(void *dialog) {
@@ -619,17 +755,63 @@ static int tod_compact_rename(void *dialog) {
  * selezionato e si aspetta (ciclo annidato). Il nome scritto va nella casella della finestra di
  * rinomina, che non viene mai mostrata, e si risponde "Rinomina": Thunar fa il resto come sempre
  * (controlli, errori, Annulla). Se qualcosa non torna, si ripiega sulla casella compatta. */
-typedef struct { void *loop; int started, done, fired; char *text; } TodEdit;
-typedef struct { tod_gtype type; const char *type_name; unsigned class_size, instance_size; } TodTypeQuery;
+typedef struct { void *loop; int started, done, fired; char *text; void *view; int icons, sel_s, sel_e; } TodEdit;
+
+/* fix: campo e vista (con un riferimento ciascuno); se il campo non ha ancora un posto, la vista si risistema
+ * subito con la sua stessa misura: exo_icon_view_size_allocate assegna lo spazio ai campi in modifica */
+static int tod_edit_fix_alloc(void **fix) {
+    GTKFN(int, gtk_widget_get_allocated_width, void *)
+    GTKFN(void, gtk_widget_get_allocation, void *, int *)
+    GTKFN(void, gtk_widget_get_preferred_size, void *, void *, void *)
+    GTKFN(void, gtk_widget_queue_allocate, void *)
+    GTKFN(void, gtk_widget_size_allocate, void *, int *)
+    GTKFN(void *, gtk_widget_get_parent, void *)
+    GTKFN(void, g_object_unref, void *)
+    void *entry = fix[0], *view = fix[1];
+    if (f_gtk_widget_get_parent(entry) == view && f_gtk_widget_get_allocated_width(entry) <= 1) {
+        int a[4] = {0};   /* GtkAllocation: x, y, larghezza, altezza */
+        f_gtk_widget_get_allocation(view, a);
+        f_gtk_widget_get_preferred_size(view, NULL, NULL);   /* GTK vuole la misura chiesta prima di assegnarla */
+        f_gtk_widget_queue_allocate(view);
+        f_gtk_widget_size_allocate(view, a);
+        fprintf(stderr, "tod-rinomina: campo senza posto, vista risistemata (%d px)\n", f_gtk_widget_get_allocated_width(entry));
+    }
+    f_g_object_unref(entry);
+    f_g_object_unref(view);
+    free(fix);
+    return 0;
+}
 
 static int /* il valore si ignora */ tod_edit_started(void *cell, void *editable, const char *path, TodEdit *e) {
-    (void)cell; (void)path;
+    (void)path;
     GTKFN(const char *, gtk_entry_get_text, void *)
     GTKFN(void, gtk_editable_select_region, void *, int, int)
+    GTKFN(void *, gtk_widget_get_style_context, void *)
+    GTKFN(void, gtk_style_context_add_class, void *, const char *)
+    GTKFN(void, gtk_entry_set_alignment, void *, float)
+    GTKFN(void *, gtk_widget_get_screen, void *)
     e->started = 1;
+    tod_rename_css(f_gtk_widget_get_screen(editable));
+    f_gtk_style_context_add_class(f_gtk_widget_get_style_context(editable), "tod-rinomina");
+    if (e->icons) f_gtk_entry_set_alignment(editable, 0.5f);   /* sotto l'icona, centrato come l'etichetta */
     const char *t = f_gtk_entry_get_text(editable);
-    const char *dot = t ? strrchr(t, '.') : NULL;
-    if (t && dot && dot != t) f_gtk_editable_select_region(editable, 0, (int)(dot - t));   /* il nome, senza estensione */
+    if (t) tod_hide_label(*(void **)cell, e->view, t);   /* sotto il campo niente nome vecchio */
+    /* ExoIconView dà al campo il suo spazio solo nella propria size_allocate; con un elemento appena creato (senza
+     * che nel frattempo si sia aperta una finestra) GTK non la richiamava più e il campo restava di 1x1 pixel,
+     * invisibile anche se si poteva scrivere (8 novembre). Appena il campo è dentro la vista si controlla. */
+    GTKFN(void *, g_object_ref, void *)
+    GTKFN(unsigned, g_idle_add, void *, void *)
+    void **fix = malloc(2 * sizeof *fix);
+    fix[0] = f_g_object_ref(editable);
+    fix[1] = f_g_object_ref(e->view);
+    f_g_idle_add((void *)tod_edit_fix_alloc, fix);
+    /* la stessa scelta della finestra di Thunar: cartelle per intero, file senza estensione */
+    if (e->sel_e > e->sel_s) f_gtk_editable_select_region(editable, e->sel_s, e->sel_e);
+    else {
+        GTKFN(long, g_utf8_pointer_to_offset, const char *, const char *)
+        const char *dot = t ? strrchr(t, '.') : NULL;
+        if (t && dot && dot != t) f_gtk_editable_select_region(editable, 0, (int)f_g_utf8_pointer_to_offset(t, dot));
+    }
     return 0;
 }
 
@@ -681,6 +863,19 @@ static void *tod_active_window(void *dialog) {
     return active ? active : visible == 1 ? only : NULL;
 }
 
+/* La finestra "Nuova cartella"/"Nuovo documento" di Thunar e della scrivania: casella del nome di libxfce4ui
+ * (XfceFilenameInput) e l'icona del TIPO di file (GIcon). Quella di rinomina di Thunar ha l'icona del file
+ * disegnata (cairo surface): così le due non si confondono. */
+static void *tod_create_entry(void *dialog) {
+    GTKFN(void *, gtk_dialog_get_content_area, void *)
+    GTKFN(int, gtk_image_get_storage_type, void *)
+    void *content = f_gtk_dialog_get_content_area(dialog);
+    void *input = tod_find_type(content, "XfceFilenameInput");
+    void *image = tod_find_type(content, "GtkImage");
+    if (!input || !image || f_gtk_image_get_storage_type(image) != 6 /* GTK_IMAGE_GICON */) return NULL;
+    return tod_find_type(input, "GtkEntry");
+}
+
 #define TOD_WHY(msg) do { fprintf(stderr, "tod-rinomina: sul nome no, %s\n", msg); return 0; } while (0)
 
 static int tod_inline_rename(void *dialog, int *response) {
@@ -720,8 +915,10 @@ static int tod_inline_rename(void *dialog, int *response) {
     GTKFN(void *, gtk_dialog_get_action_area, void *)
     GTKFN(int, gtk_dialog_get_response_for_widget, void *, void *)
     GTKFN(TodList *, gtk_container_get_children, void *)
+    GTKFN(int, gtk_editable_get_selection_bounds, void *, int *, int *)
     const char *prg = f_g_get_prgname();
     if (!prg || strcasecmp(prg, "thunar") != 0 || getenv("TOD_RINOMINA_CLASSICA")) return 0;
+    if (tod_create_entry(dialog)) return 0;   /* "Nuova cartella" non è una rinomina (prima la scambiava) */
     int images = 0, labels = 0, entries = 0;
     void *entry = tod_scan(f_gtk_dialog_get_content_area(dialog), &images, &labels, &entries, 0);
     if (!entry || entries != 1 || images < 1 || labels < 1) return 0;
@@ -787,7 +984,9 @@ static int tod_inline_rename(void *dialog, int *response) {
         }
         f_g_list_free(btns);
     }
-    TodEdit e = { f_g_main_loop_new(NULL, 0), 0, 0, 0, NULL };
+    int sel_s = 0, sel_e = 0;
+    f_gtk_editable_get_selection_bounds(entry, &sel_s, &sel_e);   /* quella che Thunar ha preparato */
+    TodEdit e = { f_g_main_loop_new(NULL, 0), 0, 0, 0, NULL, view, icons, sel_s, sel_e };
     f_g_object_set(cell, "editable", 1, NULL);
     unsigned long h1 = f_g_signal_connect_data(cell, "editing-started", (void *)tod_edit_started, &e, NULL, 0);
     unsigned long h2 = f_g_signal_connect_data(cell, "edited", (void *)tod_edit_done, &e, NULL, 0);
@@ -802,6 +1001,7 @@ static int tod_inline_rename(void *dialog, int *response) {
     f_g_signal_handler_disconnect(cell, h3);
     f_g_object_set(cell, "editable", 0, NULL);   /* niente modifica col doppio clic */
     f_g_main_loop_unref(e.loop);
+    tod_hide_label(NULL, view, NULL);   /* il nome (nuovo) torna a disegnarsi */
     f_gtk_tree_path_free(path);
     if (!e.started) { free(e.text); TOD_WHY("la modifica sul nome non è partita"); }   /* casella compatta */
     const char *old = f_gtk_entry_get_text(entry);
@@ -815,10 +1015,13 @@ static int tod_inline_rename(void *dialog, int *response) {
     return 1;
 }
 
+static int tod_create_inline(void *dialog, int *response);
+
 int gtk_dialog_run(void *dialog) {
     static int (*real)(void *);
     if (!real) real = (int (*)(void *))tod_next("gtk_dialog_run");
     int response;
+    if (tod_create_inline(dialog, &response)) return response;   /* Nuova cartella: niente finestra, come macOS */
     if (tod_inline_rename(dialog, &response)) {   /* la finestra non si vede mai */
         fprintf(stderr, "tod-rinomina: sul nome (risposta %d)\n", response);
         return response;
@@ -828,21 +1031,37 @@ int gtk_dialog_run(void *dialog) {
 }
 
 /* --- rinomina sul nome anche sulla SCRIVANIA ---
- * xfdesktop non sa modificare le etichette: per rinominare chiede a Thunar (D-Bus RenameFile),
- * che apre la sua finestra. Qui si intercetta quella chiamata dentro xfdesktop e si apre una
- * casella senza bordi esattamente sopra l'etichetta dell'icona (geometria presa dalla griglia di
- * xfdesktop 4.20). Invio o clic altrove: rinomina; Esc: annulla. Se qualcosa non torna (lanciatori
- * .desktop, più file, vista non trovata) si lascia fare a Thunar come prima. */
-typedef struct { void *win, *entry, *file; char *old, *key; int closing; } TodDesk;   /* key: lanciatore */
+ * xfdesktop non sa modificare le etichette: per rinominare chiede a Thunar (D-Bus RenameFile), che apre la sua
+ * finestra. Qui si intercetta quella chiamata dentro xfdesktop e il nome diventa modificabile al suo posto, come su
+ * macOS. 8 novembre (Pietro: "hai fatto un'etichetta sopra il reale"): l'etichetta vera non si disegna più mentre si
+ * scrive (tod_hide_label) e al suo posto c'è un campo con lo stesso carattere, largo al massimo quanto l'etichetta,
+ * che va a capo come lei e cresce o si stringe mentre si scrive, centrato sotto l'icona; aspetto in tod_rename_css.
+ * Invio, Tab o clic altrove: rinomina; Esc: annulla. Misure dalla griglia di xfdesktop 4.20 (xfdesktop-icon-view.c:
+ * etichetta a cell-padding*2 + icona dall'alto della casella, testo largo cell-text-width-proportion*icona, margine
+ * interno label-radius). Se qualcosa non torna (lanciatori senza Name, più file, vista non trovata) si lascia fare a
+ * Thunar come prima. */
+typedef struct {
+    void *win, *text, *file, *view, *font;
+    char *old, *key;
+    int closing, maxw, cx, top;
+} TodDesk;
 typedef struct { uint32_t domain; int code; char *message; } TodError;
+
+/* campo: margine della finestra 4 (anello d'accento) + bordo 1 + spazio interno 4 a destra e a sinistra, 1 sopra e sotto */
+#define TOD_DESK_PADX 9
+#define TOD_DESK_PADY 6
 
 static int tod_desk_close(TodDesk *d) {
     GTKFN(void, gtk_widget_destroy, void *)
     GTKFN(void, g_object_unref, void *)
+    GTKFN(void, pango_font_description_free, void *)
     if (d->closing) return 0;
     d->closing = 1;
+    tod_hide_label(NULL, d->view, NULL);   /* torna l'etichetta (col nome nuovo, se rinominato) */
     f_gtk_widget_destroy(d->win);
     f_g_object_unref(d->file);
+    f_g_object_unref(d->view);
+    if (d->font) f_pango_font_description_free(d->font);
     free(d->old);
     free(d->key);
     free(d);
@@ -915,15 +1134,30 @@ static int tod_desk_launcher_save(TodDesk *d, const char *text, TodError **err) 
     return ok;
 }
 
+/* il testo scritto, su una riga sola (un a capo incollato diventa uno spazio); da liberare con free */
+static char *tod_desk_text(TodDesk *d) {
+    GTKFN(void *, gtk_text_view_get_buffer, void *)
+    GTKFN(void, gtk_text_buffer_get_bounds, void *, void *, void *)
+    GTKFN(char *, gtk_text_buffer_get_text, void *, const void *, const void *, int)
+    GTKFN(void, g_free, void *)
+    long s[16], e[16];   /* GtkTextIter: 80 byte */
+    void *buf = f_gtk_text_view_get_buffer(d->text);
+    f_gtk_text_buffer_get_bounds(buf, s, e);
+    char *g = f_gtk_text_buffer_get_text(buf, s, e, 0);
+    char *t = strdup(g ? g : "");
+    f_g_free(g);
+    for (char *p = t; *p; p++) if (*p == '\n' || *p == '\r' || *p == '\t') *p = ' ';
+    return t;
+}
+
 static int tod_desk_commit(TodDesk *d, int keep_on_error) {
-    GTKFN(const char *, gtk_entry_get_text, void *)
     GTKFN(void *, g_file_set_display_name, void *, const char *, void *, TodError **)
     GTKFN(void, g_object_unref, void *)
     GTKFN(void, g_error_free, TodError *)
     GTKFN(void, gtk_widget_error_bell, void *)
     if (d->closing) return 0;
-    const char *t = f_gtk_entry_get_text(d->entry);
-    if (t && *t && strcmp(t, d->old) != 0) {
+    char *t = tod_desk_text(d);
+    if (*t && strcmp(t, d->old) != 0) {
         TodError *err = NULL;
         void *nf = d->key ? (tod_desk_launcher_save(d, t, &err) ? d : NULL)
                           : f_g_file_set_display_name(d->file, t, NULL, &err);
@@ -931,23 +1165,66 @@ static int tod_desk_commit(TodDesk *d, int keep_on_error) {
         if (!nf) {
             fprintf(stderr, "tod-rinomina: scrivania, errore: %s\n", err && err->message ? err->message : "?");
             if (err) f_g_error_free(err);
-            if (keep_on_error) { f_gtk_widget_error_bell(d->entry); return 0; }   /* si corregge il nome */
+            if (keep_on_error) { free(t); f_gtk_widget_error_bell(d->text); return 0; }   /* si corregge il nome */
         }
     }
+    free(t);
     return tod_desk_close(d);
 }
 
-static int tod_desk_activate(void *entry, TodDesk *d) { (void)entry; return tod_desk_commit(d, 1); }
 static int tod_desk_focus_out(void *w, void *ev, TodDesk *d) { (void)w; (void)ev; tod_desk_commit(d, 0); return 0; }
 static int tod_desk_key(void *w, void *ev, TodDesk *d) {
     (void)w;
     GTKFN(int, gdk_event_get_keyval, void *, unsigned *)
     unsigned kv = 0;
-    if (f_gdk_event_get_keyval(ev, &kv) && kv == 0xff1b /* Esc */) { tod_desk_close(d); return 1; }
+    if (!f_gdk_event_get_keyval(ev, &kv)) return 0;
+    if (kv == 0xff1b /* Esc */) { tod_desk_close(d); return 1; }
+    if (kv == 0xff0d || kv == 0xff8d || kv == 0xfe34 /* Invio */ || kv == 0xff09 /* Tab */) {
+        tod_desk_commit(d, 1);
+        return 1;
+    }
     return 0;
 }
 
-/* la vista della scrivania con un solo elemento selezionato, che è anche quello attivo */
+/* misura il testo come lo disegnerebbe l'etichetta e adatta campo e finestra, centrati sotto l'icona */
+static int tod_desk_fit(void *buffer, TodDesk *d) {
+    (void)buffer;
+    GTKFN(void *, gtk_widget_create_pango_layout, void *, const char *)
+    GTKFN(void, pango_layout_set_font_description, void *, void *)
+    GTKFN(void, pango_layout_set_width, void *, int)
+    GTKFN(void, pango_layout_set_wrap, void *, int)
+    GTKFN(void, pango_layout_set_alignment, void *, int)
+    GTKFN(void, pango_layout_get_pixel_size, void *, int *, int *)
+    GTKFN(void, pango_layout_get_pixel_extents, void *, int *, int *)
+    GTKFN(void, g_object_unref, void *)
+    GTKFN(void, gtk_widget_set_size_request, void *, int, int)
+    GTKFN(void, gtk_window_resize, void *, int, int)
+    GTKFN(void, gtk_window_move, void *, int, int)
+    if (d->closing) return 0;
+    char *t = tod_desk_text(d);
+    void *layout = f_gtk_widget_create_pango_layout(d->text, *t ? t : " ");
+    free(t);
+    if (d->font) f_pango_layout_set_font_description(layout, d->font);
+    int w = 0, h = 0;
+    f_pango_layout_get_pixel_size(layout, &w, &h);   /* su una riga: la larghezza naturale */
+    w += 3;   /* il cursore in fondo */
+    if (w > d->maxw) w = d->maxw;
+    if (w < 12) w = 12;
+    f_pango_layout_set_width(layout, w * 1024 /* PANGO_SCALE */);
+    f_pango_layout_set_wrap(layout, 2 /* PANGO_WRAP_WORD_CHAR, come GTK_WRAP_WORD_CHAR */);
+    f_pango_layout_set_alignment(layout, 1 /* PANGO_ALIGN_CENTER */);
+    int lg[4] = {0};   /* PangoRectangle logico: x, y, larghezza, altezza */
+    f_pango_layout_get_pixel_extents(layout, NULL, lg);
+    h = lg[3];
+    if (lg[2] + 3 < w) w = lg[2] + 3;   /* andando a capo le righe sono più corte: il campo si stringe come macOS */
+    f_g_object_unref(layout);
+    f_gtk_widget_set_size_request(d->text, w, h);
+    f_gtk_window_resize(d->win, 1, 1);   /* la finestra si stringe con il testo */
+    f_gtk_window_move(d->win, d->cx - (w + 2 * TOD_DESK_PADX) / 2, d->top - TOD_DESK_PADY);
+    return 0;
+}
+
+/* un solo elemento selezionato, che è anche quello attivo: la sua casella nella griglia */
 static void *tod_desk_view(void *w, int *row, int *col) {
     GTKFN(TodList *, gtk_container_get_children, void *)
     GTKFN(void, g_list_free, TodList *)
@@ -979,83 +1256,325 @@ static void *tod_desk_view(void *w, int *row, int *col) {
     return found;
 }
 
-static int tod_desk_rename(const char *uri) {
-    GTKFN(TodList *, gtk_window_list_toplevels, void)
-    GTKFN(void, g_list_free, TodList *)
+/* il nome dell'elemento nella casella (row, col) di view diventa modificabile; uri: il file */
+static int tod_desk_edit(void *view, int row, int col, const char *uri) {
     GTKFN(int, xfdesktop_icon_view_slot_coords_to_widget_coords, void *, int, int, int *, int *)
     GTKFN(int, xfdesktop_icon_view_get_icon_size, void *)
     GTKFN(void, gtk_widget_style_get, void *, const char *, ...)
+    GTKFN(void, g_object_get, void *, const char *, ...)
+    GTKFN(void *, g_object_ref, void *)
     GTKFN(void *, gtk_widget_get_window, void *)
     GTKFN(int, gdk_window_get_origin, void *, int *, int *)
+    GTKFN(void *, gtk_widget_get_screen, void *)
+    GTKFN(void *, gdk_screen_get_rgba_visual, void *)
+    GTKFN(void, gtk_widget_set_visual, void *, void *)
+    GTKFN(void *, gtk_widget_get_pango_context, void *)
+    GTKFN(void *, pango_context_get_font_description, void *)
+    GTKFN(void *, pango_font_description_copy, void *)
+    GTKFN(void, pango_font_description_set_size, void *, int)
+    GTKFN(void, gtk_widget_override_font, void *, void *)
+    GTKFN(tod_gtype, g_type_from_name, const char *)
+    GTKFN(void *, g_type_class_ref, tod_gtype)
     GTKFN(void *, g_file_new_for_uri, const char *)
     GTKFN(char *, g_file_get_basename, void *)
+    GTKFN(int, g_file_query_file_type, void *, int, void *)
     GTKFN(void, g_free, void *)
+    GTKFN(long, g_utf8_pointer_to_offset, const char *, const char *)
     GTKFN(void *, gtk_window_new, int)
-    GTKFN(void *, gtk_entry_new, void)
-    GTKFN(void, gtk_entry_set_text, void *, const char *)
-    GTKFN(void, gtk_entry_set_alignment, void *, float)
-    GTKFN(void, gtk_entry_set_width_chars, void *, int)
-    GTKFN(void, gtk_widget_set_size_request, void *, int, int)
+    GTKFN(void *, gtk_box_new, int, int)
+    GTKFN(void *, gtk_text_view_new, void)
+    GTKFN(void *, gtk_text_view_get_buffer, void *)
+    GTKFN(void, gtk_text_view_set_wrap_mode, void *, int)
+    GTKFN(void, gtk_text_view_set_justification, void *, int)
+    GTKFN(void, gtk_text_view_set_accepts_tab, void *, int)
+    GTKFN(void, gtk_text_buffer_set_text, void *, const char *, int)
+    GTKFN(void, gtk_text_buffer_get_iter_at_offset, void *, void *, int)
+    GTKFN(void, gtk_text_buffer_select_range, void *, const void *, const void *)
     GTKFN(void, gtk_container_add, void *, void *)
     GTKFN(void, gtk_window_set_decorated, void *, int)
     GTKFN(void, gtk_window_set_skip_taskbar_hint, void *, int)
     GTKFN(void, gtk_window_set_skip_pager_hint, void *, int)
     GTKFN(void, gtk_window_set_keep_above, void *, int)
-    GTKFN(void, gtk_window_move, void *, int, int)
     GTKFN(void, gtk_widget_show_all, void *)
     GTKFN(void, gtk_window_present_with_time, void *, unsigned)
     GTKFN(void, gtk_widget_grab_focus, void *)
-    GTKFN(void, gtk_editable_select_region, void *, int, int)
     GTKFN(void *, gtk_widget_get_style_context, void *)
     GTKFN(void, gtk_style_context_add_class, void *, const char *)
     GTKFN(unsigned long, g_signal_connect_data, void *, const char *, void *, void *, void *, int)
-    if (!uri || strncmp(uri, "file://", 7) != 0) return 0;
+    int wx, wy, ox, oy;
+    if (!f_xfdesktop_icon_view_slot_coords_to_widget_coords(view, row, col, &wx, &wy)) {
+        fprintf(stderr, "tod-rinomina: scrivania, icona non trovata\n");
+        return 0;
+    }
+    if (!f_gtk_widget_get_window(view) || !f_gdk_window_get_origin(f_gtk_widget_get_window(view), &ox, &oy)) { ox = 0; oy = 0; }
+    int pad = 6, icon = f_xfdesktop_icon_view_get_icon_size(view);
+    double prop = 1.75, radius = 4, pts = 0;
+    int pts_set = 0;
+    f_gtk_widget_style_get(view, "cell-padding", &pad, "cell-text-width-proportion", &prop, "label-radius", &radius, NULL);
+    f_g_object_get(view, "icon-font-size", &pts, "icon-font-size-set", &pts_set, NULL);
+    int textw = (int)(prop * icon);   /* TEXT_WIDTH: l'etichetta va a capo qui */
+    void *file = f_g_file_new_for_uri(uri);
     size_t n = strlen(uri);
     int launcher = n > 8 && !strcmp(uri + n - 8, ".desktop");   /* lanciatore: si rinomina il nome mostrato */
+    TodDesk *d = calloc(1, sizeof *d);
+    d->file = file;
+    d->view = f_g_object_ref(view);
+    if (!launcher || !tod_desk_launcher_name(file, &d->key, &d->old)) {
+        char *base = f_g_file_get_basename(file);
+        d->old = strdup(base ? base : "");
+        f_g_free(base);
+    }
+    d->maxw = textw;
+    d->cx = ox + wx + (textw + 2 * pad) / 2;          /* centro della casella (SLOT_SIZE = testo + 2 padding) */
+    d->top = oy + wy + 2 * pad + icon + (int)radius;  /* prima riga del testo dell'etichetta */
+    /* il carattere dell'etichetta: quello della vista, con la misura scelta nelle impostazioni della scrivania */
+    d->font = f_pango_font_description_copy(f_pango_context_get_font_description(f_gtk_widget_get_pango_context(view)));
+    if (d->font && pts_set && pts > 0) f_pango_font_description_set_size(d->font, (int)(pts * 1024));
+    d->win = f_gtk_window_new(0);
+    void *screen = f_gtk_widget_get_screen(d->win);
+    void *rgba = f_gdk_screen_get_rgba_visual(screen);
+    if (rgba) f_gtk_widget_set_visual(d->win, rgba);   /* angoli tondi e anello trasparenti attorno al campo */
+    tod_rename_css(screen);
+    void *box = f_gtk_box_new(0, 0);
+    d->text = f_gtk_text_view_new();
+    f_gtk_style_context_add_class(f_gtk_widget_get_style_context(d->win), "tod-rinomina-finestra");
+    f_gtk_style_context_add_class(f_gtk_widget_get_style_context(box), "tod-rinomina-campo");
+    f_gtk_style_context_add_class(f_gtk_widget_get_style_context(d->text), "tod-rinomina-testo");
+    if (d->font) f_gtk_widget_override_font(d->text, d->font);
+    f_gtk_text_view_set_wrap_mode(d->text, 3 /* GTK_WRAP_WORD_CHAR */);
+    f_gtk_text_view_set_justification(d->text, 2 /* GTK_JUSTIFY_CENTER */);
+    f_gtk_text_view_set_accepts_tab(d->text, 0);
+    void *buf = f_gtk_text_view_get_buffer(d->text);
+    f_gtk_text_buffer_set_text(buf, d->old, -1);
+    f_gtk_container_add(box, d->text);
+    f_gtk_container_add(d->win, box);
+    f_gtk_window_set_decorated(d->win, 0);
+    f_gtk_window_set_skip_taskbar_hint(d->win, 1);
+    f_gtk_window_set_skip_pager_hint(d->win, 1);
+    f_gtk_window_set_keep_above(d->win, 1);
+    tod_desk_fit(buf, d);
+    f_g_signal_connect_data(buf, "changed", (void *)tod_desk_fit, d, NULL, 0);
+    f_g_signal_connect_data(d->win, "focus-out-event", (void *)tod_desk_focus_out, d, NULL, 0);
+    f_g_signal_connect_data(d->text, "key-press-event", (void *)tod_desk_key, d, NULL, 0);
+    /* sotto il campo l'etichetta vera non si disegna più (la classe del suo disegnatore, di xfdesktop) */
+    tod_gtype lt = f_g_type_from_name("XfdesktopCellRendererIconLabel");
+    if (!lt || !tod_hide_label(f_g_type_class_ref(lt), view, d->old))
+        fprintf(stderr, "tod-rinomina: scrivania, l'etichetta sotto il campo resta\n");
+    f_gtk_widget_show_all(d->win);
+    f_gtk_window_present_with_time(d->win, 0);
+    f_gtk_widget_grab_focus(d->text);
+    /* come macOS: le cartelle e i lanciatori per intero, i file senza l'estensione */
+    const char *dot = d->key || f_g_file_query_file_type(file, 0, NULL) == 2 /* G_FILE_TYPE_DIRECTORY */
+                      ? NULL : strrchr(d->old, '.');
+    long s[16], e[16];
+    f_gtk_text_buffer_get_iter_at_offset(buf, s, 0);
+    f_gtk_text_buffer_get_iter_at_offset(buf, e, dot && dot != d->old ? (int)f_g_utf8_pointer_to_offset(d->old, dot) : -1);
+    f_gtk_text_buffer_select_range(buf, e, s);   /* cursore in fondo alla parte scelta, come GtkEntry */
+    fprintf(stderr, "tod-rinomina: scrivania, sul nome\n");
+    return 1;
+}
+
+static int tod_desk_rename(const char *uri) {
+    GTKFN(TodList *, gtk_window_list_toplevels, void)
+    GTKFN(void, g_list_free, TodList *)
+    if (!uri || strncmp(uri, "file://", 7) != 0) return 0;
     int row = -1, col = -1;
     void *view = NULL;
     TodList *tops = f_gtk_window_list_toplevels();
     for (TodList *l = tops; l && !view; l = l->next) view = tod_desk_view(l->data, &row, &col);
     f_g_list_free(tops);
-    int wx, wy, ox, oy;
-    if (!view || !f_xfdesktop_icon_view_slot_coords_to_widget_coords(view, row, col, &wx, &wy)) {
+    if (!view) {
         fprintf(stderr, "tod-rinomina: scrivania, icona non trovata\n");
         return 0;
     }
-    if (!f_gtk_widget_get_window(view) || !f_gdk_window_get_origin(f_gtk_widget_get_window(view), &ox, &oy)) { ox = 0; oy = 0; }
-    int spacing = 2, pad = 6, icon = f_xfdesktop_icon_view_get_icon_size(view);
-    double prop = 1.75, radius = 4;
-    f_gtk_widget_style_get(view, "cell-spacing", &spacing, "cell-padding", &pad,
-                           "cell-text-width-proportion", &prop, "label-radius", &radius, NULL);
-    int width = (int)(prop * icon + radius * 2);
-    void *file = f_g_file_new_for_uri(uri);
-    char *base = f_g_file_get_basename(file);
-    TodDesk *d = calloc(1, sizeof *d);
-    d->file = file;
-    if (!launcher || !tod_desk_launcher_name(file, &d->key, &d->old)) d->old = strdup(base ? base : "");
-    f_g_free(base);
-    d->win = f_gtk_window_new(0);
-    d->entry = f_gtk_entry_new();
-    f_gtk_style_context_add_class(f_gtk_widget_get_style_context(d->win), "tod-rename");
-    f_gtk_window_set_decorated(d->win, 0);
-    f_gtk_window_set_skip_taskbar_hint(d->win, 1);
-    f_gtk_window_set_skip_pager_hint(d->win, 1);
-    f_gtk_window_set_keep_above(d->win, 1);
-    f_gtk_entry_set_text(d->entry, d->old);
-    f_gtk_entry_set_alignment(d->entry, 0.5f);
-    f_gtk_entry_set_width_chars(d->entry, 4);
-    f_gtk_widget_set_size_request(d->entry, width, -1);
-    f_gtk_container_add(d->win, d->entry);
-    f_gtk_window_move(d->win, ox + wx + pad - (int)radius, oy + wy + pad + icon + spacing);
-    f_g_signal_connect_data(d->entry, "activate", (void *)tod_desk_activate, d, NULL, 0);
-    f_g_signal_connect_data(d->win, "focus-out-event", (void *)tod_desk_focus_out, d, NULL, 0);
-    f_g_signal_connect_data(d->win, "key-press-event", (void *)tod_desk_key, d, NULL, 0);
-    f_gtk_widget_show_all(d->win);
-    f_gtk_window_present_with_time(d->win, 0);
-    f_gtk_widget_grab_focus(d->entry);
-    const char *dot = d->key ? NULL : strrchr(d->old, '.');
-    f_gtk_editable_select_region(d->entry, 0, dot && dot != d->old ? (int)(dot - d->old) : -1);
-    fprintf(stderr, "tod-rinomina: scrivania, sul nome\n");
+    return tod_desk_edit(view, row, col, uri);
+}
+
+/* --- Nuova cartella / Nuovo documento come macOS (8 novembre) ---
+ * Pietro: "senza finestra che si apre con la casella del nome, LO VOGLIO IDENTICO A MACOS". Thunar e la scrivania
+ * chiedono il nome con una finestra già riempita con un nome libero ("Nuova cartella", "Nuova cartella 1"...,
+ * "Nuovo file vuoto", il nome del modello). Qui quella finestra non si mostra: si risponde subito "Crea" con quel
+ * nome; quando l'elemento nuovo compare (Thunar lo seleziona da sé; sulla scrivania sta nel punto del clic) si
+ * seleziona e parte la rinomina sul nome, come su macOS. Thunar: con la sua azione "Rinomina" (scorciatoia F2 o
+ * quella scelta dall'utente), così il resto passa da tod_inline_rename. Se la vista non si trova, la finestra si
+ * mostra come prima; se l'elemento non compare entro 4 s, resta col nome proposto. */
+typedef struct { void *win, *view; char *name; int ticks, desk; } TodNew;
+
+/* scrivania: l'elemento con quel nome, quando ha la sua casella nella griglia */
+static int tod_new_desk(TodNew *n) {
+    GTKFN(void *, xfdesktop_icon_view_get_model, void *)
+    GTKFN(void, xfdesktop_icon_view_unselect_all, void *)
+    GTKFN(void, xfdesktop_icon_view_select_item, void *, void *)
+    GTKFN(void, g_object_get, void *, const char *, ...)
+    GTKFN(int, gtk_tree_model_get_iter_first, void *, void *)
+    GTKFN(int, gtk_tree_model_iter_next, void *, void *)
+    GTKFN(void, gtk_tree_model_get, void *, void *, ...)
+    GTKFN(const char *, g_get_user_special_dir, int)
+    GTKFN(char *, g_build_filename, const char *, ...)
+    GTKFN(char *, g_filename_to_uri, const char *, const char *, void *)
+    GTKFN(void, g_free, void *)
+    int tc = -1, rc = -1, cc = -1;
+    void *model = f_xfdesktop_icon_view_get_model(n->view);
+    f_g_object_get(n->view, "text-column", &tc, "row-column", &rc, "col-column", &cc, NULL);
+    if (!model || tc < 0 || rc < 0 || cc < 0) return 1;   /* niente da fare: resta così */
+    long it[4] = {0};
+    for (int ok = f_gtk_tree_model_get_iter_first(model, it); ok; ok = f_gtk_tree_model_iter_next(model, it)) {
+        char *t = NULL;
+        int r = -1, c = -1;
+        f_gtk_tree_model_get(model, it, tc, &t, rc, &r, cc, &c, -1);
+        int same = t && !strcmp(t, n->name);
+        f_g_free(t);
+        if (!same) continue;
+        if (r < 0 || c < 0) return 0;   /* c'è ma non è ancora al suo posto */
+        f_xfdesktop_icon_view_unselect_all(n->view);
+        f_xfdesktop_icon_view_select_item(n->view, it);
+        const char *desk = f_g_get_user_special_dir(0 /* G_USER_DIRECTORY_DESKTOP, come xfdesktop */);
+        char *path = desk ? f_g_build_filename(desk, n->name, NULL) : NULL;
+        char *uri = path ? f_g_filename_to_uri(path, NULL, NULL) : NULL;
+        if (uri) tod_desk_edit(n->view, r, c, uri);
+        f_g_free(uri);
+        f_g_free(path);
+        return 1;
+    }
+    return 0;
+}
+
+/* Thunar: il file nuovo è l'unico selezionato (un testo della sua riga è il nome) → la sua azione Rinomina */
+static int tod_new_thunar(TodNew *n) {
+    GTKFN(void *, gtk_window_get_focus, void *)
+    GTKFN(tod_gtype, exo_icon_view_get_type, void)
+    GTKFN(tod_gtype, gtk_tree_view_get_type, void)
+    GTKFN(int, g_type_check_instance_is_a, void *, tod_gtype)
+    GTKFN(TodList *, exo_icon_view_get_selected_items, void *)
+    GTKFN(void *, exo_icon_view_get_model, void *)
+    GTKFN(void *, gtk_tree_view_get_selection, void *)
+    GTKFN(TodList *, gtk_tree_selection_get_selected_rows, void *, void **)
+    GTKFN(int, gtk_tree_model_get_iter, void *, void *, void *)
+    GTKFN(int, gtk_tree_model_get_n_columns, void *)
+    GTKFN(tod_gtype, gtk_tree_model_get_column_type, void *, int)
+    GTKFN(void, gtk_tree_model_get, void *, void *, ...)
+    GTKFN(void, gtk_tree_path_free, void *)
+    GTKFN(void, g_list_free, TodList *)
+    GTKFN(void, g_free, void *)
+    GTKFN(int, gtk_accel_map_lookup_entry, const char *, unsigned *)
+    GTKFN(int, gtk_accel_groups_activate, void *, unsigned, int)
+    void *view = f_gtk_window_get_focus(n->win);
+    if (!view) return 0;
+    int icons = f_g_type_check_instance_is_a(view, f_exo_icon_view_get_type());
+    int tree = !icons && f_g_type_check_instance_is_a(view, f_gtk_tree_view_get_type());
+    if (!icons && !tree) return 0;
+    void *model = NULL;
+    TodList *sel = icons ? f_exo_icon_view_get_selected_items(view)
+                         : f_gtk_tree_selection_get_selected_rows(f_gtk_tree_view_get_selection(view), &model);
+    if (icons) model = f_exo_icon_view_get_model(view);
+    int found = 0;
+    long it[4] = {0};
+    if (sel && !sel->next && model && f_gtk_tree_model_get_iter(model, it, sel->data)) {
+        int cols = f_gtk_tree_model_get_n_columns(model);
+        for (int c = 0; c < cols && !found; c++) {
+            if (f_gtk_tree_model_get_column_type(model, c) != 64 /* G_TYPE_STRING */) continue;
+            char *t = NULL;
+            f_gtk_tree_model_get(model, it, c, &t, -1);
+            found = t && !strcmp(t, n->name);
+            f_g_free(t);
+        }
+    }
+    for (TodList *l = sel; l; l = l->next) f_gtk_tree_path_free(l->data);
+    f_g_list_free(sel);
+    if (!found) return 0;
+    unsigned key[3] = {0xffbf /* F2 */, 0, 0};   /* GtkAccelKey: tasto, modificatori, flag */
+    if (!f_gtk_accel_map_lookup_entry("<Actions>/ThunarStandardView/rename", key) || !key[0]) {
+        key[0] = 0xffbf;
+        key[1] = 0;
+    }
+    fprintf(stderr, "tod-nuovo: %s selezionato, rinomina sul nome\n", n->name);
+    if (!f_gtk_accel_groups_activate(n->win, key[0], (int)key[1]))
+        fprintf(stderr, "tod-nuovo: l'azione Rinomina di Thunar non è partita\n");
+    return 1;
+}
+
+static int tod_new_tick(TodNew *n) {
+    GTKFN(void, g_object_unref, void *)
+    int done = ++n->ticks > 80;   /* 4 s */
+    if (done) fprintf(stderr, "tod-nuovo: %s non è comparso, resta col nome proposto\n", n->name);
+    else done = n->desk ? tod_new_desk(n) : tod_new_thunar(n);
+    if (!done) return 1;   /* G_SOURCE_CONTINUE */
+    f_g_object_unref(n->win);
+    if (n->view) f_g_object_unref(n->view);
+    free(n->name);
+    free(n);
+    return 0;
+}
+
+/* la vista delle icone della scrivania dentro w (o in una qualunque finestra di xfdesktop se w è NULL) */
+static void *tod_desk_iconview(void *w) {
+    GTKFN(TodList *, gtk_window_list_toplevels, void)
+    GTKFN(void, g_list_free, TodList *)
+    if (w) return tod_find_type(w, "XfdesktopIconView");
+    void *found = NULL;
+    TodList *tops = f_gtk_window_list_toplevels();
+    for (TodList *l = tops; l && !found; l = l->next) found = tod_find_type(l->data, "XfdesktopIconView");
+    f_g_list_free(tops);
+    return found;
+}
+
+static int tod_create_inline(void *dialog, int *response) {
+    GTKFN(const char *, g_get_prgname, void)
+    GTKFN(void *, gtk_window_get_transient_for, void *)
+    GTKFN(void *, gtk_window_get_focus, void *)
+    GTKFN(tod_gtype, exo_icon_view_get_type, void)
+    GTKFN(tod_gtype, gtk_tree_view_get_type, void)
+    GTKFN(int, g_type_check_instance_is_a, void *, tod_gtype)
+    GTKFN(const char *, gtk_entry_get_text, void *)
+    GTKFN(void *, gtk_dialog_get_action_area, void *)
+    GTKFN(TodList *, gtk_container_get_children, void *)
+    GTKFN(void, g_list_free, TodList *)
+    GTKFN(int, gtk_dialog_get_response_for_widget, void *, void *)
+    GTKFN(int, gtk_widget_is_sensitive, void *)
+    GTKFN(void *, gtk_widget_get_toplevel, void *)
+    GTKFN(void *, g_object_ref, void *)
+    GTKFN(unsigned, g_timeout_add, unsigned, void *, void *)
+    const char *prg = f_g_get_prgname();
+    if (!prg || getenv("TOD_RINOMINA_CLASSICA") || getenv("TOD_NUOVO_CLASSICO")) return 0;
+    int desk = !strcmp(prg, "xfdesktop");
+    if (!desk && strcasecmp(prg, "thunar") != 0) return 0;
+    void *entry = tod_create_entry(dialog);
+    const char *name = entry ? f_gtk_entry_get_text(entry) : NULL;
+    if (!name || !*name) return 0;
+    /* "Crea": il pulsante che non è Annulla, attivo solo se il nome proposto va bene */
+    int ok = 0, okr = 0;
+    void *actions = f_gtk_dialog_get_action_area(dialog);
+    TodList *btns = actions ? f_gtk_container_get_children(actions) : NULL;
+    for (TodList *l = btns; l; l = l->next) {
+        int r = f_gtk_dialog_get_response_for_widget(dialog, l->data);
+        if (r != -6 && r != -4 && r != -1 && r != 0) { okr = r; ok = f_gtk_widget_is_sensitive(l->data); }
+    }
+    f_g_list_free(btns);
+    if (!okr || !ok) return 0;
+    void *win = NULL, *view = NULL;
+    if (desk) {
+        view = tod_desk_iconview(f_gtk_window_get_transient_for(dialog));
+        if (!view) view = tod_desk_iconview(NULL);
+        if (view) win = f_gtk_widget_get_toplevel(view);
+    } else {
+        win = f_gtk_window_get_transient_for(dialog);
+        if (!win) win = tod_active_window(dialog);
+        void *focus = win ? f_gtk_window_get_focus(win) : NULL;
+        if (!focus || !(f_g_type_check_instance_is_a(focus, f_exo_icon_view_get_type()) ||
+                        f_g_type_check_instance_is_a(focus, f_gtk_tree_view_get_type()))) win = NULL;
+    }
+    if (!win) {
+        fprintf(stderr, "tod-nuovo: vista non trovata, la finestra del nome resta\n");
+        return 0;
+    }
+    TodNew *n = calloc(1, sizeof *n);
+    n->win = f_g_object_ref(win);
+    n->view = view ? f_g_object_ref(view) : NULL;
+    n->name = strdup(name);
+    n->desk = desk;
+    f_g_timeout_add(50, (void *)tod_new_tick, n);
+    fprintf(stderr, "tod-nuovo: %s \"%s\" senza finestra\n", desk ? "scrivania" : "Thunar", name);
+    *response = okr;
     return 1;
 }
 
