@@ -16,6 +16,7 @@ condivise sono cartelle vere per ogni app del desktop, anche nel container. Qui:
 import fcntl
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -136,27 +137,77 @@ def nome_da_dns(ip):
         return ""
 
 
-def cerca_pc(attesa=2.0):
-    """I PC e i NAS in rete: [{"nome", "ip", "porta", "da"}]."""
-    trovati = {}
-    record, sorgenti, _ = scoperta.chiedi_bonjour(["_smb._tcp.local"], attesa)
-    per = {}
+def solo_indirizzo(nome):
+    """"192-168-178-1": un nome che è solo l'indirizzo (la FRITZ!Box risponde così a NetBIOS e a Bonjour)."""
+    return bool(re.match(r"^\d{1,3}([-.]\d{1,3}){3}$", nome or ""))
+
+
+def candidati(record, sorgenti, wsd):
+    """Dalle risposte: {indirizzo: {"nomi": [nomi Bonjour], "porta", "da"}}. Un nome con più indirizzi (8 novembre: "fritz.box"
+    era anche 192.168.178.96, che non è un PC) prende quello di chi ha risposto."""
+    indirizzi, per = {}, {}
     for nome, tipo, dati in record:
-        per.setdefault(nome.lower(), {}).setdefault(tipo, dati)
+        if tipo == scoperta.A:
+            indirizzi.setdefault(nome.lower(), [])
+            if dati not in indirizzi[nome.lower()]:
+                indirizzi[nome.lower()].append(dati)
+        else:
+            per.setdefault(nome.lower(), {}).setdefault(tipo, dati)
+    trovati = {}
     for nome, tipo, dati in record:
         if tipo != scoperta.PTR or nome.lower() != "_smb._tcp.local":
             continue
         srv = per.get(dati.lower(), {}).get(scoperta.SRV)
         if not srv:
             continue
-        ip = per.get(srv[1].lower(), {}).get(scoperta.A) or sorgenti.get(dati.lower())
-        if ip:
-            trovati[ip] = {"nome": dati.split("._smb")[0], "ip": ip, "porta": srv[0], "da": "bonjour"}
-    for ip in scoperta.chiedi_wsd(attesa):
-        if ip not in trovati:
-            nome = scoperta.nome_netbios(ip) or nome_da_dns(ip) or f"PC {ip}"
-            trovati[ip] = {"nome": nome, "ip": ip, "porta": 445, "da": "wsd"}
-    return list(trovati.values())
+        chi = sorgenti.get(dati.lower())
+        ips = indirizzi.get(srv[1].lower(), [])
+        ip = chi if chi and (chi in ips or not ips) else (ips[0] if ips else None)
+        if not ip:
+            continue
+        c = trovati.setdefault(ip, {"nomi": [], "porta": srv[0], "da": "bonjour"})
+        istanza = dati.split("._smb")[0]
+        if istanza not in c["nomi"]:
+            c["nomi"].append(istanza)
+    for ip in wsd:
+        trovati.setdefault(ip, {"nomi": [], "porta": 445, "da": "wsd"})
+    return trovati
+
+
+def nome_migliore(nomi, ip):
+    """Il primo nome che non sia solo l'indirizzo; sennò "PC <indirizzo>"."""
+    return next((n for n in nomi if n and not solo_indirizzo(n)), f"PC {ip}")
+
+
+def porta_aperta(ip, porta, attesa=1.0):
+    try:
+        socket.create_connection((ip, porta), attesa).close()
+        return True
+    except OSError:
+        return False
+
+
+def cerca_pc(attesa=2.0):
+    """I PC e i NAS in rete con le cartelle condivise (porta SMB aperta): [{"nome", "ip", "porta", "da"}]."""
+    record, sorgenti, _ = scoperta.chiedi_bonjour(["_smb._tcp.local"], attesa)
+    trovati = candidati(record, sorgenti, scoperta.chiedi_wsd(attesa))
+    out, m = [], threading.Lock()
+
+    def uno(ip, c):
+        if not porta_aperta(ip, c["porta"]):
+            return
+        nomi = list(c["nomi"])
+        if not any(not solo_indirizzo(n) for n in nomi):   # il nome dei Windows, poi quello del router (DNS)
+            nomi += [scoperta.nome_netbios(ip), nome_da_dns(ip)]
+        with m:
+            out.append({"nome": nome_migliore(nomi, ip), "ip": ip, "porta": c["porta"], "da": c["da"]})
+
+    fili = [threading.Thread(target=uno, args=(ip, c)) for ip, c in trovati.items()]
+    for f in fili:
+        f.start()
+    for f in fili:
+        f.join()
+    return sorted(out, key=lambda p: p["ip"])
 
 
 def tutti_i_nomi(pc_list):

@@ -2089,6 +2089,25 @@ EOF
   eq "nomi" $'pc-di-pietro\nnas_casa\nunit---usb\nmac.local' "$py"
 }
 
+test_rete_nomi() { # 8 novembre, la FRITZ!Box di Pietro: due annunci Bonjour ("fritz-box" e "192-168-178-1"), "fritz.box"
+  # con due indirizzi (192.168.178.96 non è un PC): il nome vero e l'indirizzo di chi ha risposto; il PC Windows da WS-Discovery
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(_rete_py <<'EOF'
+rec = [("_smb._tcp.local", 12, "fritz-box._smb._tcp.local"), ("fritz-box._smb._tcp.local", 33, (445, "fritz.box")),
+       ("_smb._tcp.local", 12, "192-168-178-1._smb._tcp.local"), ("192-168-178-1._smb._tcp.local", 33, (445, "fritz.box")),
+       ("fritz.box", 1, "192.168.178.96"), ("fritz.box", 1, "192.168.178.1")]
+sorg = {"fritz-box._smb._tcp.local": "192.168.178.1", "192-168-178-1._smb._tcp.local": "192.168.178.1"}
+c = m.candidati(rec, sorg, {"192.168.178.1": "pub:Computer", "192.168.178.46": "pub:Computer"})
+print(sorted((ip, v["nomi"], v["porta"], v["da"]) for ip, v in c.items()))
+print(m.nome_migliore(c["192.168.178.1"]["nomi"], "192.168.178.1"), "|", m.nome_migliore(["", "192-168-178-1", "fritz"], "x"),
+      "|", m.nome_migliore(["192-168-178-1", ""], "192.168.178.1"))
+EOF
+)
+  eq "FRITZ!Box e PC Windows" "[('192.168.178.1', ['fritz-box', '192-168-178-1'], 445, 'bonjour'), ('192.168.178.46', [], 445, 'wsd')]
+fritz-box | fritz | PC 192.168.178.1" "$out"
+}
+
 test_rete_password() { # la password: prima da ospite, poi la finestra; ricordata nel portachiavi; quella rifiutata si
   # richiede con l'avviso; con una password in memoria nessuna finestra
   command -v python3 >/dev/null || return 0
