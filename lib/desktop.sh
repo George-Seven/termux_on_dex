@@ -97,6 +97,14 @@ desktop_scanner_entry() { # "Scanner" nello Start (share/stampa/tod-scanner.py),
   printf 'StartupWMClass=tod-scanner\nComment=Scan documents and photos with your Wi-Fi or USB scanner\nComment[it]=Scansiona documenti e foto con lo scanner Wi-Fi o USB\n' >>"$f"
 }
 
+desktop_store_entry() { # "Store" nello Start (share/store/tod-store-gui.py): le app di Termux, Debian e Flathub
+  local f="$HOME/.local/share/applications/tod-store.desktop"
+  mkdir -p "${f%/*}"
+  desktop_entry "$f" "Store" "Store" "python3 $TOD_ROOT/share/store/tod-store-gui.py" system-software-install false
+  sed -i 's/^Categories=.*/Categories=System;PackageManager;/' "$f"
+  printf 'StartupWMClass=tod-store\nStartupNotify=true\nComment=Find and install apps\nComment[it]=Trova e installa le app\nKeywords=app;store;flathub;install;installa;\n' >>"$f"
+}
+
 desktop_install_entries() {
   local apps="$HOME/.local/share/applications" auto="$HOME/.config/autostart" tod="$PREFIX/bin/tod"
   mkdir -p "$apps" "$auto"
@@ -114,6 +122,7 @@ desktop_install_entries() {
   sed -i 's/^Categories=.*/Categories=Settings;X-XFCE-SettingsDialog;X-XFCE-SystemSettings;/' "$apps/tod-updates.desktop"
   desktop_dischi_entry
   desktop_scanner_entry
+  desktop_store_entry
   # "Spegni": chiude desktop, audio e server X e torna ad Android. Nel menu no: c'è già il pulsante
   # di accensione dello Start
   desktop_entry "$apps/tod-stop.desktop" "Shut down" "Spegni" "$tod spegni" system-shutdown false true

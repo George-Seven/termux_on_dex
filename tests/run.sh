@@ -924,6 +924,244 @@ test_diretto_collegamenti() { # collegamenti assoluti → relativi: senza proot 
   has "un secondo giro non fa niente" ": 0" "$(python3 "$TOD_ROOT/share/diretto/collegamenti.py" "$r")"
 }
 
+test_store_prepara() { # Store (9 novembre): le estensioni di Flatpak "montate" con collegamenti, radice dell'app, menu
+  local s="$WORK/st_$$" rt ap gl lo
+  rt="$s/flatpak/runtime/org.prova.Platform/aarch64/1/c1/files"
+  gl="$s/flatpak/runtime/org.prova.Platform.GL.default/aarch64/1.0/c2/files"
+  lo="$s/flatpak/runtime/org.prova.Platform.Locale/aarch64/1/c3/files"
+  ap="$s/flatpak/app/org.prova.App/aarch64/stable/c4/files"
+  mkdir -p "$rt/etc/fonts" "$rt/lib/aarch64-linux-gnu/GL" "$rt/share/runtime/locale" "$rt/share/common" \
+    "$rt/share/licenses" "$rt/bin" "$gl/lib" "$lo/it" "$ap/bin" "$ap/share/applications" \
+    "$ap/share/icons/hicolor/scalable/apps"
+  echo licenza >"$rt/share/common/LICENSE"
+  ln -s /usr/share/common/LICENSE "$rt/share/licenses/prova"
+  echo py >"$rt/bin/python3"
+  ln -s /usr/bin/python3 "$rt/bin/python"
+  echo gl >"$gl/lib/libGL.so"
+  echo it >"$lo/it/x"
+  echo app >"$ap/bin/app"
+  echo '<svg/>' >"$ap/share/icons/hicolor/scalable/apps/org.prova.App.svg"
+  printf '[Desktop Entry]\nName=Prova\nName[it]=Prova it\nExec=app %%U\nTryExec=app\nIcon=org.prova.App\n' \
+    >"$ap/share/applications/org.prova.App.desktop"
+  printf '[Runtime]\nname=org.prova.Platform\n\n[Environment]\nXDG_DATA_DIRS=/app/share:/usr/share\n\n' >"$rt/../metadata"
+  printf '[Extension org.prova.Platform.GL]\nversions=1.0\ndirectory=lib/aarch64-linux-gnu/GL\nsubdirectories=true\nadd-ld-path=lib\n\n' >>"$rt/../metadata"
+  printf '[Extension org.prova.Platform.Locale]\ndirectory=share/runtime/locale\n' >>"$rt/../metadata"
+  printf '[Application]\nname=org.prova.App\nruntime=org.prova.Platform/aarch64/1\ncommand=app\n' >"$ap/../metadata"
+  ln -s c1 "$s/flatpak/runtime/org.prova.Platform/aarch64/1/active"
+  ln -s c2 "$s/flatpak/runtime/org.prova.Platform.GL.default/aarch64/1.0/active"
+  ln -s c3 "$s/flatpak/runtime/org.prova.Platform.Locale/aarch64/1/active"
+  ln -s c4 "$s/flatpak/app/org.prova.App/aarch64/stable/active"
+  local py="$TOD_ROOT/share/store/tod-store.py"
+  TOD_STORE_DIR=$s TOD_STORE_CASA=/casa/dex python3 "$py" prepara org.prova.App >/dev/null
+  eq "Mesa dentro il runtime (GL/default)" gl "$(cat "$rt/lib/aarch64-linux-gnu/GL/default/lib/libGL.so")"
+  has "collegamento relativo" "../" "$(readlink "$rt/lib/aarch64-linux-gnu/GL/default")"
+  eq "traduzioni" it "$(cat "$rt/share/runtime/locale/it/x")"
+  eq "assoluto → relativo" licenza "$(cat "$rt/share/licenses/prova")"
+  eq "stessa cartella" python3 "$(readlink "$rt/bin/python")"
+  local rad="$s/radici/org.prova.App"
+  eq "radice: /usr = runtime" "$(cd "$rt" && pwd -P)" "$(readlink "$rad/usr")"
+  eq "radice: /app = app" "$(cd "$ap" && pwd -P)" "$(readlink "$rad/app")"
+  eq "radice: /etc del runtime" ../usr/etc/fonts "$(readlink "$rad/etc/fonts")"
+  has "la casa vera nell'utente" ":/casa/dex:" "$(cat "$rad/etc/passwd")"
+  has "add-ld-path dell'estensione" "/c2/files/lib" "$(cat "$rad/.ld-path")"
+  TOD_STORE_DIR=$s TOD_STORE_MENU="$s/menu" TOD_STORE_TOD=/x/tod python3 "$py" menu org.prova.App >/dev/null
+  local d
+  d=$(cat "$s/menu/tod-store-org.prova.App.desktop")
+  has "si avvia dallo Store" "Exec=/x/tod store avvia org.prova.App %U" "$d"
+  has "segnata" "X-TOD-Store=flathub" "$d"
+  has "icona dal percorso stabile (active)" "/stable/active/files/share/icons/hicolor/scalable/apps/org.prova.App.svg" "$d"
+  if grep -q '^TryExec=' <<<"$d"; then eq "niente TryExec" "" "$d"; fi
+  has "elenco" "org.prova.App	Prova it" "$(TOD_STORE_DIR=$s TOD_STORE_LANG=it_IT.UTF-8 python3 "$py" elenco)"
+  TOD_STORE_DIR=$s TOD_STORE_MENU="$s/menu" TOD_STORE_TOD=/x/tod python3 "$py" togli-menu org.prova.App >/dev/null
+  eq "voce tolta" "" "$(ls "$s/menu")"
+}
+
+test_store_lancio() { # Store senza proot (9 novembre, Boxy SVG non si apriva): script #!, percorso vero, zypak
+  local s="$WORK/sl_$$" rad vero
+  rad="$s/radici/org.prova.App"
+  vero="$s/flatpak/app/files"
+  mkdir -p "$vero/bin" "$vero/main" "$s/rt/bin" "$rad"
+  ln -s "$vero" "$rad/app"
+  ln -s "$s/rt" "$rad/usr"
+  ln -s usr/bin "$rad/bin"
+  printf '#!/bin/bash\nexec zypak-wrapper /app/main/prog "$@"\n' >"$vero/bin/avvio"
+  printf '#!/usr/bin/env python3\n' >"$vero/bin/script-py"
+  printf '\177ELF' >"$vero/main/prog"
+  echo bash >"$s/rt/bin/bash"
+  echo py >"$vero/bin/python3"
+  local out
+  out=$(cd "$TOD_ROOT/share/store" && TOD_STORE_DIR=$s python3 -c '
+import importlib.util, os, sys
+sp = importlib.util.spec_from_file_location("ts", "tod-store.py"); m = importlib.util.module_from_spec(sp)
+sp.loader.exec_module(m)
+r = sys.argv[1]
+for p in ("/app/bin/avvio", "/app/bin/script-py", "/app/main/prog"):
+    n, v, prima = m.lancio(r, p)
+    print(n, v.replace(os.path.realpath(sys.argv[2]), "S"), " ".join(prima))
+d = m.aiutanti()
+z = open(os.path.join(d, "zypak-wrapper")).read()
+print(os.access(os.path.join(d, "zypak-wrapper"), os.X_OK), "readlink -f" in z, "--no-sandbox" in z,
+      os.access(os.path.join(d, "flatpak-spawn"), os.X_OK))' "$rad" "$s")
+  has "script: l'interprete del runtime, col percorso vero" "/bin/bash S/rt/bin/bash /app/bin/avvio" "$out"
+  has "#!/usr/bin/env: cerca prima in /app/bin" "/app/bin/python3 S/flatpak/app/files/bin/python3 /app/bin/script-py" "$out"
+  has "programma: il percorso vero (Chromium confronta /proc/self/exe)" "/app/main/prog S/flatpak/app/files/main/prog" "$out"
+  has "aiutanti di Flatpak" "True True True True" "$out"
+}
+
+test_store_catalogo() { # Store, finestra: il catalogo AppStream di Flathub → app con id vero, lingua, ricerca
+  local s="$WORK/sc_$$" c
+  c="$s/flatpak/appstream/flathub/aarch64/active"
+  mkdir -p "$c/icons/128x128"
+  echo png >"$c/icons/128x128/org.prova.Scrivi.png"
+  python3 - "$c/appstream.xml.gz" <<'PY'
+import gzip, sys
+x = """<?xml version="1.0" encoding="UTF-8"?>
+<components version="0.8" origin="flatpak">
+ <component type="desktop-application"><id>org.prova.Scrivi.desktop</id>
+  <name>Writer</name><name xml:lang="it">Scrivi</name>
+  <summary>Write texts</summary><summary xml:lang="it">Scrivi testi</summary>
+  <description><p>Plain editor.</p><ul><li>Fast</li></ul></description>
+  <description xml:lang="it"><p>Editor semplice.</p><ul><li>Veloce</li></ul></description>
+  <icon type="cached" width="128" height="128">org.prova.Scrivi.png</icon>
+  <categories><category>Office</category></categories>
+  <releases><release version="2.1" timestamp="1700000000"/></releases>
+  <custom><value key="flathub::verification::verified">true</value></custom>
+  <bundle type="flatpak" runtime="org.kde.Platform/aarch64/6.11">app/org.prova.Scrivi/aarch64/stable</bundle>
+ </component>
+ <component type="desktop-application"><id>org.prova.Note</id><name>Note di scrittura</name><summary>Appunti</summary>
+  <bundle type="flatpak" runtime="org.gnome.Platform/aarch64/51">app/org.prova.Note/aarch64/stable</bundle></component>
+ <component type="runtime"><id>org.kde.Platform</id><name>KDE</name>
+  <bundle type="flatpak">runtime/org.kde.Platform/aarch64/6.11</bundle></component>
+</components>"""
+with gzip.open(sys.argv[1], "wt", encoding="utf-8") as f:
+    f.write(x)
+PY
+  local out
+  out=$(cd "$TOD_ROOT/share/store" && python3 -c '
+import sys, catalogo
+a = catalogo.leggi(sys.argv[1], "it")
+s = [x for x in a if x["id"] == "org.prova.Scrivi"][0]
+print(len(a), s["nome"], s["sommario"], s["runtime"], s["versione"], s["verificata"], bool(s["icona"]))
+print(s["descrizione"].replace("\n", "|"))
+print(",".join(x["id"] for x in catalogo.cerca(a, "scri")))
+print(len(catalogo.leggi(sys.argv[1], "it")))' "$s")
+  has "solo le app, id del bundle, testi in italiano" "2 Scrivi Scrivi testi org.kde.Platform/aarch64/6.11 2.1 True True" "$out"
+  has "descrizione con elenco" "Editor semplice.||• Veloce" "$out"
+  has "prima chi comincia così" "org.prova.Scrivi,org.prova.Note" "$out"
+  [[ -s $s/cache/catalogo-it.json ]] || eq "indice in cache" si no
+}
+
+test_store_fonte() { # Store: prima Termux, poi Debian, Flathub solo per il resto; solo pacchetti con una finestra
+  fresh_env store2
+  # shellcheck source=/dev/null
+  . "$ROOT/lib/store.sh"
+  local out
+  out=$(
+    pkg_has() { [[ " gimp boxes telegram-desktop " == *" $1 "* ]]; }
+    cx_installed() { return 0; }
+    cx_has() { [[ " boxes gnome-boxes libreoffice " == *" $1 "* ]]; }
+    store_dipendenze() { # come apt-cache show: Depends veri (ridotti)
+      local p
+      shift
+      for p in "$@"; do
+        case $p in
+          gimp) printf 'gimp\t, gtk3, glib, babl\n' ;;
+          boxes) printf 'boxes\t, libc6 (>= 2.38), libunistring5\n' ;;
+          gnome-boxes) printf 'gnome-boxes\t, libc6, libgtk-4-1 (>= 4.14), libadwaita-1-0\n' ;;
+          telegram-desktop) printf 'telegram-desktop\t, qt6-qtbase, ffmpeg\n' ;;
+          libreoffice) printf 'libreoffice\t, libreoffice-core, libreoffice-writer, libreoffice-calc\n' ;;
+        esac
+      done
+    }
+    for i in org.gimp.GIMP org.gnome.Boxes org.telegram.desktop org.libreoffice.LibreOffice io.github.prova.Solo; do
+      store_fonte "$i"
+    done
+  )
+  eq "fonti" "$(printf 'termux\tgimp\ndebian\tgnome-boxes\ntermux\ttelegram-desktop\ndebian\tlibreoffice\nflathub\tio.github.prova.Solo')" "$out"
+  out=$(
+    store_assicura() { :; }
+    store_trova() { printf 'org.gimp.GIMP'; }
+    app_owner() { :; }
+    store_fonte() { printf 'termux\tgimp\n'; }
+    apt_cli() { printf 'apt %s\n' "$*"; }
+    store_fp() { printf 'FLATPAK\n'; }
+    store_installa gimp 2>&1
+  )
+  has "da Termux con tod apt" "apt install -y gimp" "$out"
+  has "lo dice" "la installo da Termux (pacchetto gimp)" "$out"
+  if grep -q FLATPAK <<<"$out"; then eq "niente Flathub" "" "$out"; fi
+}
+
+test_store_aggiornamenti() { # Aggiornamenti: le app dello Store con nome e icona, i runtime tra i componenti di sistema
+  local f="$WORK/sagg_$$" out
+  mkdir -p "$f"
+  printf '#!/bin/sh\necho "$*" >"%s/argomenti"\necho "Updating app/org.prova.App/aarch64/stable"\n' "$f" >"$f/tod-ok"
+  printf '#!/bin/sh\necho "$*" >"%s/argomenti"\necho "error: niente rete"\nexit 1\n' "$f" >"$f/tod-ko"
+  echo png >"$f/icona.png"
+  out=$(LANGUAGE=it HOME="$f" python3 - "$ROOT/share/tod-updates.py" "$f" <<'EOF'
+import importlib.util as u, sys
+s = u.spec_from_file_location("up", sys.argv[1]); m = u.module_from_spec(s); s.loader.exec_module(m)
+d = sys.argv[2]
+it = m.store_items("org.prova.App\tProva\t1.0\t1.1\t" + d + "/icona.png\norg.gnome.Platform\t\t\t50.3\t\n\nrumore\n")
+print(len(it), it[0]["app"], it[0]["from"], it[0]["to"], it[0]["icon"] == d + "/icona.png", it[0]["where"])
+print("app" in it[1], it[1]["name"])
+print(m.summary({"tod": [], "termux": [], "debian": [], "store": it}))
+m.TOD = d + "/tod-ok"
+passi = []
+print(m.install([it[0]], lambda f, t: passi.append(t)), "Aggiornamento di org.prova.App…" in passi)
+print(open(d + "/argomenti").read().strip())
+print(m.install(it, lambda *a: None), open(d + "/argomenti").read().strip())
+m.TOD = d + "/tod-ko"
+print(m.install(it, lambda *a: None))
+EOF
+)
+  eq "voci: app con nome e icona" "2 Prova 1.0 1.1 True store" "$(sed -n 1p <<<"$out")"
+  eq "runtime: componente di sistema" "False org.gnome.Platform" "$(sed -n 2p <<<"$out")"
+  eq "nel riassunto" "Prova e un altro aggiornamento" "$(sed -n 3p <<<"$out")"
+  eq "una sola app: solo lei" "(True, '') True" "$(sed -n 4p <<<"$out")"
+  eq "tod store aggiorna con l'id" "store aggiorna org.prova.App" "$(sed -n 5p <<<"$out")"
+  eq "con i runtime: tutto lo Store" "(True, '') store aggiorna" "$(sed -n 6p <<<"$out")"
+  eq "errore: le ultime righe" "(False, 'error: niente rete')" "$(sed -n 7p <<<"$out")"
+  has "il controllo chiede allo Store" '"_aggiornamenti"' "$(cat "$ROOT/share/tod-updates.py")"
+}
+
+test_store_voce() { # Store nello Start: con l'installazione e con ogni aggiornamento di tod (desktop_install_entries)
+  fresh_env store3
+  desktop_store_entry
+  local d
+  d=$(cat "$HOME/.local/share/applications/tod-store.desktop")
+  has "apre la finestra" "Exec=python3 $TOD_ROOT/share/store/tod-store-gui.py" "$d"
+  has "nome" "Name[it]=Store" "$d"
+  has "la barra la riconosce" "StartupWMClass=tod-store" "$d"
+  has "tra le app di sistema" "Categories=System;PackageManager;" "$d"
+  has "all'installazione e dopo gli aggiornamenti" "desktop_store_entry" "$(declare -f desktop_install_entries)"
+}
+
+test_store_nolink_compila() { # tod-nolink.c (senza intestazioni) compila senza avvisi, anche col glibc del CI
+  local cc
+  cc=$(command -v clang || command -v gcc) || { echo "  (nessun compilatore: salto)"; return 0; }
+  "$cc" -shared -fPIC -O2 -Wall -Wextra -Werror -o "$WORK/nolink_$$.so" "$ROOT/share/store/tod-nolink.c"
+  has "O_TMPFILE → EOPNOTSUPP" "EOPNOTSUPP" "$(cat "$ROOT/share/store/tod-nolink.c")"
+  has "collegamento negato → EXDEV" "EXDEV" "$(cat "$ROOT/share/store/tod-nolink.c")"
+}
+
+test_store_una_app() { # Store: una app, un solo sistema (GIMP già in Debian → niente seconda copia da Flathub)
+  fresh_env store1
+  # shellcheck source=/dev/null
+  . "$ROOT/lib/store.sh"
+  local out rc=0
+  out=$(
+    store_assicura() { :; }
+    store_trova() { printf 'org.gimp.GIMP'; }
+    app_owner() { printf 'gimp'; }
+    store_fp() { touch "$HOME/scaricato"; }
+    store_installa gimp 2>&1
+  ) || rc=$?
+  eq "rifiutata" 1 "$rc"
+  has "messaggio" "org.gimp.GIMP: l'app è già installata (gimp)" "$out"
+  eq "niente scaricato" "" "$(ls "$HOME")"
+}
+
 test_diretto_correggi() { # la copia del glibc: set_robust_list → -ENOSYS, file interni → /dev/fd/NN
   local f="$WORK/glibc_$$" out
   python3 -c '

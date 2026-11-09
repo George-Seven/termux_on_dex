@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Aggiornamenti, come Windows Update: un posto solo per Termux On DeX, Termux e Debian.
+"""Aggiornamenti, come Windows Update: un posto solo per Termux On DeX, Termux, Debian e le app dello Store.
 
   tod-updates.py                     la finestra (Impostazioni → Aggiornamenti, o clic sull'avviso)
   tod-updates.py controlla           aggiorna gli elenchi e scrive ~/.local/state/tod/updates.json
@@ -176,12 +176,29 @@ def tod_item(text):
 
 
 def all_items(st):
-    return st.get("tod", []) + st.get("termux", []) + st.get("debian", [])
+    return st.get("tod", []) + st.get("termux", []) + st.get("debian", []) + st.get("store", [])
+
+
+def store_items(text):
+    """L'uscita di `tod store _aggiornamenti` (id, nome, da, a, icona) → le voci dello Store (lib/store.sh).
+    Le app hanno il nome; i runtime (le basi delle app di Flathub) vanno tra i componenti di sistema."""
+    items = []
+    for line in text.splitlines():
+        c = (line.split("\t") + [""] * 5)[:5]
+        if not c[0] or "." not in c[0]:
+            continue
+        u = {"name": c[0], "where": "store", "from": c[2], "to": c[3]}
+        if c[1]:
+            u.update(app=c[1], icon=c[4] if c[4] and os.path.exists(c[4]) else "system-software-install")
+            if not c[2] or not c[3]:
+                u["desc"] = T("Nuova versione", "New version") + (f" {c[3]}" if c[3] else "")
+        items.append(u)
+    return items
 
 
 def check(refresh=True):
     """Aggiorna gli elenchi (se refresh) e scrive cosa c'è da aggiornare. Ritorna lo stato."""
-    st = {"time": time.time(), "tod": [], "termux": [], "debian": [], "error": ""}
+    st = {"time": time.time(), "tod": [], "termux": [], "debian": [], "store": [], "error": ""}
     # Termux On DeX: il ramo su GitHub (senza refresh solo il confronto con l'ultimo scaricato)
     _, out = run(["bash", TOD, "_self_check"] + ([] if refresh else ["--locale"]), timeout=180)
     it = tod_item(out)
@@ -213,6 +230,9 @@ def check(refresh=True):
                 u["where"] = "debian"
                 u.update(app_of(u["name"], f"{root}/var/lib/dpkg/info", root) or {})
                 st["debian"].append(u)
+    # le app dello Store da Flathub (lib/store.sh); niente se lo Store non è mai stato aperto
+    _, out = run(["bash", TOD, "store", "_aggiornamenti"] + ([] if refresh else ["--locale"]), timeout=300)
+    st["store"] = store_items(out)
     try:
         old = json.load(open(STATE))
         st["notified"] = old.get("notified", [])
@@ -239,6 +259,7 @@ def load():
         for u in st.get(k, []):
             u.setdefault("where", k)
     st.setdefault("tod", [])
+    st.setdefault("store", [])
     return st
 
 
@@ -297,7 +318,8 @@ def loop():
     while x_alive():
         if time.time() >= next_at:
             st = check()
-            log(f"controllo: Termux On DeX {len(st['tod'])}, Termux {len(st['termux'])}, Debian {len(st['debian'])} {st['error']}")
+            log(f"controllo: Termux On DeX {len(st['tod'])}, Termux {len(st['termux'])}, Debian {len(st['debian'])}, "
+                f"Store {len(st['store'])} {st['error']}")
             notify(st)
             next_at = time.time() + EVERY
         time.sleep(30)
@@ -389,15 +411,39 @@ def tod_update(progress, base, span):
     return True, nota
 
 
+def store_update(ids, progress, base, span):
+    """Le app dello Store: tod store aggiorna [id...] (flatpak, poi radici e voci dello Start). → (ok, errore)"""
+    progress(base, T("Aggiornamento delle app dello Store…", "Updating Store apps…"))
+    try:
+        p = subprocess.Popen(["bash", TOD, "store", "aggiorna"] + ids, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             text=True)
+    except OSError as e:
+        return False, str(e)
+    tail, fatti = [], 0
+    for line in p.stdout:
+        line = re.sub(r"\x1b\[[0-9;]*m", "", line).rstrip()
+        tail = (tail + [line])[-8:]
+        m = re.match(r"(Updating|Installing) (?:app|runtime)/([^/]+)/", line)
+        if m:
+            fatti += 1
+            progress(base + span * min(0.95, fatti / (len(ids) + 3 if ids else 6)),
+                     T(f"Aggiornamento di {m.group(2)}…", f"Updating {m.group(2)}…"))
+    if p.wait() != 0:
+        log("errore dello Store:\n" + "\n".join(tail))
+        return False, "\n".join(r for r in tail[-3:] if r)
+    progress(base + span, T("App dello Store aggiornate", "Store apps updated"))
+    return True, ""
+
+
 def install(items, progress):
-    """Aggiorna queste voci: Termux On DeX, poi Termux, poi Debian. progress(fraction, testo). → (ok, messaggio)
+    """Aggiorna queste voci: Termux On DeX, poi Termux, poi Debian, poi lo Store. progress(fraction, testo). → (ok, messaggio)
 
     Avanzamento vero da apt (APT::Status-Fd: "dlstatus" per lo scaricamento, "pmstatus" per
     l'installazione): ogni gruppo vale metà scaricamento e metà installazione, e durante lo
     scaricamento si mostrano MB fatti/totali, velocità e tempo che manca (Pietro: "non mi fa capire
     che sta lavorando, specialmente durante il download")."""
     names = {u["name"]: u.get("app") or u["name"] for u in items}
-    groups = [(w, [u["name"] for u in items if u.get("where") == w]) for w in ("tod", "termux", "debian")]
+    groups = [(w, [u["name"] for u in items if u.get("where") == w]) for w in ("tod", "termux", "debian", "store")]
     groups = [(w, p) for w, p in groups if p]
     nota = ""
     for gi, (where, pkgs) in enumerate(groups):
@@ -406,6 +452,13 @@ def install(items, progress):
             ok, nota = tod_update(progress, base, span)
             if not ok:
                 return False, nota
+            continue
+        if where == "store":
+            # una sola app: solo lei; con i runtime (nomi ambigui tra più versioni) tutto lo Store
+            solo_app = all(u.get("app") for u in items if u.get("where") == "store")
+            ok, msg = store_update(pkgs if solo_app else [], progress, base, span)
+            if not ok:
+                return False, msg
             continue
         progress(base, T("Preparazione…", "Preparing…"))
         status = ["-o", "APT::Status-Fd=1"]
@@ -676,7 +729,7 @@ def main():
         if "--ciclo" in args or "--loop" in args:
             return loop()
         st = check()
-        print(json.dumps({k: len(st[k]) for k in ("tod", "termux", "debian")}))
+        print(json.dumps({k: len(st[k]) for k in ("tod", "termux", "debian", "store")}))
         return 0
     return gui()
 
