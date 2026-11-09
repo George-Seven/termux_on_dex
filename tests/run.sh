@@ -4434,6 +4434,14 @@ EOF
     eq "con la mappa: solo la strada verso Termux" "com.termux | leggibile" \
       "$(env TOD_FS_MAP="$d/mappa" LD_PRELOAD="$d/shim.so" "$d/elenca" "$d/chiusa/")"
   fi
+  # 9 novembre, nel Terminale: "cd /storage" e poi "ls" apre "." (cartella attraversabile ma non leggibile)
+  chmod 111 "$d/chiusa"
+  if ! ls "$d/chiusa" >/dev/null 2>&1; then
+    eq "cd nella cartella e ls: la mappa vale anche per \".\"" "com.termux | leggibile" \
+      "$(cd "$d/chiusa" && env TOD_FS_MAP="$d/mappa" LD_PRELOAD="$d/shim.so" "$d/elenca" .)"
+    eq "anche un percorso relativo con .." "com.termux | leggibile" \
+      "$(cd "$d/chiusa" && env TOD_FS_MAP="$d/mappa" LD_PRELOAD="$d/shim.so" "$d/elenca" ../chiusa)"
+  fi
   chmod 755 "$d/chiusa"
   has "cartelle leggibili: quelle vere" altra_app "$(env TOD_FS_MAP="$d/mappa" LD_PRELOAD="$d/shim.so" "$d/elenca" "$d/chiusa")"
   rm -rf "$d"

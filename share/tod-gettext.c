@@ -474,11 +474,48 @@ REAL(DIR *, opendir, const char *)
 REAL(int, access, const char *, int)
 REAL(int, faccessat, int, const char *, int, int)
 
+/* percorso assoluto e pulito ("." "..", "//", "/" in fondo). Nel Terminale "cd /storage" e poi "ls" apre ".":
+ * "Permesso negato" (9 novembre), mentre "ls /storage" ed Esplora file, che usano percorsi interi, andavano */
+static int fs_absolute(const char *path, char *out, size_t len) {
+    char tmp[PATH_MAX], cwd[PATH_MAX];
+    if (path[0] == '/') {
+        if (strlen(path) >= sizeof(tmp)) return 0;
+        strcpy(tmp, path);
+    } else {
+        if (!getcwd(cwd, sizeof(cwd))) return 0;
+        if ((size_t)snprintf(tmp, sizeof(tmp), "%s/%s", cwd, path) >= sizeof(tmp)) return 0;
+    }
+    size_t o = 0;
+    char *save = NULL;
+    out[0] = '\0';
+    for (char *c = strtok_r(tmp, "/", &save); c; c = strtok_r(NULL, "/", &save)) {
+        if (!strcmp(c, ".")) continue;
+        if (!strcmp(c, "..")) {   /* su di uno */
+            while (o > 0 && out[o - 1] != '/') o--;
+            if (o > 0) o--;
+            out[o] = '\0';
+            continue;
+        }
+        size_t n = strlen(c);
+        if (o + n + 2 > len) return 0;
+        out[o++] = '/';
+        memcpy(out + o, c, n);
+        o += n;
+        out[o] = '\0';
+    }
+    if (o == 0) {
+        if (len < 2) return 0;
+        strcpy(out, "/");
+    }
+    return 1;
+}
+
 static int fs_mapped(const char *path, char *out, size_t len) {
     const char *m = getenv("TOD_FS_MAP");
-    if (!m || !*m || !path || path[0] != '/') return 0;
+    char abs[PATH_MAX];
+    if (!m || !*m || !path || !*path || !fs_absolute(path, abs, sizeof(abs))) return 0;
+    path = abs;
     size_t n = strlen(path);
-    while (n > 1 && path[n - 1] == '/') n--;   /* "/data/data/" → "/data/data" */
     if (n == 1) n = 0;                          /* "/" → la radice della mappa */
     if ((size_t)snprintf(out, len, "%s%.*s", m, (int)n, path) >= len) return 0;
     struct stat st;
@@ -518,7 +555,7 @@ int faccessat(int dirfd, const char *path, int mode, int flags) {
     if (!get_faccessat()) { errno = ENOSYS; return -1; }
     int rc = real_faccessat(dirfd, path, mode, flags);
     const char *p = path;   /* glibc dichiara path nonnull: il controllo sul parametro sarebbe un errore */
-    return (p && p[0] == '/') ? fs_access_fix(rc, path) : rc;
+    return (p && (p[0] == '/' || dirfd == AT_FDCWD)) ? fs_access_fix(rc, path) : rc;   /* relativo: dalla cartella corrente */
 }
 
 /* ------------------------------------------------- rinomina "in linea" (Thunar e scrivania)
