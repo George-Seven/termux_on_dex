@@ -4062,6 +4062,12 @@ test_files_user_home() {
   files_gtk_css
   eq "stile scritto una volta sola" 1 "$(grep -cF "Termux On DeX: Esplora file" "$HOME/.config/gtk-3.0/gtk.css")"
   has "le regole dell'utente restano" "mio { color: red; }" "$(cat "$HOME/.config/gtk-3.0/gtk.css")"
+  # 9 novembre: col tema scuro la barra laterale restava bianca (#f9f9f9 fisso): solo colori del tema in uso
+  local blocco
+  blocco=$(sed -n '/Termux On DeX: Esplora file/,/<<< Termux On DeX/p' "$HOME/.config/gtk-3.0/gtk.css")
+  has "barra laterale col colore del tema" "mix(@theme_bg_color, @theme_base_color, 0.6)" "$blocco"
+  eq "nessun colore fisso nello stile di Thunar" 0 "$(grep -cE '#[0-9a-fA-F]{3,6}\b|rgba?\(' <<<"$blocco")"
+  has "riscritto a ogni avvio della sessione" "files_gtk_css || true" "$(sed -n '/^session_hook()/,/^}/p' "$ROOT/lib/session.sh")"
   eq "niente barra di stato" false "$(xfconf-query -c thunar -p /last-statusbar-visible)"
   eq "i dischi USB collegati sulla scrivania, come macOS" true "$(xfconf-query -c xfce4-desktop -p /desktop-icons/file-icons/show-removable)"
   eq "anche i volumi di tipo device (tod-volumi)" true "$(xfconf-query -c xfce4-desktop -p /desktop-icons/file-icons/show-device-removable)"

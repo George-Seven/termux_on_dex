@@ -170,19 +170,22 @@ gtk_css_block() { # gtk_css_block "titolo" < regole: un blocco nostro in gtk.css
 }
 
 files_gtk_css() { # Thunar come Esplora file di Windows 11 (solo .thunar: le altre app non cambiano)
+  # Colori del tema in uso, mai fissi (9 novembre: col tema scuro la barra laterale restava bianca, #f9f9f9): nel tema
+  # chiaro di DeX OS vengono come prima (#f3f3f3 in alto, #f9f9f9 a sinistra, #ffffff i file), la selezione è
+  # nell'accento del sistema (prima un azzurro fisso)
   gtk_css_block "Esplora file" <<EOF
-.thunar headerbar, .thunar toolbar { background: #f3f3f3; border-bottom: 1px solid #e5e5e5; box-shadow: none; }
+.thunar headerbar, .thunar toolbar { background: @theme_bg_color; border-bottom: 1px solid alpha(@theme_fg_color, 0.07); box-shadow: none; }
 .thunar headerbar { min-height: 46px; padding: 0 6px; }
-.thunar .path-bar { background: #ffffff; border: 1px solid #e3e3e3; border-radius: 4px; padding: 0 2px; min-height: 30px; }
+.thunar .path-bar { background: @theme_base_color; border: 1px solid alpha(@theme_fg_color, 0.10); border-radius: 4px; padding: 0 2px; min-height: 30px; }
 .thunar .path-bar-button { border: none; background: transparent; box-shadow: none; border-radius: 3px; padding: 2px 8px; font-weight: normal; }
-.thunar .path-bar-button:hover { background: rgba(0,0,0,0.05); }
+.thunar .path-bar-button:hover { background: alpha(@theme_fg_color, 0.06); }
 .thunar .path-bar-button:checked { background: transparent; }
-.thunar .sidebar, .thunar .shortcuts-pane, .thunar .sidebar treeview.view, .thunar .shortcuts-pane treeview.view { background-color: #f9f9f9; }
+.thunar .sidebar, .thunar .shortcuts-pane, .thunar .sidebar treeview.view, .thunar .shortcuts-pane treeview.view { background-color: mix(@theme_bg_color, @theme_base_color, 0.6); color: @theme_fg_color; }
 .thunar .sidebar treeview.view, .thunar .shortcuts-pane treeview.view { -GtkTreeView-vertical-separator: 12; -GtkTreeView-horizontal-separator: 8; }
-.thunar .sidebar treeview.view:selected, .thunar .shortcuts-pane treeview.view:selected { background-color: #e6e6e6; color: #1a1a1a; }
-.thunar .standard-view, .thunar .standard-view iconview { background-color: #ffffff; }
-.thunar .standard-view iconview:selected, .thunar .standard-view treeview.view:selected { background-color: #cce8ff; color: #1a1a1a; border-radius: 4px; }
-.thunar paned > separator { background: #ebebeb; min-width: 1px; min-height: 1px; }
+.thunar .sidebar treeview.view:selected, .thunar .shortcuts-pane treeview.view:selected { background-color: alpha(@theme_fg_color, 0.10); color: @theme_fg_color; }
+.thunar .standard-view, .thunar .standard-view iconview { background-color: @theme_base_color; }
+.thunar .standard-view iconview:selected, .thunar .standard-view treeview.view:selected { background-color: alpha(@theme_selected_bg_color, 0.25); color: @theme_text_color; border-radius: 4px; }
+.thunar paned > separator { background: alpha(@theme_fg_color, 0.08); min-width: 1px; min-height: 1px; }
 EOF
 }
 
