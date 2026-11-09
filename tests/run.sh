@@ -2524,6 +2524,26 @@ test_theme_dark() { # Impostazioni → Aspetto: chiaro/scuro subito, anche barra
   has "Impostazioni nello Start" "tod-settings.desktop" "$(cat "$ROOT/share/tod-start.py")"
 }
 
+test_tema_coerente_all_avvio() { # 9 novembre: DeX-OS-Dark rimasto nei file di XFCE con TEMA=chiaro, a ogni avvio
+  _fake_xfconf
+  local th="$HOME/.local/share/themes"
+  mkdir -p "$th/DeX-OS-0067c0/gtk-3.0" "$th/DeX-OS-WM-Dark-1.125/xfwm4"
+  : >"$th/DeX-OS-0067c0/gtk-3.0/gtk.css"; : >"$th/DeX-OS-WM-Dark-1.125/xfwm4/themerc"
+  conf_set DEXOS_NAMES "DeX-OS-0067c0 DeX-OS-Dark-0067c0 DeX-OS-WM-1.125 DeX-OS-WM-Dark-1.125"
+  look_sfondo_apply() { :; }
+  conf_set TEMA chiaro
+  xfconf-query -c xsettings -p /Net/ThemeName -n -t string -s DeX-OS-Dark-0067c0
+  look_tema_coerente
+  eq "rimesso il chiaro scelto nelle Impostazioni" DeX-OS-0067c0 "$(xfconf-query -c xsettings -p /Net/ThemeName)"
+  eq "anche la cornice" DeX-OS-WM-1.125 "$(xfconf-query -c xfwm4 -p /general/theme)"
+  has "scritto nel registro" "aspetto: tema DeX-OS-Dark-0067c0 con TEMA=chiaro: rimesso DeX-OS-0067c0" "$(cat "$TOD_LOG")"
+  # un tema che non è DeX OS (scelto a mano) non si tocca
+  xfconf-query -c xsettings -p /Net/ThemeName -n -t string -s Adwaita-dark
+  look_tema_coerente
+  eq "tema non DeX OS lasciato com'è" Adwaita-dark "$(xfconf-query -c xsettings -p /Net/ThemeName)"
+  has "a ogni avvio, prima del controllo di versione" "look_tema_coerente || true" "$(sed -n '/^look_session_apply()/,/^}/p' "$ROOT/lib/look.sh")"
+}
+
 test_old_settings_redirect() { # tasto destro "Impostazioni della scrivania" & co. → nuove Impostazioni
   local d="$WORK/oldset_$$"
   mkdir -p "$d"
@@ -3570,6 +3590,16 @@ test_audio_restarts_broken_daemon() {
   has "demone riavviato" "pulseaudio --kill" "$(cat "$st/calls")"
   eq "uscita vera dopo il riavvio" AAudio_sink "$(cat "$st/default")"
   has "motivo nel log" "nessuna uscita vera, riavvio PulseAudio" "$(cat "$TOD_LOG")"
+}
+
+test_audio_start_fallito_si_capisce() { # 9 novembre: "PulseAudio non è partito" senza motivo e senza volume
+  _fake_pulse
+  local st="$HOME/pulse_state"
+  touch "$st/fail_start"
+  audio_start
+  has "il messaggio di PulseAudio finisce nel log" "audio: PulseAudio non parte (tentativo 1): E: [pulseaudio] main.c: Daemon startup failed." "$(cat "$TOD_LOG")"
+  eq "secondo tentativo riuscito: c'è l'uscita" AAudio_sink "$(cat "$st/default")"
+  eq "nessun file lasciato" "" "$(ls "$TMPDIR" | grep tod-pulse-avvio || true)"
 }
 
 test_audio_status_unreachable() {
@@ -4660,7 +4690,9 @@ st="$HOME/pulse_state"
 echo "pulseaudio $* XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-}" >>"$st/calls"
 case $1 in
   --check) [[ -f $st/running && ${XDG_RUNTIME_DIR:-} == "$TMPDIR" ]] ;;
-  --start) touch "$st/running"; rm -f "$st/broken"; printf '0\tmodule-native-protocol-unix\t\n' >"$st/modules" ;;
+  --start)
+    if [[ -f $st/fail_start ]]; then rm -f "$st/fail_start"; echo "E: [pulseaudio] main.c: Daemon startup failed." >&2; exit 1; fi
+    touch "$st/running"; rm -f "$st/broken"; printf '0\tmodule-native-protocol-unix\t\n' >"$st/modules" ;;
   --kill) rm -f "$st/running" ;;
 esac
 EOF

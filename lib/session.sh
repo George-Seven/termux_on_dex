@@ -9,12 +9,28 @@ audio_socket() { printf 'unix:%s/pulse/native' "$TMPDIR"; }
 audio_pactl() { XDG_RUNTIME_DIR=$TMPDIR PULSE_SERVER=$(audio_socket) pactl "$@"; }
 audio_running() { XDG_RUNTIME_DIR=$TMPDIR pulseaudio --check 2>/dev/null; }
 
+audio_demone() { # avvia il demone; se non parte il motivo va in tod.log e si riprova una volta
+  # (9 novembre: "PulseAudio non è partito" all'avvio, senza volume nella barra, e nessun messaggio per capire perché)
+  # in un file, non con $(...): il demone che si stacca potrebbe tenere aperto il canale e bloccare l'avvio
+  local f="$TMPDIR/tod-pulse-avvio.$$" i
+  for i in 1 2; do
+    if XDG_RUNTIME_DIR=$TMPDIR pulseaudio --start --exit-idle-time=-1 >"$f" 2>&1; then
+      rm -f "$f"
+      return 0
+    fi
+    log "audio: PulseAudio non parte (tentativo $i): $(tr '\n' ' ' <"$f" 2>/dev/null | cut -c1-300)"
+    if ((i == 1)); then sleep 2; fi
+  done
+  rm -f "$f"
+  return 1
+}
+
 audio_start() {
   have pulseaudio || return 0
   if ! audio_running; then
     # un demone partito senza XDG_RUNTIME_DIR (o avviato da un client) è invisibile al desktop
     pulseaudio --kill >/dev/null 2>&1 || true
-    if ! XDG_RUNTIME_DIR=$TMPDIR pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1; then
+    if ! audio_demone; then
       warn "$(t audio_fail)"
       return 0
     fi
@@ -25,7 +41,7 @@ audio_start() {
   # Si riavvia una volta, invece di restare muti su "Dummy Output".
   log "audio: nessuna uscita vera, riavvio PulseAudio"
   audio_kill
-  if XDG_RUNTIME_DIR=$TMPDIR pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 && audio_ensure; then return 0; fi
+  if audio_demone && audio_ensure; then return 0; fi
   warn "$(t audio_fail)"
 }
 

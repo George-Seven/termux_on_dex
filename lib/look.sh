@@ -123,8 +123,22 @@ look_puntatore_predefinito() { # DeX-OS-Puntatore = il puntatore scelto, con un 
   printf '[Icon Theme]\nInherits=DeX-OS-Puntatore\n' >"$h/.icons/default/index.theme"
 }
 
+look_tema_coerente() { # a ogni avvio: DeX OS chiaro o scuro come la scelta delle Impostazioni (TEMA)
+  # 9 novembre: nei file di XFCE era rimasto DeX-OS-Dark con TEMA=chiaro (lo scriveva lo schermo finto delle prove) e
+  # a ogni avvio Pietro trovava il tema scuro "a metà". Si corregge solo la variante di DeX OS, mai un tema diverso.
+  have xfconf-query || return 0
+  look_dexos_ok || return 0
+  local cur want
+  cur=$(xfconf-query -c xsettings -p /Net/ThemeName 2>/dev/null) || return 0
+  want=$(look_w11_gtk)
+  if [[ $cur != DeX-OS-* || $cur == "$want" ]]; then return 0; fi
+  log "aspetto: tema $cur con TEMA=$(conf_get TEMA chiaro): rimesso $want"
+  look_theme_reload   # tema, cornice, icone, puntatore, sfondo e notifiche della stessa scelta
+}
+
 look_session_apply() { # nella sessione, una volta per versione: l'aspetto DeX OS (le rifiniture si riapplicano)
   look_pulizia || true
+  look_tema_coerente || true
   if [[ $(conf_get LOOK_SESSION_SET 0) == "$LOOK_W11_VERSION" ]] || ! have xfconf-query; then return 0; fi
   look_session_windows11
   conf_set LOOK_SESSION_SET "$LOOK_W11_VERSION"
