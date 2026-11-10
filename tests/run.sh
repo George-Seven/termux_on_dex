@@ -1323,6 +1323,21 @@ eq("cartelle da user-dirs", os.path.join(os.environ["HOME"], "Musica"), u.get("M
 eq("e i ripieghi", os.path.join(os.environ["HOME"], "Immagini"), u.get("PICTURES"))
 os.environ["TOD_FOTO_CARTELLE"] = os.path.join(os.environ["HOME"], "Immagini") + ":/non/esiste"
 eq("cartelle di prova (TOD_FOTO_CARTELLE): solo quelle che esistono", 1, len(L.cartelle_foto()))
+# Anteprima (barra spaziatrice): cosa mostrare, e con un file solo dalla scrivania le frecce sulla sua cartella
+d = os.path.join(os.environ["HOME"], "ap")
+os.makedirs(os.path.join(d, "zeta cartella"))
+for n in ("b 10.txt", "b 2.txt", "A.pdf", ".nascosto", "foto.JPG", "suono", "film.mkv", "x.bin"):
+    open(os.path.join(d, n), "w").write("x")
+g = lambda n, m="", t=False: L.genere(os.path.join(d, n), m, t)
+eq("generi dai nomi", ["cartella", "testo", "pdf", "immagine", "video", "altro"],
+   [g("zeta cartella"), g("b 2.txt"), g("A.pdf"), g("foto.JPG"), g("film.mkv"), g("x.bin")])
+eq("generi dal tipo (senza estensione)", ["audio", "testo", "testo", "pdf"],
+   [g("suono", "audio/ogg"), g("suono", "text/x-log"), g("suono", "application/x-shellscript", True), g("suono", "application/pdf")])
+lista, i = L.vicini(os.path.join(d, "b 2.txt"))
+eq("vicini: prima le cartelle, poi i nomi (2 prima di 10), senza i nascosti",
+   ["zeta cartella", "A.pdf", "b 2.txt", "b 10.txt", "film.mkv", "foto.JPG", "suono", "x.bin"], [os.path.basename(x) for x in lista])
+eq("e il posto di quello scelto", 2, i)
+eq("un nascosto scelto: anche i nascosti", True, ".nascosto" in [os.path.basename(x) for x in L.vicini(os.path.join(d, ".nascosto"))[0]])
 print("fine")
 PY
   )
@@ -1333,7 +1348,8 @@ PY
 test_media_finestre_compilano() { # le tre app: Python valido, prgname uguale alla voce dello Start, niente schermo
   command -v python3 >/dev/null || return 0
   python3 -m py_compile "$ROOT/share/media/libreria.py" "$ROOT/share/media/comune.py" "$ROOT/share/media/tod-foto.py" \
-    "$ROOT/share/media/tod-lettore.py" || { echo "share/media non compila"; return 1; }
+    "$ROOT/share/media/tod-lettore.py" "$ROOT/share/media/visore.py" "$ROOT/share/media/motore.py" \
+    "$ROOT/share/media/tod-anteprima.py" || { echo "share/media non compila"; return 1; }
   has "Foto: prgname" 'GLib.set_prgname("tod-foto")' "$(cat "$ROOT/share/media/tod-foto.py")"
   has "lettore: prgname dei due modi" 'GLib.set_prgname("tod-video" if VIDEO else "tod-musica")' \
     "$(cat "$ROOT/share/media/tod-lettore.py")"
@@ -1342,9 +1358,34 @@ test_media_finestre_compilano() { # le tre app: Python valido, prgname uguale al
   for v in TOD_FOTO_CARTELLE TOD_VIDEO_CARTELLE TOD_MUSICA_CARTELLE TOD_TELEFONO_DIR; do
     has "$v" "$v" "$(cat "$ROOT/share/media/libreria.py")"
   done
-  has "uscita video scelta a mano" "TOD_VIDEO_USCITA" "$(cat "$ROOT/share/media/tod-lettore.py")"
+  has "uscita video scelta a mano" "TOD_VIDEO_USCITA" "$(cat "$ROOT/share/media/motore.py")"
+  has "tod media prepara rifà le icone delle app nuove" "desktop_icone_app" "$(sed -n '/^media_cli() {/,/^}/p' "$ROOT/lib/desktop.sh")"
+  has "anche le voci dello Start (installazione, aggiornamenti)" "desktop_icone_app" "$(sed -n '/^desktop_install_entries() {/,/^}/p' "$ROOT/lib/desktop.sh")"
+  has "il Lettore usa il motore in comune" "from motore import" "$(cat "$ROOT/share/media/tod-lettore.py")"
+  has "Foto usa il visore in comune" "from visore import" "$(cat "$ROOT/share/media/tod-foto.py")"
   has "icona DeX OS di Foto" "tod-foto" "$(cat "$ROOT/share/dexos/dexos-icons.py")"
   has "icona DeX OS del lettore" "multimedia-video-player" "$(cat "$ROOT/share/dexos/dexos-icons.py")"
+}
+
+test_anteprima_spazio() { # barra spaziatrice in Esplora file e sulla scrivania: anteprima come Quick Look di macOS
+  local src="$ROOT/share/tod-gettext.c" cc ap="$ROOT/share/media/tod-anteprima.py"
+  has "aggancio prima che parta l'app" "int g_application_run(void *app, int argc, char **argv)" "$(cat "$src")"
+  has "solo Thunar e xfdesktop" '!strcasecmp(n, "thunar") ? 1 : !strcasecmp(n, "xfdesktop") ? 2 : 0' "$(cat "$src")"
+  has "si può spegnere" "TOD_ANTEPRIMA_SPENTA" "$(cat "$src")"
+  has "mai mentre si scrive (rinomina, indirizzo, ricerca)" 'tod_ap_e_un(fuoco, "GtkEditable") || tod_ap_e_un(fuoco, "GtkTextView")' "$(cat "$src")"
+  has "spazio senza modificatori" "kv != 0x20" "$(cat "$src")"
+  has "niente di scelto: lo spazio resta quello di sempre" "return n > 0;" "$(cat "$src")"
+  has "con un file solo: la vista nel suo ordine" '"--indice"' "$(cat "$src")"
+  has "lanciata dal PATH della sessione (share/bin)" 'file[0] = "tod-anteprima";' "$(cat "$src")"
+  [[ -x $ROOT/share/bin/tod-anteprima ]] || { echo "share/bin/tod-anteprima non eseguibile"; return 1; }
+  has "il lanciatore apre la finestra" "media/tod-anteprima.py" "$(cat "$ROOT/share/bin/tod-anteprima")"
+  has "prgname dell'anteprima" 'GLib.set_prgname("tod-anteprima")' "$(cat "$ap")"
+  has "di nuovo lo spazio sugli stessi file: si chiude" "(file, indice) == self.fin.richiesti" "$(cat "$ap")"
+  has "spazio ed Esc chiudono" "if k in (Gdk.KEY_space, Gdk.KEY_Escape):" "$(cat "$ap")"
+  has "il video aspetta il MapNotify vero (zink)" "self.fin.mappata and self.area_ok" "$(cat "$ap")"
+  cc=$(command -v clang || command -v gcc) || { echo "  (nessun compilatore: salto la compilazione)"; return 0; }
+  "$cc" -shared -fPIC -O2 -Wall -Wextra -Wno-unused-parameter -Werror -o "$WORK/ta_$$.so" "$src" -ldl
+  eq "contiene l'aggancio" 1 "$(grep -ac g_application_run "$WORK/ta_$$.so" | sed 's/^[1-9][0-9]*$/1/')"
 }
 
 test_diretto_correggi() { # la copia del glibc: set_robust_list → -ENOSYS, file interni → /dev/fd/NN
@@ -4748,6 +4789,37 @@ child = "import signal,sys\nsignal.pthread_sigmask(signal.SIG_UNBLOCK,{signal.SI
 p = subprocess.Popen([sys.executable, "-c", child])
 time.sleep(0.5); p.send_signal(signal.SIGUSR1); p.wait(5)
 ')"
+}
+
+test_start_a_sinistra() { # 10 novembre, Pietro: "se sposto il bottone a sinistra si apre sempre al centro"
+  command -v python3 >/dev/null || return 0
+  local out
+  mkdir -p "$WORK/sx_$$"
+  out=$(python3 - "$ROOT/share/tod-start.py" "$WORK/sx_$$" <<'PY'
+import ast, json, os, sys
+src = open(sys.argv[1]).read()
+cls = next(n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.ClassDef) and any(
+    isinstance(f, ast.FunctionDef) and f.name == "a_sinistra" for f in n.body))
+ns = {"json": json, "os": os, "CONF": sys.argv[2], "px": lambda n: n}
+for f in cls.body:
+    if isinstance(f, ast.FunctionDef) and f.name in ("a_sinistra", "x_menu"):
+        exec(compile(ast.Module(body=[f], type_ignores=[]), "tod-start.py", "exec"), ns)
+class WA:
+    x, width = 100, 1000
+class S:
+    pass
+s = S()
+def x(allineamento):
+    if allineamento is not None:
+        json.dump({"allineamento": allineamento}, open(os.path.join(sys.argv[2], "barra.json"), "w"))
+    s.sinistra = ns["a_sinistra"](s)
+    return ns["x_menu"](s, WA, 400)
+print(x(None), x("sinistra"), x("centro"))
+PY
+  )
+  eq "senza barra.json al centro, barra a sinistra a sinistra, al centro al centro" "400 112 400" "$out"
+  has "si sceglie a ogni apertura" "self.sinistra = self.a_sinistra()" "$(sed -n '/    def place(self):/,/^    def /p' "$ROOT/share/tod-start.py")"
+  has "anche quando la finestra cambia misura" "x, y = self.x_menu(wa, alloc.width)" "$(cat "$ROOT/share/tod-start.py")"
 }
 
 test_start_wrapper() {

@@ -2327,3 +2327,225 @@ void gtk_menu_shell_append(void *shell, void *child) {
     }
     real(shell, child);
 }
+
+/* --- Anteprima con la barra spaziatrice, come Quick Look di macOS (10 novembre) ----------------------------------
+ * Pietro: "se da un file dal desktop o da Thunar premo la barra spaziatrice come sul mac li vedo in anteprima".
+ * In Thunar e in xfdesktop ogni finestra principale, appena mappata, riceve un gestore dei tasti (aggancio al segnale
+ * "map", messo prima di g_application_run). Lo spazio senza modificatori, con il fuoco sulla vista dei file (non su
+ * una casella di testo né su un nome in rinomina), lancia `tod-anteprima` (share/bin, primo nel PATH della sessione;
+ * la finestra è share/media/tod-anteprima.py) con i file scelti, e alla vista non arriva. Con niente di scelto lo
+ * spazio fa quello di sempre. Thunar: la proprietà "selected-files" della vista (ThunarStandardView) e
+ * thunarx_file_info_get_location; scrivania: xfdesktop_icon_view_get_selected_items e il file di ogni icona.
+ * TOD_ANTEPRIMA_SPENTA=1 lo spegne. */
+#define TOD_AP_MAX 500       /* file scelti */
+#define TOD_AP_TUTTI 20000   /* file della vista (le frecce con un file solo scelto) */
+
+typedef struct { tod_gtype g_type; long long dati[2]; } TodValue;   /* GValue */
+
+static int tod_ap_chi(void) {   /* 1 = Esplora file (Thunar), 2 = scrivania (xfdesktop), 0 = un altro programma */
+    static int chi = -1;
+    if (chi < 0) {
+        const char *n = getprogname();
+        chi = !n || getenv("TOD_ANTEPRIMA_SPENTA") ? 0 : !strcasecmp(n, "thunar") ? 1 : !strcasecmp(n, "xfdesktop") ? 2 : 0;
+    }
+    return chi;
+}
+
+static int tod_ap_e_un(void *obj, const char *tipo) {   /* obj è di quel tipo (classe, sottoclasse o interfaccia) */
+    GTKFN(tod_gtype, g_type_from_name, const char *)
+    GTKFN(int, g_type_check_instance_is_a, void *, tod_gtype)
+    tod_gtype t = obj ? f_g_type_from_name(tipo) : 0;
+    return t && f_g_type_check_instance_is_a(obj, t);
+}
+
+/* Esplora file: i file scelti nella vista che contiene il widget col fuoco */
+static int tod_ap_thunar(void *vista, char **file, int max) {
+    GTKFN(void *, gtk_widget_get_parent, void *)
+    GTKFN(void *, g_object_class_find_property, void *, const char *)
+    GTKFN(void *, g_value_init, TodValue *, tod_gtype)
+    GTKFN(void, g_object_get_property, void *, const char *, TodValue *)
+    GTKFN(void *, g_value_get_boxed, const TodValue *)
+    GTKFN(void *, g_value_get_pointer, const TodValue *)
+    GTKFN(void, g_value_unset, TodValue *)
+    GTKFN(tod_gtype, g_type_fundamental, tod_gtype)
+    GTKFN(void *, thunarx_file_info_get_location, void *)
+    GTKFN(char *, g_file_get_path, void *)
+    GTKFN(void, g_object_unref, void *)
+    void *sv = vista;
+    while (sv && !tod_ap_e_un(sv, "ThunarStandardView")) sv = f_gtk_widget_get_parent(sv);
+    if (!sv) return 0;   /* la barra laterale o un'altra vista ad albero: non i file della cartella */
+    /* GParamSpec: istanza (classe), nome, opzioni, tipo del valore */
+    struct { void *g_class; const char *name; int flags; tod_gtype value_type; } *ps =
+        f_g_object_class_find_property(*(void **)sv, "selected-files");
+    if (!ps) return 0;
+    TodValue v = {0};
+    f_g_value_init(&v, ps->value_type);
+    f_g_object_get_property(sv, "selected-files", &v);   /* una lista di ThunarxFileInfo (copia, la libera unset) */
+    tod_gtype fond = f_g_type_fundamental(ps->value_type);
+    TodList *sel = fond == (18 << 2) ? f_g_value_get_boxed(&v) : fond == (17 << 2) ? f_g_value_get_pointer(&v) : NULL;
+    int n = 0;
+    for (TodList *l = sel; l && n < max; l = l->next) {
+        void *gf = f_thunarx_file_info_get_location(l->data);
+        if (!gf) continue;
+        char *p = f_g_file_get_path(gf);   /* NULL fuori dai file locali (Cestino, ricerche...) */
+        f_g_object_unref(gf);
+        if (p) file[n++] = p;
+    }
+    f_g_value_unset(&v);
+    return n;
+}
+
+/* Esplora file, un file solo scelto: tutti quelli della vista, nell'ordine in cui si vedono (nome, data... anche al
+ * contrario; i nascosti solo se si vedono), e il posto di quello scelto: le frecce dell'anteprima li sfogliano così */
+static int tod_ap_thunar_vista(void *vista, const char *scelto, char **file, int max, int *posto) {
+    GTKFN(void *, exo_icon_view_get_model, void *)
+    GTKFN(void *, gtk_tree_view_get_model, void *)
+    GTKFN(int, gtk_tree_model_get_n_columns, void *)
+    GTKFN(tod_gtype, gtk_tree_model_get_column_type, void *, int)
+    GTKFN(int, gtk_tree_model_get_iter_first, void *, void *)
+    GTKFN(int, gtk_tree_model_iter_next, void *, void *)
+    GTKFN(void, gtk_tree_model_get, void *, void *, ...)
+    GTKFN(const char *, g_type_name, tod_gtype)
+    GTKFN(void *, thunarx_file_info_get_location, void *)
+    GTKFN(char *, g_file_get_path, void *)
+    GTKFN(void, g_object_unref, void *)
+    void *model = tod_ap_e_un(vista, "ExoIconView") ? f_exo_icon_view_get_model(vista) : f_gtk_tree_view_get_model(vista);
+    int col = -1, nc = model ? f_gtk_tree_model_get_n_columns(model) : 0;
+    for (int c = 0; c < nc && col < 0; c++) {
+        const char *tn = f_g_type_name(f_gtk_tree_model_get_column_type(model, c));
+        if (tn && !strcmp(tn, "ThunarFile")) col = c;
+    }
+    long iter[4] = {0};
+    int n = 0;
+    *posto = -1;
+    if (col < 0 || !f_gtk_tree_model_get_iter_first(model, iter)) return 0;
+    do {
+        void *f = NULL;
+        f_gtk_tree_model_get(model, iter, col, &f, -1);   /* un riferimento in più */
+        if (!f) continue;
+        void *gf = f_thunarx_file_info_get_location(f);
+        f_g_object_unref(f);
+        char *p = gf ? f_g_file_get_path(gf) : NULL;
+        if (gf) f_g_object_unref(gf);
+        if (!p) continue;
+        if (*posto < 0 && !strcmp(p, scelto)) *posto = n;
+        file[n++] = p;
+    } while (n < max && f_gtk_tree_model_iter_next(model, iter));
+    return n;
+}
+
+/* scrivania: le icone scelte; il modello è il filtro di xfdesktop 4.20 (o il modello stesso) */
+static int tod_ap_scrivania(void *vista, char **file, int max) {
+    GTKFN(TodList *, xfdesktop_icon_view_get_selected_items, void *)
+    GTKFN(void *, xfdesktop_icon_view_get_model, void *)
+    GTKFN(int, gtk_tree_model_get_iter, void *, void *, void *)
+    GTKFN(void *, xfdesktop_file_icon_model_filter_get_icon, void *, void *)
+    GTKFN(void *, xfdesktop_file_icon_model_get_icon, void *, void *)
+    GTKFN(void *, xfdesktop_file_icon_peek_file, void *)
+    GTKFN(char *, g_file_get_path, void *)
+    GTKFN(void, gtk_tree_path_free, void *)
+    GTKFN(void, g_list_free, TodList *)
+    void *model = f_xfdesktop_icon_view_get_model(vista);
+    int filtro = tod_ap_e_un(model, "XfdesktopFileIconModelFilter");
+    if (!filtro && !tod_ap_e_un(model, "XfdesktopFileIconModel")) return 0;
+    TodList *sel = f_xfdesktop_icon_view_get_selected_items(vista);
+    int n = 0;
+    for (TodList *l = sel; l; l = l->next) {
+        long iter[4] = {0};   /* GtkTreeIter */
+        if (n < max && f_gtk_tree_model_get_iter(model, iter, l->data)) {
+            void *icona = filtro ? f_xfdesktop_file_icon_model_filter_get_icon(model, iter)
+                                 : f_xfdesktop_file_icon_model_get_icon(model, iter);   /* senza riferimento in più */
+            void *gf = tod_ap_e_un(icona, "XfdesktopFileIcon") ? f_xfdesktop_file_icon_peek_file(icona) : NULL;
+            char *p = gf ? f_g_file_get_path(gf) : NULL;   /* il Cestino (trash:///) non ha un percorso */
+            if (p) file[n++] = p;
+        }
+        f_gtk_tree_path_free(l->data);
+    }
+    f_g_list_free(sel);
+    return n;
+}
+
+static int tod_ap_tasto(void *finestra, void *ev, void *dati) {
+    (void)dati;
+    GTKFN(int, gdk_event_get_keyval, void *, unsigned *)
+    GTKFN(int, gdk_event_get_state, void *, unsigned *)
+    GTKFN(void *, gtk_window_get_focus, void *)
+    GTKFN(int, g_spawn_async, const char *, char **, char **, int, void *, void *, int *, void **)
+    GTKFN(void, g_free, void *)
+    unsigned kv = 0, st = 0;
+    if (!f_gdk_event_get_keyval(ev, &kv) || kv != 0x20) return 0;   /* GDK_KEY_space */
+    f_gdk_event_get_state(ev, &st);
+    if (st & (1u | 4u | 8u | (1u << 26) | (1u << 28))) return 0;   /* Maiusc, Ctrl, Alt, Super, Meta */
+    void *fuoco = f_gtk_window_get_focus(finestra);
+    if (!fuoco || tod_ap_e_un(fuoco, "GtkEditable") || tod_ap_e_un(fuoco, "GtkTextView")) return 0;
+    char **file = calloc(TOD_AP_TUTTI + 4, sizeof *file), num[16];
+    int n = 0, da = 1;   /* file[0] il comando, poi i file (o "--indice", il numero e tutta la vista) */
+    if (!file) return 0;
+    if (tod_ap_chi() == 2 && tod_ap_e_un(fuoco, "XfdesktopIconView"))
+        n = tod_ap_scrivania(fuoco, file + 1, TOD_AP_MAX);
+    else if (tod_ap_chi() == 1 && (tod_ap_e_un(fuoco, "ExoIconView") || tod_ap_e_un(fuoco, "GtkTreeView")))
+        n = tod_ap_thunar(fuoco, file + 1, TOD_AP_MAX);
+    if (n == 1 && tod_ap_chi() == 1) {
+        int posto = -1, m = tod_ap_thunar_vista(fuoco, file[1], file + 3, TOD_AP_TUTTI, &posto);
+        if (m > 1 && posto >= 0) {
+            f_g_free(file[1]);
+            snprintf(num, sizeof num, "%d", posto);
+            file[1] = "--indice";
+            file[2] = num;
+            da = 3;
+            n = m;
+        } else {
+            for (int i = 0; i < m; i++) f_g_free(file[3 + i]);
+            file[3] = NULL;
+        }
+    }
+    if (n > 0) {
+        file[0] = "tod-anteprima";
+        file[da + n] = NULL;
+        struct { unsigned dominio; int codice; char *testo; } *errore = NULL;   /* GError */
+        int ok = f_g_spawn_async(NULL, file, NULL, (1 << 2) | (1 << 3), NULL, NULL, NULL, (void **)&errore);   /* PATH */
+        fprintf(stderr, "tod-anteprima: %d file%s%s\n", n, ok ? "" : ", non partita: ", !ok && errore ? errore->testo : "");
+        for (int i = da; i < da + n; i++) f_g_free(file[i]);
+    }
+    free(file);
+    return n > 0;
+}
+
+static int tod_ap_mappa(void *suggerimento, unsigned n, const TodValue *valori, void *dati) {
+    (void)suggerimento; (void)dati;
+    GTKFN(void *, g_value_get_object, const TodValue *)
+    GTKFN(void *, g_object_get_data, void *, const char *)
+    GTKFN(void, g_object_set_data, void *, const char *, void *)
+    GTKFN(int, gtk_window_get_window_type, void *)
+    GTKFN(unsigned long, g_signal_connect_data, void *, const char *, void *, void *, void *, int)
+    void *w = n ? f_g_value_get_object(valori) : NULL;
+    if (tod_ap_e_un(w, "GtkWindow") && f_gtk_window_get_window_type(w) == 0 && !f_g_object_get_data(w, "tod-anteprima")) {
+        f_g_object_set_data(w, "tod-anteprima", (void *)1);
+        f_g_signal_connect_data(w, "key-press-event", (void *)tod_ap_tasto, NULL, NULL, 0);
+    }
+    return 1;   /* l'aggancio resta */
+}
+
+static int tod_ap_aggancia(void) {
+    GTKFN(tod_gtype, gtk_widget_get_type, void)
+    GTKFN(void *, g_type_class_ref, tod_gtype)
+    GTKFN(unsigned, g_signal_lookup, const char *, tod_gtype)
+    GTKFN(unsigned long, g_signal_add_emission_hook, unsigned, unsigned, void *, void *, void *)
+    static int fatto;
+    if (fatto || !tod_ap_chi()) return 0;
+    fatto = 1;
+    tod_gtype t = f_gtk_widget_get_type();
+    f_g_type_class_ref(t);   /* i segnali di GtkWidget esistono solo con la classe pronta */
+    unsigned id = f_g_signal_lookup("map", t);
+    if (id) f_g_signal_add_emission_hook(id, 0, (void *)tod_ap_mappa, NULL, NULL);
+    fprintf(stderr, "tod-anteprima: barra spaziatrice pronta\n");
+    return 1;
+}
+
+int g_application_run(void *app, int argc, char **argv) {
+    static int (*real)(void *, int, char **);
+    if (!real) real = (int (*)(void *, int, char **))tod_next("g_application_run");
+    if (!real) return 1;
+    tod_ap_aggancia();
+    return real(app, argc, argv);
+}

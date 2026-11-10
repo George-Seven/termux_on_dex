@@ -1,0 +1,5 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Anteprima con la barra spaziatrice, come Quick Look di macOS: la lancia tod-gettext.so da Esplora file e dalla
+# scrivania con i file scelti (share/bin è primo nel PATH della sessione). La finestra: share/media/tod-anteprima.py
+d=$(dirname "$(readlink -f "$0")")
+exec python3 "$d/../media/tod-anteprima.py" "$@"

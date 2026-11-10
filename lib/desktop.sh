@@ -164,6 +164,7 @@ media_cli() { # tod media prepara|stato
       run_step "$(t s_media)" media_install || return 1
       desktop_media_entries
       desktop_refresh_caches
+      desktop_icone_app
       ok "$(t md_pronte)"
       ;;
     stato | status)
@@ -203,6 +204,11 @@ desktop_media_entries() { # Foto, Lettore multimediale, Lettore musicale nello S
       if [[ -n $t ]]; then _mime_predefinita "$f" "$t" "tod-${m%%:*}.desktop"; fi
     done
   done
+}
+
+desktop_icone_app() { # app nuove nello Start: le loro icone DeX OS subito, non solo al prossimo avvio del desktop
+  # (10 novembre: Foto, Lettore e Musica restavano senza icona fino al riavvio). Senza tema DeX OS: niente
+  if [[ -n $(look_dexos_icons) ]]; then look_dexos_icone_app || true; fi
 }
 
 desktop_install_entries() {
@@ -248,6 +254,7 @@ EOF
     "$tod _hook" preferences-desktop-display false true
   desktop_tune_files
   desktop_refresh_caches
+  desktop_icone_app
 }
 
 desktop_refresh_caches() {

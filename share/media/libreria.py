@@ -185,6 +185,51 @@ def fratelli(percorso, estensioni):
     return lista, lista.index(p)
 
 
+# --- Anteprima (barra spaziatrice) ---------------------------------------------------------------------------
+TESTO = {".txt", ".text", ".md", ".markdown", ".rst", ".log", ".csv", ".tsv", ".json", ".xml", ".yml", ".yaml",
+         ".ini", ".conf", ".cfg", ".toml", ".properties", ".sh", ".bash", ".zsh", ".fish", ".py", ".c", ".h", ".cc",
+         ".cpp", ".hpp", ".rs", ".go", ".java", ".kt", ".js", ".mjs", ".ts", ".tsx", ".jsx", ".html", ".htm", ".css",
+         ".scss", ".php", ".rb", ".pl", ".lua", ".sql", ".srt", ".vtt", ".ass", ".desktop", ".service", ".diff",
+         ".patch", ".tex", ".nfo", ".m3u"}
+
+
+def genere(percorso, tipo_mime="", testo=False):
+    """cosa mostra l'Anteprima: cartella, immagine, video, audio, pdf, testo, altro. tipo_mime da Gio (se c'è);
+    testo=True se Gio lo dice testo (text/plain e i suoi figli: script, JSON, .desktop...)."""
+    if os.path.isdir(percorso):
+        return "cartella"
+    t = tipo_di(percorso)
+    if t:
+        return t
+    e = os.path.splitext(percorso)[1].lower()
+    m = (tipo_mime or "").lower()
+    for prefisso, g in (("image/", "immagine"), ("video/", "video"), ("audio/", "audio")):
+        if m.startswith(prefisso):
+            return g
+    if e == ".pdf" or m == "application/pdf":
+        return "pdf"
+    if testo or e in TESTO or m.startswith("text/"):
+        return "testo"
+    return "altro"
+
+
+def vicini(percorso):
+    """quello che sta accanto, come lo mostra Esplora file (prima le cartelle, poi i file, in ordine di nome; i
+    nascosti solo se lo è anche questo), e il suo posto: le frecce dell'Anteprima con un elemento solo scelto."""
+    p = os.path.abspath(percorso)
+    d, nome = os.path.dirname(p), os.path.basename(p)
+    nascosti = nome.startswith(".")
+    try:
+        nomi = [n for n in os.listdir(d) if nascosti or not n.startswith(".")]
+    except OSError:
+        nomi = []
+    if nome not in nomi:
+        nomi.append(nome)
+    nomi.sort(key=lambda n: (not os.path.isdir(os.path.join(d, n)), chiave_naturale(n)))
+    lista = [os.path.join(d, n) for n in nomi]
+    return lista, lista.index(p)
+
+
 def chiave_naturale(s):
     """"foto 2" prima di "foto 10", senza badare alle maiuscole."""
     return [int(x) if x.isdigit() else x.lower() for x in re.split(r"(\d+)", s)]

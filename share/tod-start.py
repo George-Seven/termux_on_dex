@@ -6,6 +6,7 @@ utente e Spegni in basso, "Tutte le app" in ordine alfabetico.
 Resta in memoria nascosto (si apre all'istante): `tod-start` manda SIGUSR1 al
 processo vivo, oppure lo avvia con --show.
 """
+import json
 import os
 import re
 import signal
@@ -285,6 +286,7 @@ class Start(Gtk.Window):
         res = Gdk.Screen.get_default().get_resolution()
         SCALE = res / 96.0 if res and res > 0 else 1.0
         super().__init__(title="Start")
+        self.sinistra = False   # barra a sinistra: il menu si apre a sinistra (place)
         self.get_style_context().add_class("tod-start")
         self.set_decorated(False)
         self.set_resizable(False)
@@ -767,13 +769,26 @@ class Start(Gtk.Window):
             self.all_scroll.get_vadjustment().set_value(0)
 
     # ---------- apri/chiudi ----------
+    def a_sinistra(self):
+        """la barra con lo Start e le app a sinistra (Impostazioni → Barra, "allineamento" in barra.json): il menu
+        si apre a sinistra, come Windows 11; se no al centro. Riletto a ogni apertura: si cambia senza riavvii."""
+        try:
+            with open(os.path.join(CONF, "barra.json")) as f:
+                return json.load(f).get("allineamento") == "sinistra"
+        except (OSError, ValueError, AttributeError):
+            return False
+
+    def x_menu(self, wa, w):
+        return wa.x + px(12) if self.sinistra else wa.x + (wa.width - w) // 2
+
     def place(self):
         display = Gdk.Display.get_default()
         mon = display.get_primary_monitor() or display.get_monitor(0)
         wa = mon.get_workarea()
         w, h = px(W), min(px(H), wa.height - px(24))
+        self.sinistra = self.a_sinistra()
         self.resize(w, h)
-        self.move(wa.x + (wa.width - w) // 2, wa.y + wa.height - h - px(12))
+        self.move(self.x_menu(wa, w), wa.y + wa.height - h - px(12))
 
     def _ancora(self, _w, alloc):
         """il bordo basso alla stessa distanza dalla barra dei pannelli (tod-pannelli.py), qualunque
@@ -782,7 +797,7 @@ class Start(Gtk.Window):
             return
         display = Gdk.Display.get_default()
         wa = (display.get_primary_monitor() or display.get_monitor(0)).get_workarea()
-        x, y = wa.x + (wa.width - alloc.width) // 2, wa.y + wa.height - alloc.height - px(12)
+        x, y = self.x_menu(wa, alloc.width), wa.y + wa.height - alloc.height - px(12)
         if self.get_position() != (x, y):
             GLib.idle_add(lambda: self.move(x, y) and False)
 
