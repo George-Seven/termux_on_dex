@@ -14,7 +14,11 @@ LINGUA_DIR="$PREFIX/share/tod-locale"
 LINGUA_DEB_PKGS="xfce4-session xfce4-settings xfdesktop4 xfdesktop4-data xfwm4 thunar thunar-data thunar-archive-plugin
   libexo-common libexo-2-0 exo-utils libxfce4ui-common libxfce4util-common libgarcon-common xfce4-terminal
   mousepad ristretto xfce4-taskmanager xfce4-screenshooter xfce4-notifyd xfce4-power-manager-data
-  xfce4-appfinder xarchiver tumbler-common libgtk-3-common libgtk-4-common libglib2.0-data file-roller"
+  xfce4-appfinder xarchiver tumbler-common libgtk-3-common libgtk-4-common libglib2.0-data file-roller
+  gcr gnome-keyring"
+# cataloghi che una traduzione completa deve avere: se ne manca uno (aggiunto dopo, come gcr e gnome-keyring per la
+# richiesta della password del portachiavi, 10 novembre) lingua_ripara riscarica i cataloghi da sola
+LINGUA_RICHIESTI="thunar gcr gnome-keyring"
 
 # app di Termux con i cataloghi in pacchetti Debian a parte (programma:pacchetti): si scaricano solo se
 # l'app c'è. GIMP di Termux è compilato senza traduzioni: così si traducono le sue librerie e i plug-in (26 ottobre)
@@ -41,6 +45,16 @@ lingua_active() { # traduzione del desktop pronta per la lingua scelta?
   local l
   l=$(lingua_code)
   [[ $l != en && -f $LINGUA_SO ]] && compgen -G "$LINGUA_DIR/$l/LC_MESSAGES/*.mo" >/dev/null
+}
+
+lingua_completa() { # traduzione pronta e con tutti i cataloghi di LINGUA_RICHIESTI?
+  local l c
+  lingua_active || return 1
+  l=$(lingua_code)
+  for c in $LINGUA_RICHIESTI; do
+    if [[ ! -f $LINGUA_DIR/$l/LC_MESSAGES/$c.mo ]]; then return 1; fi
+  done
+  return 0
 }
 
 lingua_env() { # esporta l'ambiente di traduzione (solo per la sessione grafica)
@@ -175,12 +189,12 @@ lingua_setup() { # passo dell'installer e "tod lingua": non blocca mai l'install
 lingua_ripara() { # nel desktop: lingua scelta ma traduzione di XFCE mancante (passo fallito) → in sottofondo
   local l prova="$TOD_STATE_DIR/lingua-tentativo" segno
   l=$(lingua_code)
-  if [[ $l == en ]] || lingua_active; then return 0; fi
+  if [[ $l == en ]] || lingua_completa; then return 0; fi
   # al massimo un tentativo al giorno, ma subito se il modulo è cambiato (un aggiornamento che corregge la causa)
   segno="$(date +%F) $(cksum <"$TOD_ROOT/share/tod-gettext.c" 2>/dev/null | cut -d' ' -f1)"
   if [[ $(cat "$prova" 2>/dev/null) == "$segno" ]]; then return 0; fi
   echo "$segno" >"$prova"
-  log "lingua: traduzione '$l' mancante, la installo in sottofondo"
+  log "lingua: traduzione '$l' mancante o incompleta, la installo in sottofondo"
   (
     exec </dev/null >>"$TOD_LOG" 2>&1
     if have renice; then renice -n 10 -p "$BASHPID" >/dev/null 2>&1 || true; fi   # mai a scapito del desktop

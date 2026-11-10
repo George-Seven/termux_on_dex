@@ -518,6 +518,7 @@ def gui():
     gi.require_version("Gdk", "3.0")   # senza, Termux può caricare Gdk 4 e GTK 3 non parte
     gi.require_version("Pango", "1.0")
     from gi.repository import Gio, GLib, Gtk, Pango
+    import tod_avviso   # avvisi come macOS (share/tod_avviso.py)
     GLib.set_prgname("tod-updates")   # la barra riconosce la finestra (tod-updates.desktop) e ne mostra l'icona
 
     class Win(Gtk.Window):
@@ -672,7 +673,7 @@ def gui():
                                           "Save your work first."))
                 d.add_buttons(T("Annulla", "Cancel"), Gtk.ResponseType.CANCEL,
                               T("Chiudi e aggiorna", "Close and update"), Gtk.ResponseType.OK)
-                ok = d.run() == Gtk.ResponseType.OK
+                ok = tod_avviso.come_macos(d).run() == Gtk.ResponseType.OK
                 d.destroy()
                 if not ok:
                     return

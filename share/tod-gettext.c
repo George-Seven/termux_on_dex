@@ -91,6 +91,21 @@ static void parse_plural_header(Catalog *c, const char *header) {
     if (strcmp(expr, "n>1") == 0) c->plural_gt1 = 1;
 }
 
+/* I tre puntini dei traduttori diventano il carattere "…" (in UTF-8 sono 3 byte anche lui: si cambia sul posto), come
+ * nei menu e nei pulsanti di macOS ("Proprietà…", "Apri con un'altra applicazione…"; 10 novembre, ritocchi ai menu).
+ * Solo tre puntini esatti: quattro o più restano come sono. */
+static void tod_puntini(char *s, uint32_t n) {
+    for (uint32_t i = 0; i + 2 < n; i++) {
+        if (s[i] != '.' || s[i + 1] != '.' || s[i + 2] != '.') continue;
+        if ((i > 0 && s[i - 1] == '.') || (i + 3 < n && s[i + 3] == '.')) {
+            while (i + 1 < n && s[i + 1] == '.') i++;
+            continue;
+        }
+        s[i] = (char)0xe2; s[i + 1] = (char)0x80; s[i + 2] = (char)0xa6;
+        i += 2;
+    }
+}
+
 static Catalog *load_mo(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
@@ -130,6 +145,7 @@ static Catalog *load_mo(const char *path) {
         const char *key = b + ooff, *val = b + toff;
         if (olen == 0) { parse_plural_header(c, val); continue; }   /* intestazione */
         if (tlen == 0) continue;                                    /* non tradotto */
+        tod_puntini(b + toff, tlen);
         Entry *e = malloc(sizeof(Entry));
         if (!e) continue;
         e->key = key;   /* per i plurali la chiave è il singolare (fino al primo \0) */
@@ -232,7 +248,8 @@ static const char *translate_ctx(const char *domain, const char *ctx, const char
  * funzione originale non girava mai (es. g_object_add_weak_pointer: puntatori deboli mai
  * registrati, poi memoria liberata usata → la barra e lo Start in crash). */
 static const char *const TOD_LIBRERIE[] = {"libgobject-2.0.so.0", "libglib-2.0.so.0", "libgio-2.0.so.0",
-                                           "libgtk-3.so.0", "libX11.so", "libXext.so", "libintl.so", "libc.so", NULL};
+                                           "libgtk-3.so.0", "libgdk-3.so.0", "libX11.so", "libXext.so", "libintl.so",
+                                           "libc.so", NULL};
 
 static void *tod_next(const char *name) {
     void *f = dlsym(RTLD_NEXT, name);
@@ -571,9 +588,12 @@ typedef unsigned long tod_gtype;
 typedef struct TodList { void *data; struct TodList *next, *prev; } TodList;
 typedef struct { tod_gtype type; const char *type_name; unsigned class_size, instance_size; } TodTypeQuery;
 
+/* (10 novembre) se GTK l'ha caricata Python con gi, su Android dlsym(RTLD_DEFAULT) non la vede: tod_next la cerca
+ * nelle librerie già caricate (serve agli avvisi come macOS chiamati dalle app Python, share/tod_avviso.py) */
 #define GTKFN(ret, name, ...) \
     static ret (*f_##name)(__VA_ARGS__); \
     if (!f_##name) f_##name = (ret (*)(__VA_ARGS__))dlsym(RTLD_DEFAULT, #name); \
+    if (!f_##name) f_##name = (ret (*)(__VA_ARGS__))tod_next(#name); \
     if (!f_##name) return 0;
 
 static int tod_ok_response = -5;
@@ -1052,6 +1072,688 @@ static int tod_inline_rename(void *dialog, int *response) {
     return 1;
 }
 
+/* ------------------------------------------------- avvisi e finestrelle di sistema come macOS (10 novembre)
+ * Pietro: "non voglio più nulla della grafica linux, cose come i popup di sistema li vorrei in stile macOS".
+ * Le finestrelle GTK 3 dei programmi nativi (Thunar, scrivania, pannelli XFCE, il portachiavi...) cambiano forma
+ * prima di comparire: niente barra del titolo di xfwm4 (la cornice la disegna GTK: angoli tondi e ombra), l'icona
+ * dell'app in alto (con il triangolo se è un avvertimento), il titolo in grassetto e il testo sotto, centrati, in
+ * una finestra stretta; i pulsanti a pillola, affiancati se sono due, uno sotto l'altro se di più, con quello
+ * predefinito in cima. Si spostano trascinandole da un punto qualsiasi. I colori (fondo, pillole, accento del
+ * sistema) li dà il tema DeX OS (share/dexos/dexos-theme.py, classe tod-avviso): solo con quel tema.
+ *   - GtkMessageDialog (domande ed errori: "Eliminare per sempre?", "Saltare?"): ridisposto tutto;
+ *   - le altre finestrelle con icona grande e pulsanti ("Sostituire il file?" di Thunar, la password del
+ *     portachiavi): stessa cornice, icona in alto, pulsanti come sopra, le caselle con il nome dentro (come macOS);
+ *   - la copia in corso di Thunar (ThunarProgressDialog): la cornice; il resto lo fa il tema.
+ * Si interviene in gtk_dialog_run, gtk_widget_show(_all) e gtk_window_present, una volta per finestra, prima che
+ * sia sullo schermo. TOD_AVVISI_CLASSICI=1 lascia tutto com'era; TOD_AVVISI_DEBUG=1 scrive la forma delle finestre.
+ * Le nostre app Python chiamano tod_avviso() con ctypes (share/tod_avviso.py): GI non passa da LD_PRELOAD. */
+#define TOD_AVVISO_FATTO "tod-avviso"
+
+static int tod_avvisi_debug(void) {
+    static int d = -1;
+    if (d < 0) { const char *e = getenv("TOD_AVVISI_DEBUG"); d = e && *e && strcmp(e, "0"); }
+    return d;
+}
+
+/* solo con il tema DeX OS (è lui che sa disegnare la classe tod-avviso) e se non è stato spento */
+static int tod_avvisi_attivi(void) {
+    GTKFN(void *, gtk_settings_get_default, void)
+    GTKFN(void, g_object_get, void *, const char *, ...)
+    GTKFN(void, g_free, void *)
+    const char *e = getenv("TOD_AVVISI_CLASSICI");
+    if (e && *e && strcmp(e, "0")) return 0;
+    void *s = f_gtk_settings_get_default();
+    if (!s) return 0;
+    char *tema = NULL;
+    f_g_object_get(s, "gtk-theme-name", &tema, NULL);
+    int si = tema && !strncmp(tema, "DeX-OS", 6);
+    f_g_free(tema);
+    return si;
+}
+
+/* w è di quel tipo (o di uno derivato)? tipo_fn: la funzione _get_type di GTK, cercata una volta sola */
+static int tod_is_a(void *w, const char *tipo_fn) {
+    GTKFN(int, g_type_check_instance_is_a, void *, tod_gtype)
+    static struct { const char *nome; tod_gtype (*fn)(void); } noti[24];
+    static int n;
+    tod_gtype (*tipo)(void) = NULL;
+    for (int i = 0; i < n && !tipo; i++)
+        if (noti[i].nome == tipo_fn || !strcmp(noti[i].nome, tipo_fn)) tipo = noti[i].fn;
+    if (!tipo) {
+        tipo = (tod_gtype (*)(void))dlsym(RTLD_DEFAULT, tipo_fn);
+        if (!tipo) tipo = (tod_gtype (*)(void))tod_next(tipo_fn);
+        if (!tipo) return 0;
+        if (n < 24) { noti[n].nome = tipo_fn; noti[n].fn = tipo; n++; }
+    }
+    return w && f_g_type_check_instance_is_a(w, tipo());
+}
+
+static int tod_classe(void *w, const char *classe) {
+    GTKFN(void *, gtk_widget_get_style_context, void *)
+    GTKFN(void, gtk_style_context_add_class, void *, const char *)
+    f_gtk_style_context_add_class(f_gtk_widget_get_style_context(w), classe);
+    return 1;
+}
+
+/* la forma della finestra, per capire come è fatta (TOD_AVVISI_DEBUG=1) */
+static int tod_avviso_albero(void *w, int liv) {
+    GTKFN(TodList *, gtk_container_get_children, void *)
+    GTKFN(void, g_list_free, TodList *)
+    GTKFN(const char *, gtk_label_get_text, void *)
+    GTKFN(const char *, gtk_button_get_label, void *)
+    GTKFN(int, gtk_widget_get_visible, void *)
+    const char *t = tod_type_name(w), *txt = "";
+    if (!strcmp(t, "GtkLabel")) txt = f_gtk_label_get_text(w);
+    else if (tod_is_a(w, "gtk_button_get_type") && f_gtk_button_get_label(w)) txt = f_gtk_button_get_label(w);
+    fprintf(stderr, "tod-avviso: %*s%s%s \"%.60s\"\n", liv * 2, "", t, f_gtk_widget_get_visible(w) ? "" : " (nascosto)", txt ? txt : "");
+    if (!tod_is_container(w)) return 1;
+    TodList *kids = f_gtk_container_get_children(w);
+    for (TodList *l = kids; l; l = l->next) tod_avviso_albero(l->data, liv + 1);
+    f_g_list_free(kids);
+    return 1;
+}
+
+/* scala dello schermo (i DPI del desktop: 96 = 1) */
+static double tod_avviso_scala(void *w) {
+    GTKFN(void *, gtk_widget_get_screen, void *)
+    GTKFN(double, gdk_screen_get_resolution, void *)
+    void *s = f_gtk_widget_get_screen(w);
+    double dpi = s ? f_gdk_screen_get_resolution(s) : -1;
+    return dpi > 0 ? dpi / 96.0 : 1.0;
+}
+
+/* Trascinare la finestra da un punto qualsiasi (non ha più la barra del titolo) */
+static int tod_avviso_premuto(void *win, void *ev, void *dati) {
+    GTKFN(int, gdk_event_get_event_type, void *)
+    GTKFN(int, gdk_event_get_button, void *, unsigned *)
+    GTKFN(int, gdk_event_get_root_coords, void *, double *, double *)
+    GTKFN(uint32_t, gdk_event_get_time, void *)
+    GTKFN(void, gtk_window_begin_move_drag, void *, int, int, int, uint32_t)
+    (void)dati;
+    unsigned b = 0;
+    double x = 0, y = 0;
+    if (f_gdk_event_get_event_type(ev) != 4 /* GDK_BUTTON_PRESS */ || !f_gdk_event_get_button(ev, &b) || b != 1) return 0;
+    if (!f_gdk_event_get_root_coords(ev, &x, &y)) return 0;
+    f_gtk_window_begin_move_drag(win, 1, (int)x, (int)y, f_gdk_event_get_time(ev));
+    return 1;
+}
+
+/* Cornice disegnata da GTK (angoli tondi, ombra) al posto di quella di xfwm4: una barra del titolo vuota e invisibile */
+static int tod_avviso_cornice(void *win) {
+    GTKFN(void *, gtk_window_get_titlebar, void *)
+    GTKFN(void, gtk_window_set_titlebar, void *, void *)
+    GTKFN(void *, gtk_box_new, int, int)
+    GTKFN(void, gtk_widget_add_events, void *, int)
+    GTKFN(unsigned long, g_signal_connect_data, void *, const char *, void *, void *, void *, int)
+    if (f_gtk_window_get_titlebar(win)) return 0;   /* ha già la sua barra GTK */
+    void *testa = f_gtk_box_new(0, 0);
+    tod_classe(testa, "tod-avviso-testa");
+    f_gtk_window_set_titlebar(win, testa);
+    tod_classe(win, "tod-avviso");
+    f_gtk_widget_add_events(win, 1 << 8 /* GDK_BUTTON_PRESS_MASK */);
+    f_g_signal_connect_data(win, "button-press-event", (void *)tod_avviso_premuto, NULL, NULL, 1 /* G_CONNECT_AFTER */);
+    return 1;
+}
+
+/* L'icona dell'app (quella delle sue finestre), sennò quella del tipo di messaggio */
+static const char *tod_avviso_nome_icona(void *win, int tipo) {
+    GTKFN(void *, gtk_window_get_transient_for, void *)
+    GTKFN(const char *, gtk_window_get_icon_name, void *)
+    GTKFN(const char *, gtk_window_get_default_icon_name, void)
+    GTKFN(const char *, g_get_prgname, void)
+    GTKFN(void *, gtk_icon_theme_get_default, void)
+    GTKFN(int, gtk_icon_theme_has_icon, void *, const char *)
+    static const char *const per_programma[][2] = {
+        {"thunar", "org.xfce.thunar"}, {"xfdesktop", "org.xfce.thunar"}, {"gcr-prompter", "dialog-password"},
+        {"gnome-keyring-daemon", "dialog-password"}, {"xfce4-panel", "org.xfce.panel"}, {"xfwm4", "org.xfce.xfwm4"},
+        {"mousepad", "org.xfce.mousepad"}, {NULL, NULL}};
+    const char *prova[6] = {0};
+    int n = 0;
+    /* l'app prima di tutto (macOS mostra quella): l'icona dell'app, il programma; poi quella della finestrella e
+     * della finestra da cui viene (la copia in corso di Thunar ha l'icona della copia), infine il tipo di messaggio */
+    prova[n++] = f_gtk_window_get_default_icon_name();
+    const char *pg = f_g_get_prgname();
+    for (int i = 0; pg && per_programma[i][0]; i++)
+        if (!strcasecmp(pg, per_programma[i][0])) prova[n++] = per_programma[i][1];
+    prova[n++] = f_gtk_window_get_icon_name(win);
+    void *genitore = f_gtk_window_get_transient_for(win);
+    if (genitore) prova[n++] = f_gtk_window_get_icon_name(genitore);
+    prova[n++] = tipo == 3 ? "dialog-error" : tipo == 1 ? "dialog-warning" : tipo == 2 ? "dialog-question" : "dialog-information";
+    void *tema = f_gtk_icon_theme_get_default();
+    for (int i = 0; i < n; i++)
+        if (prova[i] && *prova[i] && f_gtk_icon_theme_has_icon(tema, prova[i])) return prova[i];
+    return "dialog-information";
+}
+
+/* l'icona in alto, centrata; con il triangolo per gli avvertimenti e gli errori, come macOS */
+static void *tod_avviso_icona(void *win, int tipo, double sc) {
+    GTKFN(void *, gtk_overlay_new, void)
+    GTKFN(void, gtk_overlay_add_overlay, void *, void *)
+    GTKFN(void *, gtk_image_new_from_icon_name, const char *, int)
+    GTKFN(void, gtk_image_set_pixel_size, void *, int)
+    GTKFN(void, gtk_container_add, void *, void *)
+    GTKFN(void, gtk_widget_set_halign, void *, int)
+    GTKFN(void, gtk_widget_set_valign, void *, int)
+    GTKFN(void, gtk_widget_show_all, void *)
+    int px = (int)(58 * sc + 0.5);
+    const char *nome = tod_avviso_nome_icona(win, tipo);
+    void *o = f_gtk_overlay_new();
+    f_gtk_widget_set_halign(o, 3 /* GTK_ALIGN_CENTER */);
+    tod_classe(o, "tod-avviso-icona");
+    void *img = f_gtk_image_new_from_icon_name(nome, 6 /* GTK_ICON_SIZE_DIALOG */);
+    f_gtk_image_set_pixel_size(img, px);
+    f_gtk_container_add(o, img);
+    if ((tipo == 1 || tipo == 3) && strncmp(nome, "dialog-", 7)) {
+        void *d = f_gtk_image_new_from_icon_name(tipo == 3 ? "dialog-error" : "dialog-warning", 6);
+        f_gtk_image_set_pixel_size(d, px * 7 / 16);
+        f_gtk_widget_set_halign(d, 2 /* GTK_ALIGN_END */);
+        f_gtk_widget_set_valign(d, 2);
+        f_gtk_overlay_add_overlay(o, d);
+    }
+    f_gtk_widget_show_all(o);
+    return o;
+}
+
+/* un testo dell'avviso: centrato, a capo alla larghezza della finestra (anche dentro le parole lunghe come i percorsi) */
+static int tod_avviso_testo(void *label, const char *classe) {
+    GTKFN(void, gtk_label_set_xalign, void *, float)
+    GTKFN(void, gtk_label_set_justify, void *, int)
+    GTKFN(void, gtk_label_set_line_wrap, void *, int)
+    GTKFN(void, gtk_label_set_line_wrap_mode, void *, int)
+    GTKFN(void, gtk_label_set_max_width_chars, void *, int)
+    GTKFN(void, gtk_label_set_width_chars, void *, int)
+    GTKFN(void, gtk_label_set_selectable, void *, int)
+    GTKFN(void, gtk_label_set_attributes, void *, void *)
+    GTKFN(void, gtk_widget_set_halign, void *, int)
+    GTKFN(void, gtk_widget_set_hexpand, void *, int)
+    f_gtk_label_set_attributes(label, NULL);   /* il grassetto grande di GTK: misure e peso li dà il tema */
+    f_gtk_label_set_selectable(label, 0);      /* sennò il clic non arriva alla finestra (trascinamento) */
+    f_gtk_label_set_line_wrap(label, 1);
+    f_gtk_label_set_line_wrap_mode(label, 2 /* PANGO_WRAP_WORD_CHAR */);
+    f_gtk_label_set_width_chars(label, -1);
+    f_gtk_label_set_max_width_chars(label, 1);   /* va a capo alla larghezza dell'avviso, non a 60 lettere */
+    f_gtk_label_set_xalign(label, 0.5f);
+    f_gtk_label_set_justify(label, 2 /* GTK_JUSTIFY_CENTER */);
+    f_gtk_widget_set_halign(label, 0 /* GTK_ALIGN_FILL */);
+    f_gtk_widget_set_hexpand(label, 1);
+    tod_classe(label, classe);
+    return 1;
+}
+
+/* I pulsanti: a pillola e larghi uguali; due affiancati, tre o più uno sotto l'altro con il predefinito in cima
+ * (l'ordine di macOS: quello che a destra è l'ultimo, in colonna sta in alto). */
+static int tod_avviso_pulsanti(void *box, double sc) {
+    GTKFN(TodList *, gtk_container_get_children, void *)
+    GTKFN(void, g_list_free, TodList *)
+    GTKFN(int, gtk_widget_get_visible, void *)
+    GTKFN(void, gtk_box_query_child_packing, void *, void *, int *, int *, unsigned *, int *)
+    GTKFN(void, gtk_box_set_child_packing, void *, void *, int, int, unsigned, int)
+    GTKFN(void, gtk_box_reorder_child, void *, void *, int)
+    GTKFN(void, gtk_box_set_spacing, void *, int)
+    GTKFN(void, gtk_box_set_homogeneous, void *, int)
+    GTKFN(void, gtk_orientable_set_orientation, void *, int)
+    GTKFN(void, gtk_button_box_set_layout, void *, int)
+    GTKFN(int, gtk_button_box_get_child_secondary, void *, void *)
+    GTKFN(void, gtk_button_box_set_child_secondary, void *, void *, int)
+    GTKFN(void *, gtk_widget_get_style_context, void *)
+    GTKFN(void, gtk_style_context_remove_class, void *, const char *)
+    GTKFN(void, gtk_widget_set_margin_top, void *, int)
+    GTKFN(int, gtk_widget_has_default, void *)
+    GTKFN(int, gtk_style_context_has_class, void *, const char *)
+    if (!box) return 0;
+    void *ordine[16];
+    int n = 0, fine = 0;
+    TodList *kids = f_gtk_container_get_children(box);
+    /* ordine a vista: prima quelli messi all'inizio, poi quelli messi in fondo (GtkDialog li mette in fondo), al contrario */
+    void *in_fondo[16];
+    for (TodList *l = kids; l; l = l->next) {
+        int e, f, pack;
+        unsigned pad;
+        if (!f_gtk_widget_get_visible(l->data)) continue;
+        f_gtk_box_query_child_packing(box, l->data, &e, &f, &pad, &pack);
+        if (pack == 0 && n < 16) ordine[n++] = l->data;
+        else if (pack != 0 && fine < 16) in_fondo[fine++] = l->data;
+    }
+    f_g_list_free(kids);
+    for (int i = fine - 1; i >= 0 && n < 16; i--) ordine[n++] = in_fondo[i];
+    if (!n) return 0;
+    int colonna = n > 2;
+    if (tod_is_a(box, "gtk_button_box_get_type")) {
+        f_gtk_button_box_set_layout(box, 6 /* GTK_BUTTONBOX_EXPAND */);
+        f_gtk_style_context_remove_class(f_gtk_widget_get_style_context(box), "linked");
+    }
+    f_gtk_orientable_set_orientation(box, colonna ? 1 : 0);
+    f_gtk_box_set_homogeneous(box, 1);
+    f_gtk_box_set_spacing(box, (int)(8 * sc + 0.5));
+    f_gtk_widget_set_margin_top(box, (int)(6 * sc + 0.5));
+    int scelto = 0;
+    for (int i = 0; i < n; i++) {
+        void *b = ordine[colonna ? n - 1 - i : i];
+        if (tod_is_a(box, "gtk_button_box_get_type") && f_gtk_button_box_get_child_secondary(box, b))
+            f_gtk_button_box_set_child_secondary(box, b, 0);
+        f_gtk_box_set_child_packing(box, b, 1, 1, 0, 0 /* GTK_PACK_START */);
+        f_gtk_box_reorder_child(box, b, i);
+        scelto |= f_gtk_widget_has_default(b) || f_gtk_style_context_has_class(f_gtk_widget_get_style_context(b), "suggested-action");
+    }
+    /* nessun pulsante predefinito ("Sostituire il file?"): come macOS è quello a destra (in colonna, in cima) */
+    if (!scelto) tod_classe(ordine[n - 1], "tod-predefinito");
+    tod_classe(box, "tod-avviso-pulsanti");
+    return n;
+}
+
+/* margini e larghezza della finestra (stretta come gli avvisi di macOS) */
+static int tod_avviso_misure(void *dialog, void *testi, double sc, int largo) {
+    GTKFN(void *, gtk_dialog_get_content_area, void *)
+    GTKFN(void, gtk_box_set_spacing, void *, int)
+    GTKFN(void, gtk_container_set_border_width, void *, unsigned)
+    GTKFN(void, gtk_widget_set_margin_start, void *, int)
+    GTKFN(void, gtk_widget_set_margin_end, void *, int)
+    GTKFN(void, gtk_widget_set_margin_top, void *, int)
+    GTKFN(void, gtk_widget_set_margin_bottom, void *, int)
+    GTKFN(void, gtk_widget_set_size_request, void *, int, int)
+    GTKFN(void, gtk_window_set_resizable, void *, int)
+    void *corpo = f_gtk_dialog_get_content_area(dialog);
+    int m = (int)(16 * sc + 0.5);
+    f_gtk_container_set_border_width(dialog, 0);
+    f_gtk_container_set_border_width(corpo, 0);
+    f_gtk_box_set_spacing(corpo, (int)(10 * sc + 0.5));
+    f_gtk_widget_set_margin_start(corpo, m);
+    f_gtk_widget_set_margin_end(corpo, m);
+    f_gtk_widget_set_margin_top(corpo, (int)(18 * sc + 0.5));
+    f_gtk_widget_set_margin_bottom(corpo, m);
+    if (testi) f_gtk_widget_set_size_request(testi, (int)(largo * sc + 0.5), -1);
+    f_gtk_window_set_resizable(dialog, 0);
+    return 1;
+}
+
+/* GtkMessageDialog: "Eliminare per sempre?", gli errori di Thunar e di XFCE */
+static int tod_avviso_messaggio(void *dialog) {
+    GTKFN(void *, gtk_message_dialog_get_message_area, void *)
+    GTKFN(void *, gtk_message_dialog_get_image, void *)
+    GTKFN(void *, gtk_dialog_get_action_area, void *)
+    GTKFN(void *, gtk_widget_get_parent, void *)
+    GTKFN(TodList *, gtk_container_get_children, void *)
+    GTKFN(void, g_list_free, TodList *)
+    GTKFN(void, g_object_get, void *, const char *, ...)
+    GTKFN(void, gtk_box_pack_start, void *, void *, int, int, unsigned)
+    GTKFN(void, gtk_box_reorder_child, void *, void *, int)
+    GTKFN(void, gtk_box_set_spacing, void *, int)
+    GTKFN(void, gtk_widget_hide, void *)
+    GTKFN(void, gtk_widget_set_no_show_all, void *, int)
+    GTKFN(void, gtk_widget_set_margin_start, void *, int)
+    GTKFN(void, gtk_widget_set_margin_end, void *, int)
+    double sc = tod_avviso_scala(dialog);
+    void *area = f_gtk_message_dialog_get_message_area(dialog);
+    if (!area) return 0;
+    int tipo = 0;
+    f_g_object_get(dialog, "message-type", &tipo, NULL);
+    void *img = f_gtk_message_dialog_get_image(dialog);   /* libxfce4ui ci mette l'icona: a sinistra, via */
+    if (img) { f_gtk_widget_hide(img); f_gtk_widget_set_no_show_all(img, 1); }
+    void *riga = f_gtk_widget_get_parent(area);            /* GtkBox orizzontale con margini di 30 */
+    if (riga) { f_gtk_widget_set_margin_start(riga, 0); f_gtk_widget_set_margin_end(riga, 0); f_gtk_box_set_spacing(riga, 0); }
+    int n = 0;
+    TodList *kids = f_gtk_container_get_children(area);
+    for (TodList *l = kids; l; l = l->next)
+        if (!strcmp(tod_type_name(l->data), "GtkLabel")) tod_avviso_testo(l->data, n++ ? "tod-avviso-testo" : "tod-avviso-titolo");
+    f_g_list_free(kids);
+    f_gtk_box_set_spacing(area, (int)(6 * sc + 0.5));
+    void *icona = tod_avviso_icona(dialog, tipo, sc);
+    f_gtk_box_pack_start(area, icona, 0, 0, (unsigned)(4 * sc + 0.5));
+    f_gtk_box_reorder_child(area, icona, 0);
+    tod_avviso_pulsanti(f_gtk_dialog_get_action_area(dialog), sc);
+    tod_avviso_misure(dialog, area, sc, 262);
+    tod_classe(dialog, "tod-avviso-messaggio");
+    return 1;
+}
+
+/* Le altre finestrelle a forma di avviso: una griglia con l'icona del dialogo in alto a sinistra, i testi accanto e
+ * i pulsanti in fondo (Thunar "Sostituire il file?", la password del portachiavi, GcrPromptDialog). Come macOS: l'icona
+ * dell'app in alto, i testi centrati su tutta la larghezza, le caselle con il nome dentro ("Password:" sparisce e
+ * diventa il suggerimento della casella), un file (icona + "Dimensione…") in una scheda bianca. */
+typedef struct { void *w; int x, y, larghe; } TodCella;
+
+static int tod_avviso_celle(void *griglia, TodCella *c, int max) {
+    GTKFN(TodList *, gtk_container_get_children, void *)
+    GTKFN(void, g_list_free, TodList *)
+    GTKFN(int, gtk_widget_get_visible, void *)
+    GTKFN(void, gtk_container_child_get, void *, void *, ...)
+    int n = 0;
+    TodList *kids = f_gtk_container_get_children(griglia);
+    for (TodList *l = kids; l && n < max; l = l->next) {
+        if (!f_gtk_widget_get_visible(l->data)) continue;
+        c[n].w = l->data;
+        f_gtk_container_child_get(griglia, l->data, "left-attach", &c[n].x, "top-attach", &c[n].y, "width", &c[n].larghe, NULL);
+        n++;
+    }
+    f_g_list_free(kids);
+    return n;
+}
+
+/* la griglia ha in alto a sinistra un'immagine (l'icona del dialogo)? → quella; sennò NULL */
+static void *tod_avviso_icona_griglia(void *griglia) {
+    TodCella c[32];
+    int n = tod_avviso_celle(griglia, c, 32), alto = 1 << 30;
+    for (int i = 0; i < n; i++) {
+        if (c[i].y < alto) alto = c[i].y;
+        if (tod_avvisi_debug()) fprintf(stderr, "tod-avviso: cella %s x=%d y=%d larga %d\n", tod_type_name(c[i].w), c[i].x, c[i].y, c[i].larghe);
+    }
+    /* la cella più a sinistra della prima riga (gcr la mette nella colonna -1), con altro accanto */
+    int sinistra = 1 << 30, accanto = 0;
+    void *img = NULL;
+    for (int i = 0; i < n; i++) if (c[i].y == alto && c[i].x < sinistra) sinistra = c[i].x;
+    for (int i = 0; i < n; i++) {
+        if (c[i].y != alto) continue;
+        if (c[i].x == sinistra && !strcmp(tod_type_name(c[i].w), "GtkImage")) img = c[i].w;
+        else accanto++;
+    }
+    return accanto ? img : NULL;
+}
+
+static int tod_avviso_griglia(void *griglia, double sc) {
+    GTKFN(void, gtk_container_child_set, void *, void *, ...)
+    GTKFN(void, gtk_container_remove, void *, void *)
+    GTKFN(void, gtk_container_add, void *, void *)
+    GTKFN(void, gtk_grid_attach, void *, void *, int, int, int, int)
+    GTKFN(void *, g_object_ref, void *)
+    GTKFN(void, g_object_unref, void *)
+    GTKFN(void *, gtk_box_new, int, int)
+    GTKFN(void, gtk_box_pack_start, void *, void *, int, int, unsigned)
+    GTKFN(void, gtk_widget_show, void *)
+    GTKFN(void, gtk_widget_hide, void *)
+    GTKFN(void, gtk_widget_set_no_show_all, void *, int)
+    GTKFN(void, gtk_widget_set_halign, void *, int)
+    GTKFN(void, gtk_widget_set_hexpand, void *, int)
+    GTKFN(void, gtk_label_set_xalign, void *, float)
+    GTKFN(const char *, gtk_label_get_text, void *)
+    GTKFN(void, gtk_entry_set_placeholder_text, void *, const char *)
+    GTKFN(void, gtk_grid_set_column_spacing, void *, unsigned)
+    GTKFN(void, gtk_grid_set_row_spacing, void *, unsigned)
+    GTKFN(void, gtk_widget_set_margin_start, void *, int)
+    GTKFN(void, gtk_widget_set_margin_end, void *, int)
+    TodCella c[32];
+    void *vecchia = tod_avviso_icona_griglia(griglia);
+    if (vecchia) { f_gtk_widget_hide(vecchia); f_gtk_widget_set_no_show_all(vecchia, 1); }
+    int n = tod_avviso_celle(griglia, c, 32), x0 = 1 << 30, x1 = -(1 << 30), titolo = 0;
+    for (int i = 0; i < n; i++) {
+        if (c[i].x < x0) x0 = c[i].x;
+        if (c[i].x + c[i].larghe > x1) x1 = c[i].x + c[i].larghe;
+    }
+    int colonne = n ? x1 - x0 : 1;   /* ogni riga rifatta occupa tutta la larghezza, da x0 */
+    f_gtk_grid_set_column_spacing(griglia, 0);
+    f_gtk_grid_set_row_spacing(griglia, (unsigned)(8 * sc + 0.5));
+    /* riga per riga, dall'alto */
+    int righe[32], nr = 0;
+    for (int i = 0; i < n; i++) {
+        int c_y = c[i].y, gia = 0;
+        for (int k = 0; k < nr; k++) gia |= righe[k] == c_y;
+        if (!gia && nr < 32) righe[nr++] = c_y;
+    }
+    for (int a = 0; a < nr; a++) for (int b = a + 1; b < nr; b++) if (righe[b] < righe[a]) { int s = righe[a]; righe[a] = righe[b]; righe[b] = s; }
+    for (int r = 0; r < nr; r++) {
+        TodCella *in[8];
+        int k = 0;
+        for (int i = 0; i < n && k < 8; i++) if (c[i].y == righe[r]) in[k++] = &c[i];
+        for (int a = 0; a < k; a++) for (int b = a + 1; b < k; b++) if (in[b]->x < in[a]->x) { TodCella *s = in[a]; in[a] = in[b]; in[b] = s; }
+        const char *t0 = k ? tod_type_name(in[0]->w) : "";
+        if (k == 2 && !strcmp(t0, "GtkLabel") && tod_is_a(in[1]->w, "gtk_entry_get_type")) {
+            /* "Password:" + casella → la casella sola, con "Password" dentro */
+            char buf[128];
+            snprintf(buf, sizeof buf, "%s", f_gtk_label_get_text(in[0]->w));
+            size_t z = strlen(buf);
+            while (z && (buf[z - 1] == ':' || buf[z - 1] == ' ')) buf[--z] = 0;
+            f_gtk_entry_set_placeholder_text(in[1]->w, buf);
+            f_gtk_widget_hide(in[0]->w);
+            f_gtk_widget_set_no_show_all(in[0]->w, 1);
+            f_gtk_container_child_set(griglia, in[1]->w, "left-attach", x0, "width", colonne, NULL);
+            f_gtk_widget_set_hexpand(in[1]->w, 1);
+        } else if (k == 2 && !strcmp(t0, "GtkImage") && !strcmp(tod_type_name(in[1]->w), "GtkLabel")) {
+            /* un file: icona + "Dimensione… Modificato…" → una scheda */
+            void *img = f_g_object_ref(in[0]->w), *lab = f_g_object_ref(in[1]->w);
+            f_gtk_container_remove(griglia, img);
+            f_gtk_container_remove(griglia, lab);
+            void *scheda = f_gtk_box_new(0, (int)(10 * sc + 0.5));
+            tod_classe(scheda, "tod-scheda");
+            f_gtk_box_pack_start(scheda, img, 0, 0, 0);
+            f_gtk_box_pack_start(scheda, lab, 1, 1, 0);
+            f_gtk_label_set_xalign(lab, 0.0f);
+            tod_classe(lab, "tod-avviso-tenue");
+            for (void **m = (void *[]){img, lab, NULL}; *m; m++) {   /* Thunar dà margini diversi ai due file */
+                f_gtk_widget_set_margin_start(*m, 0);
+                f_gtk_widget_set_margin_end(*m, 0);
+            }
+            f_g_object_unref(img);
+            f_g_object_unref(lab);
+            f_gtk_grid_attach(griglia, scheda, x0, righe[r], colonne, 1);
+            f_gtk_widget_set_hexpand(scheda, 1);
+            f_gtk_widget_show(scheda);
+        } else if (k == 1) {
+            f_gtk_container_child_set(griglia, in[0]->w, "left-attach", x0, "width", colonne, NULL);
+            if (!strcmp(t0, "GtkLabel")) tod_avviso_testo(in[0]->w, titolo++ ? "tod-avviso-testo" : "tod-avviso-titolo");
+            else if (tod_is_a(in[0]->w, "gtk_check_button_get_type")) f_gtk_widget_set_halign(in[0]->w, 3 /* CENTER */);
+            else f_gtk_widget_set_hexpand(in[0]->w, 1);
+        }
+    }
+    return 1;
+}
+
+/* una griglia con l'icona del dialogo in alto a sinistra, nel corpo della finestra */
+static void *tod_avviso_trova_griglia(void *corpo) {
+    GTKFN(TodList *, gtk_container_get_children, void *)
+    GTKFN(void, g_list_free, TodList *)
+    void *g = NULL;
+    TodList *kids = f_gtk_container_get_children(corpo);
+    for (TodList *l = kids; l && !g; l = l->next)
+        if (tod_is_a(l->data, "gtk_grid_get_type") && tod_avviso_icona_griglia(l->data)) g = l->data;
+    f_g_list_free(kids);
+    return g;
+}
+
+static int tod_avviso_finestrella(void *dialog, int tipo) {
+    GTKFN(void *, gtk_dialog_get_content_area, void *)
+    GTKFN(void *, gtk_dialog_get_action_area, void *)
+    GTKFN(void, gtk_box_pack_start, void *, void *, int, int, unsigned)
+    GTKFN(void, gtk_box_reorder_child, void *, void *, int)
+    double sc = tod_avviso_scala(dialog);
+    void *corpo = f_gtk_dialog_get_content_area(dialog);
+    void *griglia = tod_avviso_trova_griglia(corpo);
+    if (!griglia) return 0;
+    tod_avviso_griglia(griglia, sc);
+    void *icona = tod_avviso_icona(dialog, tipo, sc);
+    f_gtk_box_pack_start(corpo, icona, 0, 0, 0);
+    f_gtk_box_reorder_child(corpo, icona, 0);
+    tod_avviso_pulsanti(f_gtk_dialog_get_action_area(dialog), sc);
+    tod_avviso_misure(dialog, griglia, sc, 268);
+    tod_classe(dialog, "tod-avviso-finestrella");
+    return 1;
+}
+
+/* Un testo già scritto in inglese → la sua traduzione nel catalogo del dominio (NULL se non c'è), anche quando è una
+ * frase con un "%s" già riempito ("…a new keyring called “Login”…"). Serve alla password del portachiavi: in Termux
+ * gnome-keyring-daemon è compilato senza traduzioni e manda a gcr-prompter i testi in inglese. Da liberare con free. */
+static char *tod_traduci_testo(const char *dom, const char *testo) {
+    Catalog *c = domain_catalog(dom);
+    if (!c || !testo || !*testo) return NULL;
+    const Entry *e = cat_find(c, testo);
+    if (e) return strdup(e->val);
+    size_t lt = strlen(testo);
+    for (uint32_t b = 0; b < c->nbuckets; b++)
+        for (const Entry *x = c->buckets[b]; x; x = x->next) {
+            const char *p = strstr(x->key, "%s");
+            if (!p || strchr(p + 2, '%') || memchr(x->key, '%', (size_t)(p - x->key))) continue;   /* un solo %s */
+            size_t pre = (size_t)(p - x->key), suf = strlen(p + 2);
+            if (lt < pre + suf || strncmp(testo, x->key, pre) || strcmp(testo + lt - suf, p + 2)) continue;
+            const char *v = strstr(x->val, "%s"), *v1 = strstr(x->val, "%1$s");
+            size_t salta = 2;
+            if (v1 && (!v || v1 < v)) { v = v1; salta = 4; }
+            if (!v) continue;
+            size_t arg = lt - pre - suf, lv = strlen(x->val);
+            char *out = malloc(lv + arg + 1);
+            if (!out) return NULL;
+            memcpy(out, x->val, (size_t)(v - x->val));
+            memcpy(out + (v - x->val), testo + pre, arg);
+            strcpy(out + (v - x->val) + arg, v + salta);
+            return out;
+        }
+    return NULL;
+}
+
+/* i testi di una finestra (etichette e pulsanti) tradotti con i domini dati, il primo che li conosce */
+static int tod_traduci_finestra(void *w, const char *const *domini) {
+    GTKFN(TodList *, gtk_container_get_children, void *)
+    GTKFN(void, g_list_free, TodList *)
+    GTKFN(const char *, gtk_label_get_label, void *)
+    GTKFN(int, gtk_label_get_use_markup, void *)
+    GTKFN(int, gtk_label_get_use_underline, void *)
+    GTKFN(void, gtk_label_set_label, void *, const char *)
+    if (!strcmp(tod_type_name(w), "GtkLabel") && !f_gtk_label_get_use_markup(w)) {
+        const char *testo = f_gtk_label_get_label(w);
+        int sottolineato = f_gtk_label_get_use_underline(w);
+        for (int i = 0; domini[i] && testo; i++) {
+            char *tr = tod_traduci_testo(domini[i], testo);
+            if (!tr) continue;
+            if (strcmp(tr, testo)) {
+                if (!sottolineato) { char *s = tr, *d = tr; for (; *s; s++) if (*s != '_') *d++ = *s; *d = 0; }
+                f_gtk_label_set_label(w, tr);
+            }
+            free(tr);
+            break;
+        }
+        return 1;
+    }
+    if (!tod_is_container(w)) return 0;
+    TodList *kids = f_gtk_container_get_children(w);
+    for (TodList *l = kids; l; l = l->next) tod_traduci_finestra(l->data, domini);
+    f_g_list_free(kids);
+    return 1;
+}
+
+/* La copia in corso: ogni ThunarProgressView (una per lavoro, anche quelle che arrivano dopo) prende le classi del tema:
+ * il primo testo è il titolo, gli altri sono grigi e piccoli, i pulsanti (pausa, ferma) tondi come quelli del Finder */
+static int tod_avanzamento_vista(void *vista) {
+    GTKFN(TodList *, gtk_container_get_children, void *)
+    GTKFN(void, g_list_free, TodList *)
+    GTKFN(void, gtk_label_set_attributes, void *, void *)
+    GTKFN(void, gtk_widget_set_valign, void *, int)
+    if (!vista || strcmp(tod_type_name(vista), "ThunarProgressView")) return 0;
+    tod_classe(vista, "tod-avanzamento-vista");
+    void *pila[48];
+    int n = 0, testi = 0;
+    pila[n++] = vista;
+    while (n) {   /* in ampiezza non serve: l'ordine dei testi è quello del disegno, dall'alto */
+        void *w = pila[--n];
+        const char *t = tod_type_name(w);
+        if (!strcmp(t, "GtkLabel")) {
+            if (!testi++) { f_gtk_label_set_attributes(w, NULL); tod_classe(w, "tod-avviso-titolo"); }
+            else tod_classe(w, "tod-avviso-tenue");
+            continue;
+        }
+        if (tod_is_a(w, "gtk_button_get_type")) {   /* un tondo, non una pillola alta quanto i due testi */
+            tod_classe(w, "tod-tondo");
+            f_gtk_widget_set_valign(w, 3 /* GTK_ALIGN_CENTER */);
+            continue;
+        }
+        if (!tod_is_container(w)) continue;
+        TodList *kids = f_gtk_container_get_children(w), *ultimo = kids;
+        while (ultimo && ultimo->next) ultimo = ultimo->next;
+        for (TodList *l = ultimo; l && n < 48; l = l->prev) pila[n++] = l->data;   /* il primo figlio esce per primo */
+        f_g_list_free(kids);
+    }
+    return 1;
+}
+
+static void tod_avanzamento_aggiunta(void *contenitore, void *figlio, void *dati) {
+    (void)contenitore; (void)dati;
+    tod_avanzamento_vista(figlio);
+}
+
+static int tod_avanzamento(void *dialog) {
+    GTKFN(void *, gtk_widget_get_parent, void *)
+    GTKFN(TodList *, gtk_container_get_children, void *)
+    GTKFN(void, g_list_free, TodList *)
+    GTKFN(unsigned long, g_signal_connect_data, void *, const char *, void *, void *, void *, int)
+    void *vista = tod_find_type(dialog, "ThunarProgressView");
+    void *elenco = vista ? f_gtk_widget_get_parent(vista) : NULL;
+    if (!elenco) return 0;
+    TodList *kids = f_gtk_container_get_children(elenco);
+    for (TodList *l = kids; l; l = l->next) tod_avanzamento_vista(l->data);
+    f_g_list_free(kids);
+    f_g_signal_connect_data(elenco, "add", (void *)tod_avanzamento_aggiunta, NULL, NULL, 1 /* G_CONNECT_AFTER */);
+    return 1;
+}
+
+int tod_avviso(void *w) {
+    GTKFN(int, gtk_widget_get_realized, void *)
+    GTKFN(void *, g_object_get_data, void *, const char *)
+    GTKFN(void, g_object_set_data, void *, const char *, void *)
+    GTKFN(int, gtk_widget_is_toplevel, void *)
+    GTKFN(void *, gtk_dialog_get_content_area, void *)
+    GTKFN(void *, gtk_dialog_get_action_area, void *)
+    if (!w || !tod_is_a(w, "gtk_window_get_type") || !f_gtk_widget_is_toplevel(w)) return 0;
+    if (f_g_object_get_data(w, TOD_AVVISO_FATTO) || f_gtk_widget_get_realized(w)) return 0;
+    f_g_object_set_data(w, TOD_AVVISO_FATTO, (void *)1);   /* una volta sola, anche se non si tocca */
+    const char *t = tod_type_name(w);
+    int forma = 0;   /* 1 messaggio, 2 finestrella con icona e pulsanti, 3 copia in corso */
+    if (tod_is_a(w, "gtk_message_dialog_get_type")) forma = 1;
+    else if (!strcmp(t, "ThunarProgressDialog")) forma = 3;
+    else if (!strcmp(t, "GcrPromptDialog")) forma = 2;
+    else if (tod_is_a(w, "gtk_dialog_get_type") && tod_avviso_trova_griglia(f_gtk_dialog_get_content_area(w))) {
+        /* "Sostituire il file?" di Thunar e simili: la griglia con l'icona e solo pulsanti in fondo */
+        TodList *(*figli)(void *) = (TodList *(*)(void *))tod_next("gtk_container_get_children");
+        void (*libera)(TodList *) = (void (*)(TodList *))tod_next("g_list_free");
+        int pulsanti = 0, altro = 0;
+        TodList *kids = figli ? figli(f_gtk_dialog_get_action_area(w)) : NULL;
+        for (TodList *l = kids; l; l = l->next) { if (tod_is_a(l->data, "gtk_button_get_type")) pulsanti++; else altro++; }
+        if (libera) libera(kids);
+        /* niente caselle (la rinomina e "Nuova cartella" hanno le loro forme) né elenchi */
+        void *corpo = f_gtk_dialog_get_content_area(w);
+        if (pulsanti >= 1 && !altro && !tod_find_type(corpo, "GtkTreeView") && !tod_find_type(corpo, "GtkEntry")) forma = 2;
+    }
+    if (tod_avvisi_debug() && (forma || tod_is_a(w, "gtk_dialog_get_type"))) {
+        fprintf(stderr, "tod-avviso: %s forma %d\n", t, forma);
+        tod_avviso_albero(w, 1);
+    }
+    if (!forma || !tod_avvisi_attivi()) return 0;
+    if (!tod_avviso_cornice(w)) return 0;
+    if (forma == 1) tod_avviso_messaggio(w);
+    else if (forma == 2 && !strcmp(t, "GcrPromptDialog")) {
+        static const char *const domini[] = {"gnome-keyring", "gcr", NULL};
+        tod_traduci_finestra(w, domini);   /* prima: "Password:" diventa il suggerimento della casella già tradotto */
+        tod_avviso_finestrella(w, 0);
+    } else if (forma == 2) tod_avviso_finestrella(w, 2);
+    else { tod_classe(w, "tod-avviso-avanzamento"); tod_avanzamento(w); }
+    fprintf(stderr, "tod-avviso: %s come macOS (forma %d)\n", t, forma);
+    return 1;
+}
+
+/* i punti in cui una finestra sta per comparire (chiamati dal programma: GTK dentro di sé non passa da qui) */
+void gtk_widget_show(void *w) {
+    static void (*real)(void *);
+    if (!real) real = (void (*)(void *))tod_next("gtk_widget_show");
+    tod_avviso(w);
+    if (real) real(w);
+}
+
+void gtk_widget_show_all(void *w) {
+    static void (*real)(void *);
+    if (!real) real = (void (*)(void *))tod_next("gtk_widget_show_all");
+    tod_avviso(w);
+    if (real) real(w);
+}
+
+void gtk_window_present(void *w) {
+    static void (*real)(void *);
+    if (!real) real = (void (*)(void *))tod_next("gtk_window_present");
+    tod_avviso(w);
+    if (real) real(w);
+}
+
+void gtk_window_present_with_time(void *w, uint32_t t) {
+    static void (*real)(void *, uint32_t);
+    if (!real) real = (void (*)(void *, uint32_t))tod_next("gtk_window_present_with_time");
+    tod_avviso(w);
+    if (real) real(w, t);
+}
+
 static int tod_create_inline(void *dialog, int *response);
 
 int gtk_dialog_run(void *dialog) {
@@ -1064,6 +1766,7 @@ int gtk_dialog_run(void *dialog) {
         return response;
     }
     if (tod_compact_rename(dialog)) fprintf(stderr, "tod-rinomina: casella compatta\n");
+    else tod_avviso(dialog);   /* le domande e gli errori: come gli avvisi di macOS */
     return real ? real(dialog) : -4;
 }
 

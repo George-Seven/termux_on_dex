@@ -32,7 +32,7 @@ NAMES = {"light": "DeX-OS", "dark": "DeX-OS-Dark"}
 FLUENT_HUE = 214.0          # il blu di Fluent (#1A73E8, #3281EA, #1567d3...)
 FLUENT_SL = (0.818, 0.506)  # saturazione e luminosità di #1A73E8
 DEFAULT_ACCENT = "#0067c0"
-VERSION = 12   # nel nome dei temi: cambiando il disegno si rifanno da soli
+VERSION = 13   # nel nome dei temi: cambiando il disegno si rifanno da soli
 
 
 # --- colori ---------------------------------------------------------------------------------
@@ -300,8 +300,9 @@ def names(accent, scale):
 
 def notify(dst, mode, accent):
     """le notifiche (xfce4-notifyd, tema = questo tema GTK): una scheda come macOS e Windows 11"""
-    bg, fg, bordo = (("#2b2b30", "#f2f2f5", "rgba(255,255,255,0.10)") if mode == "dark"
-                     else ("#ffffff", "#1b1b1f", "rgba(0,0,0,0.10)"))
+    # come i banner di macOS: angoli ampi, al passaggio appena più scura (niente bordo colorato)
+    bg, fg, bordo, sopra = (("#2b2b30", "#f2f2f5", "rgba(255,255,255,0.10)", "#323238") if mode == "dark"
+                            else ("#ffffff", "#1b1b1f", "rgba(0,0,0,0.10)", "#f6f6f8"))
     os.makedirs(dst, exist_ok=True)
     with open(os.path.join(dst, "gtk.css"), "w") as f:
         f.write(f"""/* DeX OS: notifiche (Termux On DeX) */
@@ -309,10 +310,10 @@ def notify(dst, mode, accent):
     background-color: {bg};
     color: {fg};
     border: 1px solid {bordo};
-    border-radius: 14px;
-    padding: 14px 16px;
+    border-radius: 18px;
+    padding: 12px 14px;
 }}
-#XfceNotifyWindow:hover {{ border-color: {accent}; }}
+#XfceNotifyWindow:hover {{ background-color: {sopra}; }}
 #XfceNotifyWindow label#summary {{ font-weight: 600; font-size: 1.04em; color: {fg}; }}
 #XfceNotifyWindow label#body {{ color: alpha({fg}, 0.78); }}
 #XfceNotifyWindow image {{ margin-right: 6px; }}
@@ -382,7 +383,7 @@ menu, .menu, .context-menu {
 .csd menu, .csd .menu, .csd .context-menu { border-radius: 12px; border: none; }
 menu menuitem, .menu menuitem, .context-menu menuitem,
 .csd menu menuitem, .csd .menu menuitem, .csd .context-menu menuitem {
-  margin: 0; padding: 5px 10px; min-height: 18px; border-radius: 7px;
+  margin: 0; padding: 4px 10px; min-height: 18px; border-radius: 6px;
   color: {testo}; font-family: Inter, sans-serif; font-size: 10pt;
 }
 menu menuitem:hover, .menu menuitem:hover, .context-menu menuitem:hover {
@@ -407,11 +408,11 @@ popover, popover.background {
 popover modelbutton { border-radius: 7px; padding: 5px 10px; }
 popover modelbutton:hover { background-color: {accento}; color: #ffffff; }
 tooltip, tooltip.background, tooltip.background.csd {
-  background-color: {fondo}; color: {testo}; border-radius: 8px; border: none;
+  background-color: {fondo}; color: {testo}; border-radius: 7px; border: none;
 }
-tooltip.csd decoration { border-radius: 8px; box-shadow: 0 4px 14px {ombra}, 0 0 0 1px {bordo}; }
+tooltip.csd decoration { border-radius: 7px; box-shadow: 0 3px 10px {ombra}, 0 0 0 1px {bordo}; }
 tooltip label { color: {testo}; font-family: Inter, sans-serif; font-size: 9pt; }
-tooltip > box { padding: 5px 9px; }
+tooltip > box { padding: 4px 8px; }
 /* caselle, scelte, interruttori e cursori: sempre nel colore di sistema. In Fluent la casella spuntata è
    un'icona (quadrato pieno col segno ritagliato) nel colore del testo, sopra un quadratino bianco che si
    vede dal ritaglio: l'accento va nel colore, mai il bianco (la spunta sparisce) né un fondo */
@@ -419,6 +420,85 @@ check:checked, radio:checked, check:indeterminate, radio:indeterminate { color: 
 switch:checked { background-color: {accento}; border-color: {accento}; }
 scale highlight, scale trough highlight, progressbar progress, levelbar block.filled { background-color: {accento}; }
 """
+
+
+# avvisi e finestrelle di sistema come macOS (10 novembre, Pietro: "non voglio più nulla della grafica linux"):
+# tod-gettext.c dà la classe tod-avviso alle finestrelle dei programmi nativi (domande, errori, "Sostituire il file?",
+# password del portachiavi, copia in corso), toglie la barra di xfwm4 e le ridispone; qui l'aspetto, con i colori
+# approvati (pannello #f2f2f5 / #242428, schede #ffffff / #2e2e33) e solo l'accento del sistema.
+# Selettori con molte classi: devono vincere su quelli di Fluent per messagedialog (pulsanti piatti e attaccati).
+AVVISI_CSS = {
+    "light": dict(fondo="#f2f2f5", scheda="#ffffff", testo="#1d1d1f", tenue="#6e6e73", bottone="#ffffff",
+                  bottone_su="#f7f7f9", bottone_giu="#e5e5ea", bordo="rgba(0, 0, 0, 0.10)", ombra="rgba(0, 0, 0, 0.30)",
+                  campo="#ffffff", linea="rgba(0, 0, 0, 0.14)", traccia="rgba(0, 0, 0, 0.08)", traccia_su="rgba(0, 0, 0, 0.14)"),
+    "dark": dict(fondo="#242428", scheda="#2e2e33", testo="#f5f5f7", tenue="#a1a1a6", bottone="#3a3a40",
+                 bottone_su="#44444a", bottone_giu="#4e4e55", bordo="rgba(255, 255, 255, 0.12)", ombra="rgba(0, 0, 0, 0.60)",
+                 campo="#1c1c1f", linea="rgba(255, 255, 255, 0.14)", traccia="rgba(255, 255, 255, 0.12)",
+                 traccia_su="rgba(255, 255, 255, 0.20)"),
+}
+AVVISI = """
+/* --- DeX OS: avvisi e finestrelle di sistema come macOS (classe tod-avviso, da tod-gettext.c) --- */
+.tod-avviso, .tod-avviso.background, .tod-avviso.csd.background {
+  background-color: {fondo}; background-image: none; color: {testo}; border-radius: 16px; font-family: Inter, sans-serif;
+}
+.tod-avviso.csd decoration, .tod-avviso.csd.background decoration, .tod-avviso.solid-csd decoration {
+  border-radius: 16px; border: none; box-shadow: 0 16px 44px {ombra}, 0 0 0 1px {bordo};
+}
+.tod-avviso.csd > .tod-avviso-testa, .tod-avviso > .titlebar.tod-avviso-testa {
+  min-height: 0; min-width: 0; padding: 0; margin: 0; border: none; box-shadow: none; background: none;
+}
+.tod-avviso.csd .dialog-action-area, .tod-avviso.csd .tod-avviso-pulsanti { margin: 0; padding: 0; border: none; }
+.tod-avviso.csd label.tod-avviso-titolo { font-weight: 700; font-size: 10.5pt; color: {testo}; }
+.tod-avviso.csd label.tod-avviso-testo { font-size: 9pt; color: {testo}; }
+.tod-avviso.csd label.tod-avviso-tenue { font-size: 8.5pt; color: {tenue}; }
+.tod-avviso.csd .tod-scheda { background-color: {scheda}; border-radius: 12px; padding: 8px 10px; }
+.tod-avviso.csd .tod-avviso-pulsanti button, .tod-avviso.csd .tod-avviso-pulsanti button:first-child,
+.tod-avviso.csd .tod-avviso-pulsanti button:last-child, .tod-avviso.csd .tod-avviso-pulsanti button:only-child {
+  min-height: 24px; padding: 3px 14px; margin: 0; border-radius: 999px; border: none; background-image: none;
+  background-color: {bottone}; color: {testo}; font-weight: 500; text-shadow: none; outline-color: transparent;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16), inset 0 0 0 1px {bordo};
+}
+.tod-avviso.csd .tod-avviso-pulsanti button label { color: {testo}; }
+.tod-avviso.csd .tod-avviso-pulsanti button:hover { background-color: {bottone_su}; }
+.tod-avviso.csd .tod-avviso-pulsanti button:active, .tod-avviso.csd .tod-avviso-pulsanti button:checked { background-color: {bottone_giu}; }
+.tod-avviso.csd .tod-avviso-pulsanti button:disabled, .tod-avviso.csd .tod-avviso-pulsanti button:disabled label { opacity: 0.55; }
+.tod-avviso.csd .tod-avviso-pulsanti button.default, .tod-avviso.csd .tod-avviso-pulsanti button.suggested-action,
+.tod-avviso.csd .tod-avviso-pulsanti button.tod-predefinito {
+  background-color: {accento}; color: #ffffff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
+}
+.tod-avviso.csd .tod-avviso-pulsanti button.default label, .tod-avviso.csd .tod-avviso-pulsanti button.suggested-action label,
+.tod-avviso.csd .tod-avviso-pulsanti button.tod-predefinito label { color: #ffffff; }
+.tod-avviso.csd .tod-avviso-pulsanti button.default:hover, .tod-avviso.csd .tod-avviso-pulsanti button.suggested-action:hover,
+.tod-avviso.csd .tod-avviso-pulsanti button.tod-predefinito:hover { background-color: shade({accento}, 1.08); }
+.tod-avviso.csd .tod-avviso-pulsanti button.default:active, .tod-avviso.csd .tod-avviso-pulsanti button.suggested-action:active,
+.tod-avviso.csd .tod-avviso-pulsanti button.tod-predefinito:active { background-color: shade({accento}, 0.92); }
+.tod-avviso.csd .tod-avviso-pulsanti button:focus { outline: 2px solid alpha({accento}, 0.5); outline-offset: 1px; -gtk-outline-radius: 999px; }
+.tod-avviso.csd entry {
+  min-height: 26px; padding: 2px 10px; border-radius: 8px; background-image: none; background-color: {campo};
+  color: {testo}; border: 1px solid {linea}; box-shadow: none;
+}
+.tod-avviso.csd entry:focus { border-color: {accento}; box-shadow: 0 0 0 3px alpha({accento}, 0.30); }
+.tod-avviso.csd progressbar trough { min-height: 6px; border-radius: 3px; background-color: {traccia}; border: none; }
+.tod-avviso.csd progressbar progress { min-height: 6px; border-radius: 3px; background-color: {accento}; border: none; }
+/* la copia in corso di Thunar (ThunarProgressDialog): una scheda come quella del Finder */
+.tod-avviso-avanzamento.csd .tod-avanzamento-vista { padding: 14px 16px 12px 16px; }
+.tod-avviso-avanzamento.csd .tod-avanzamento-vista label.tod-avviso-titolo { font-size: 10pt; font-weight: 600; }
+.tod-avviso-avanzamento.csd .tod-avanzamento-vista button.tod-tondo {
+  min-width: 22px; min-height: 22px; padding: 1px; margin: 0 0 0 6px; border-radius: 999px; border: none;
+  background-image: none; background-color: {traccia}; box-shadow: none; color: {tenue};
+}
+.tod-avviso-avanzamento.csd .tod-avanzamento-vista button.tod-tondo:hover { background-color: {traccia_su}; color: {testo}; }
+.tod-avviso-avanzamento.csd .tod-avanzamento-vista button.tod-tondo image { color: inherit; }
+.tod-avviso-avanzamento.csd separator { background-color: {bordo}; min-height: 1px; margin: 0 16px; }
+"""
+
+
+def avvisi_css(mode, accent):
+    v = dict(AVVISI_CSS["dark" if mode == "dark" else "light"], accento=accent)
+    out = AVVISI
+    for k, val in v.items():
+        out = out.replace("{" + k + "}", val)
+    return out
 
 
 def vetro_css(mode, accent):
@@ -448,6 +528,7 @@ def build(accent, scale, out):
                         gtk_part(os.path.join(src, sub), os.path.join(tmp, sub), rc)
                 with open(os.path.join(tmp, "gtk-3.0", "gtk.css"), "a") as f:
                     f.write(vetro_css(mode, accent))
+                    f.write(avvisi_css(mode, accent))
                     f.write(DESKTOP_CSS.replace("ACCENTO", accent).replace("TESTO", "#ffffff" if mode == "dark" else "#1b1f2a")
                             .replace("OMBRA", "0 1px 2px rgba(0, 0, 0, 0.6)" if mode == "dark" else "0 1px 1px rgba(255, 255, 255, 0.55)")
                             .replace("PASSAGGIO", "rgba(255, 255, 255, 0.18)" if mode == "dark" else "rgba(255, 255, 255, 0.55)"))

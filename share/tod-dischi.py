@@ -12,6 +12,7 @@ $TMPDIR/tod-usb (lkl-<id>.parti, lkl-<id>.spazio) e si lavora con gli stessi com
 Gira in Termux (PyGObject, GTK 3) con l'ambiente della sessione: `tod-usb dischi`.
 """
 import os
+import sys
 import re
 import subprocess
 import threading
@@ -21,6 +22,8 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")   # senza, Termux carica Gdk 4 e GTK 3 non parte
 from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
+sys.path.insert(1, os.path.dirname(os.path.abspath(__file__)))   # share/ anche se caricato da altrove (i test)
+import tod_avviso  # noqa: E402  (avvisi come macOS, share/tod_avviso.py)
 
 GLib.set_prgname("tod-dischi")   # la barra riconosce la finestra (tod-dischi.desktop)
 
@@ -452,7 +455,7 @@ class Dischi(Gtk.Window):
         m.add_button(T("Annulla", "Cancel"), Gtk.ResponseType.CANCEL)
         b = m.add_button(azione, Gtk.ResponseType.OK)
         b.get_style_context().add_class("destructive-action")
-        ok = m.run() == Gtk.ResponseType.OK
+        ok = tod_avviso.come_macos(m).run() == Gtk.ResponseType.OK
         m.destroy()
         return ok
 
@@ -603,7 +606,7 @@ class Dischi(Gtk.Window):
                               message_type=Gtk.MessageType.ERROR if errore else Gtk.MessageType.INFO,
                               buttons=Gtk.ButtonsType.OK, text=titolo)
         m.format_secondary_text(testo)
-        m.run()
+        tod_avviso.come_macos(m).run()
         m.destroy()
 
     def lavora(self, titolo, comandi, fatto=None, accetta=(0,)):
@@ -677,7 +680,7 @@ class App(Gtk.Application):
                 m = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.OK,
                                       text=T("Dischi non si è aperto", "Disks did not open"))
                 m.format_secondary_text(str(e))
-                m.run()
+                tod_avviso.come_macos(m).run()
                 m.destroy()
                 for w in self.get_windows():
                     w.destroy()

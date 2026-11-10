@@ -3097,7 +3097,7 @@ EOF
 import importlib.util as u
 s = u.spec_from_file_location('dx', '$ROOT/share/dexos/dexos-theme.py'); m = u.module_from_spec(s); s.loader.exec_module(m)
 print(' '.join(m.names('#8A5CF5', 1.125).values()), '|', ' '.join(m.names('#0067c0', 1.0).values()))")
-  eq "nomi" "DeX-OS-8a5cf5-v12 DeX-OS-Dark-8a5cf5-v12 DeX-OS-WM-1.125-v12 DeX-OS-WM-Dark-1.125-v12 | DeX-OS-0067c0-v12 DeX-OS-Dark-0067c0-v12 DeX-OS-WM-1-v12 DeX-OS-WM-Dark-1-v12" "$nm"
+  eq "nomi" "DeX-OS-8a5cf5-v13 DeX-OS-Dark-8a5cf5-v13 DeX-OS-WM-1.125-v13 DeX-OS-WM-Dark-1.125-v13 | DeX-OS-0067c0-v13 DeX-OS-Dark-0067c0-v13 DeX-OS-WM-1-v13 DeX-OS-WM-Dark-1-v13" "$nm"
   # menu, popup e suggerimenti nello stile di DeX OS: fondi pieni (niente vetro), voce attiva nell'accento
   local menu
   menu=$(python3 -c "
@@ -5349,6 +5349,223 @@ test_resize_edges() { # cornice da 1 px elegante, ma si ridimensiona senza mirar
   has "bordo da una riga" 'save(f"left-{sfx}", B, S(8)' "$(cat "$ROOT/share/dexos/dexos-theme.py")"
   has "angoli in basso larghi (sennò l'arrotondamento in alto sparisce)" "cw = R + S(10)" "$(cat "$ROOT/share/dexos/dexos-theme.py")"
   has "niente striscia in alto" "frame_border_top -n -t int -s 0" "$(cat "$ROOT/lib/look.sh")"
+}
+
+test_avvisi_macos() { # 10 novembre, Pietro: "niente grafica linux, i popup di sistema in stile macOS"
+  local src cc f n m
+  src=$(cat "$ROOT/share/tod-gettext.c")
+  # quando: prima che la finestrella compaia, una volta sola, solo con il tema DeX OS
+  has "domande ed errori (gtk_dialog_run)" "else tod_avviso(dialog);   /* le domande e gli errori" "$src"
+  has "anche le finestre mostrate senza run (copia in corso, password)" "void gtk_window_present(void *w) {" "$src"
+  has "e con gtk_widget_show" "void gtk_widget_show(void *w) {" "$src"
+  has "una volta sola, mai su una finestra già sullo schermo" "if (f_g_object_get_data(w, TOD_AVVISO_FATTO) || f_gtk_widget_get_realized(w)) return 0;" "$src"
+  has "solo con il tema DeX OS (è lui che disegna la classe tod-avviso)" 'int si = tema && !strncmp(tema, "DeX-OS", 6);' "$src"
+  has "si può spegnere" "TOD_AVVISI_CLASSICI" "$src"
+  has "rinomina e Nuova cartella restano come sono" '!tod_find_type(corpo, "GtkEntry")) forma = 2;' "$src"
+  # forma: niente barra di Linux, icona dell'app in alto, testi centrati, pulsanti a pillola
+  has "cornice di GTK (angoli tondi, ombra) al posto della barra di xfwm4" "f_gtk_window_set_titlebar(win, testa);" "$src"
+  has "si sposta trascinandola da un punto qualsiasi" "f_gtk_window_begin_move_drag(win, 1, (int)x, (int)y" "$src"
+  has "l'icona dell'app prima di quella della finestra" "prova[n++] = f_gtk_window_get_default_icon_name();" "$src"
+  has "triangolo sull'icona per avvertimenti ed errori" '(tipo == 1 || tipo == 3) && strncmp(nome, "dialog-", 7)' "$src"
+  has "testi a capo anche nei percorsi lunghi" "2 /* PANGO_WRAP_WORD_CHAR */" "$src"
+  has "due pulsanti affiancati, di più uno sotto l'altro" "int colonna = n > 2;" "$src"
+  has "senza predefinito: quello a destra, in colonna in cima" 'if (!scelto) tod_classe(ordine[n - 1], "tod-predefinito");' "$src"
+  has "le caselle con il nome dentro" "f_gtk_entry_set_placeholder_text(in[1]->w, buf);" "$src"
+  has "un file in una scheda" 'tod_classe(scheda, "tod-scheda");' "$src"
+  has "copia in corso: anche i lavori aggiunti dopo" '"add", (void *)tod_avanzamento_aggiunta' "$src"
+  has "password tradotta (gnome-keyring di Termux è senza traduzioni)" '{"gnome-keyring", "gcr", NULL}' "$src"
+  has "GTK caricata da Python: la si cerca nelle librerie già caricate" 'if (!f_##name) f_##name = (ret (*)(__VA_ARGS__))tod_next(#name);' "$src"
+  # le nostre app Python: ogni Gtk.MessageDialog passa da come_macos (GI non passa da LD_PRELOAD)
+  for f in "$ROOT"/share/*.py "$ROOT"/share/*/*.py; do
+    n=$(grep -c 'Gtk\.MessageDialog(' "$f" || true)
+    if ((n == 0)); then continue; fi
+    m=$(grep -c 'tod_avviso\.come_macos(' "$f" || true)
+    eq "avvisi come macOS in ${f#"$ROOT"/}" "$n" "$m"
+  done
+  if command -v python3 >/dev/null; then
+    eq "fuori dal desktop (modulo non caricato) non fa niente" True \
+      "$(LD_PRELOAD= python3 -c "import sys; sys.path.insert(0, '$ROOT/share'); import tod_avviso; o = object(); print(tod_avviso.come_macos(o) is o)")"
+  fi
+  cc=$(command -v clang || command -v gcc) || { echo "  (nessun compilatore: salto la compilazione)"; return 0; }
+  "$cc" -shared -fPIC -O2 -Wall -Wextra -Wno-unused-parameter -Werror -o "$WORK/ta_$$.so" "$ROOT/share/tod-gettext.c" -ldl
+  eq "la funzione per le app Python c'è" 1 "$(grep -ac tod_avviso "$WORK/ta_$$.so" | sed 's/^[1-9][0-9]*$/1/')"
+}
+
+test_avvisi_macos_gtk() { # gli avvisi come macOS con GTK vera, su uno schermo virtuale (Xvfb e PyGObject di Termux)
+  local T=/data/data/com.termux/files/usr d cc py out x pid
+  py=$T/bin/python3
+  if [[ ! -x $T/bin/Xvfb || ! -x $py ]] || ! "$py" -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null; then
+    echo "  (Xvfb o PyGObject di Termux assenti: salto)"; return 0
+  fi
+  cc=$(command -v clang || command -v gcc) || { echo "  (nessun compilatore: salto)"; return 0; }
+  # il linker di Android carica librerie solo sotto /data (come test_gettext_shim_program_domain)
+  [[ -d /data/data/com.termux/cache && -w /data/data/com.termux/cache ]] || { echo "  (niente cartella sotto /data: salto)"; return 0; }
+  d=$(mktemp -d /data/data/com.termux/cache/tod-avvisi-XXXXXX)
+  "$cc" -shared -fPIC -O2 -o "$d/ta.so" "$ROOT/share/tod-gettext.c" -ldl
+  x=$((150 + RANDOM % 100))
+  while [[ -e $T/tmp/.X11-unix/X$x ]]; do x=$((x + 1)); done
+  "$T/bin/Xvfb" ":$x" -screen 0 800x600x24 -nolisten tcp >/dev/null 2>&1 &
+  pid=$!
+  for _ in $(seq 50); do [[ -S $T/tmp/.X11-unix/X$x ]] && break; sleep 0.1; done
+  cat >"$d/prova.py" <<'PYEOF'
+import ctypes, sys
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gtk
+f = ctypes.CDLL(sys.argv[1]).tod_avviso
+f.argtypes, f.restype = [ctypes.c_void_p], ctypes.c_int
+cap = ctypes.pythonapi.PyCapsule_GetPointer
+cap.restype, cap.argtypes = ctypes.c_void_p, [ctypes.py_object, ctypes.c_char_p]
+def avviso(w): return f(cap(w.__gpointer__, None))
+def classi(w): return " ".join(sorted(c for c in w.get_style_context().list_classes() if c.startswith("tod-") or c == "default"))
+def etichette(box): return [b.get_label() for b in box.get_children()]
+Gtk.Settings.get_default().set_property("gtk-theme-name", "DeX-OS-0067c0-v13")
+d = Gtk.MessageDialog(message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.NONE, text="Eliminare per sempre?")
+d.format_secondary_text("Il file non si potrà recuperare.")
+for i, n in enumerate(("Annulla", "Salta", "Elimina")):
+    d.add_button(n, i + 1)
+d.set_default_response(3)
+print("messaggio", avviso(d), classi(d))
+print("barra", classi(d.get_titlebar()))
+k = d.get_message_area().get_children()
+print("icona in alto", type(k[0]).__name__, classi(k[0]))
+print("testi", classi(k[1]), "|", classi(k[2]), "| selezionabile", k[1].get_selectable())
+aa = d.get_action_area()
+print("colonna", aa.get_orientation() == Gtk.Orientation.VERTICAL, etichette(aa))
+print("predefinito", classi(aa.get_children()[0]))
+print("di nuovo", avviso(d))
+d2 = Gtk.MessageDialog(message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.NONE, text="Disinstallare?")
+d2.add_button("Annulla", 1)
+d2.add_button("Disinstalla", 2)
+avviso(d2)
+print("affiancati", d2.get_action_area().get_orientation() == Gtk.Orientation.HORIZONTAL, etichette(d2.get_action_area()))
+r = Gtk.Dialog()   # come la rinomina: una casella → non si tocca
+r.get_content_area().add(Gtk.Entry())
+r.add_button("Rinomina", 1)
+print("rinomina", avviso(r), r.get_titlebar())
+s = Gtk.Dialog()   # come "Sostituire il file?" di Thunar: griglia con l'icona in alto a sinistra
+g = Gtk.Grid()
+g.attach(Gtk.Image.new_from_icon_name("dialog-question", Gtk.IconSize.BUTTON), 0, 0, 1, 1)
+g.attach(Gtk.Label(label="Questa cartella contiene già un file."), 1, 0, 2, 1)
+g.attach(Gtk.Image.new_from_icon_name("text-x-generic", Gtk.IconSize.DIALOG), 1, 2, 1, 1)
+g.attach(Gtk.Label(label="Dimensione: 8 byte"), 2, 2, 1, 1)
+g.attach(Gtk.CheckButton(label="Applica a tutti"), 0, 5, 3, 1)
+s.get_content_area().add(g)
+for i, n in enumerate(("Annulla", "Salta", "Sostituisci")):
+    s.add_button(n, i + 1)
+s.get_content_area().show_all()
+print("sostituisci", avviso(s), type(s.get_content_area().get_children()[0]).__name__)
+print("scheda", sum("tod-scheda" in classi(w) for w in g.get_children()))
+print("principale", etichette(s.get_action_area())[0], classi(s.get_action_area().get_children()[0]))
+Gtk.Settings.get_default().set_property("gtk-theme-name", "Adwaita")
+a = Gtk.MessageDialog(text="Altro tema")
+print("altro tema", avviso(a), a.get_titlebar())
+PYEOF
+  out=$(env -u LD_PRELOAD DISPLAY=":$x" HOME="$HOME" timeout 60 "$py" "$d/prova.py" "$d/ta.so" 2>&1) || true
+  kill "$pid" 2>/dev/null || true
+  rm -rf "$d"
+  has "messaggio trasformato" "messaggio 1 tod-avviso tod-avviso-messaggio" "$out"
+  has "niente barra di xfwm4: quella di GTK, vuota" "barra tod-avviso-testa" "$out"
+  has "icona dell'app in alto" "icona in alto Overlay tod-avviso-icona" "$out"
+  has "titolo e testo, non selezionabili (si trascina la finestra)" "testi tod-avviso-titolo | tod-avviso-testo | selezionabile False" "$out"
+  has "tre pulsanti: in colonna, il predefinito in cima" "colonna True ['Elimina', 'Salta', 'Annulla']" "$out"
+  has "il predefinito resta tale (accento nel tema)" "predefinito default" "$out"
+  has "una volta sola" "di nuovo 0" "$out"
+  has "due pulsanti affiancati, nell'ordine di prima" "affiancati True ['Annulla', 'Disinstalla']" "$out"
+  has "la rinomina non si tocca" "rinomina 0 None" "$out"
+  has "Sostituire il file?: l'icona in alto" "sostituisci 1 Overlay" "$out"
+  has "il file in una scheda" "scheda 1" "$out"
+  has "senza predefinito: quello a destra, in cima e nell'accento" "principale Sostituisci tod-predefinito" "$out"
+  has "con un altro tema niente" "altro tema 0 None" "$out"
+}
+
+test_avvisi_macos_tema() { # tema DeX OS: avvisi come macOS, chiaro e scuro, solo l'accento; ritocchi a notifiche e suggerimenti
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(python3 - "$ROOT/share/dexos/dexos-theme.py" "$WORK/notifiche_$$" <<'PYEOF'
+import importlib.util as u, os, sys
+s = u.spec_from_file_location("dx", sys.argv[1]); m = u.module_from_spec(s); s.loader.exec_module(m)
+print("CHIARO", m.avvisi_css("light", "#8a5cf5"))
+print("SCURO", m.avvisi_css("dark", "#8a5cf5"))
+m.notify(sys.argv[2], "light", "#8a5cf5")
+print("NOTIFICHE", open(os.path.join(sys.argv[2], "gtk.css")).read())
+print("MENU", m.vetro_css("light", "#8a5cf5"))
+PYEOF
+)
+  local chiaro scuro
+  chiaro=$(sed -n '/^CHIARO/,/^SCURO/p' <<<"$out")
+  scuro=$(sed -n '/^SCURO/,/^NOTIFICHE/p' <<<"$out")
+  has "fondo pieno del pannello (chiaro)" "background-color: #f2f2f5; background-image: none; color: #1d1d1f; border-radius: 16px;" "$chiaro"
+  has "fondo pieno del pannello (scuro)" "background-color: #242428; background-image: none; color: #f5f5f7; border-radius: 16px;" "$scuro"
+  has "schede bianche (chiaro)" ".tod-scheda { background-color: #ffffff; border-radius: 12px;" "$chiaro"
+  has "schede (scuro)" ".tod-scheda { background-color: #2e2e33; border-radius: 12px;" "$scuro"
+  has "pulsanti a pillola" "border-radius: 999px; border: none; background-image: none;" "$chiaro"
+  has "il predefinito nell'accento del sistema" "background-color: #8a5cf5; color: #ffffff;" "$chiaro"
+  has "anche quello scelto da tod-gettext.c" "button.tod-predefinito {" "$chiaro"
+  has "più forte dei pulsanti piatti di Fluent" ".tod-avviso.csd .tod-avviso-pulsanti button:first-child" "$chiaro"
+  has "testo secondario" "color: #6e6e73;" "$chiaro"
+  has "copia in corso: pulsanti tondi" ".tod-avanzamento-vista button.tod-tondo {" "$chiaro"
+  eq "mai un blu fisso" 0 "$(grep -ci '#0067c0\|#005fb8\|#0a84ff\|#1a73e8' <<<"$chiaro$scuro")"
+  has "nel tema generato" "f.write(avvisi_css(mode, accent))" "$(cat "$ROOT/share/dexos/dexos-theme.py")"
+  has "notifiche: angoli dei banner di macOS" "border-radius: 18px;" "$out"
+  has "notifiche: al passaggio appena più scure, niente bordo colorato" "#XfceNotifyWindow:hover { background-color: #f6f6f8; }" "$out"
+  has "suggerimenti più compatti" "tooltip.csd decoration { border-radius: 7px;" "$out"
+  has "voci di menu" "padding: 4px 10px; min-height: 18px; border-radius: 6px;" "$out"
+}
+
+test_puntini_come_macos() { # i tre puntini dei cataloghi diventano "…" (stessi 3 byte: sul posto), quattro restano
+  local cc d
+  cc=$(command -v cc || command -v clang || true)
+  if [[ -z $cc ]] || ! command -v python3 >/dev/null; then echo "  (compilatore o python3 assente: salto)"; return 0; fi
+  d="$WORK/puntini_$$"
+  if [[ -d /data/data/com.termux/cache && -w /data/data/com.termux/cache ]]; then d=$(mktemp -d /data/data/com.termux/cache/tod-puntini-XXXXXX); fi
+  mkdir -p "$d/loc/it/LC_MESSAGES"
+  "$cc" -shared -fPIC -O2 -o "$d/shim.so" "$ROOT/share/tod-gettext.c" -ldl
+  python3 - "$d/loc/it/LC_MESSAGES/prova.mo" <<'PYEOF'
+import struct, sys
+msgs = {b"": b"Content-Type: text/plain; charset=UTF-8\n", b"Properties...": "Proprietà...".encode(),
+        b"Wait....": b"Attendere....", b"A...B...": b"Uno...due...", b"Done": b"Fatto"}
+keys = sorted(msgs); ids = b""; strs = b""; o = []; t = []
+for k in keys:
+    o.append((len(k), len(ids))); ids += k + b"\0"
+    t.append((len(msgs[k]), len(strs))); strs += msgs[k] + b"\0"
+n = len(keys); start = 7 * 4 + 16 * n
+out = struct.pack("Iiiiiii", 0x950412de, 0, n, 7 * 4, 7 * 4 + 8 * n, 0, 0)
+out += b"".join(struct.pack("ii", l, start + p) for l, p in o)
+out += b"".join(struct.pack("ii", l, start + len(ids) + p) for l, p in t)
+open(sys.argv[1], "wb").write(out + ids + strs)
+PYEOF
+  cat >"$d/puntini.c" <<'CEOF'
+#include <stdio.h>
+char *dgettext(const char *, const char *);
+int main(int argc, char **argv) {
+  for (int i = 1; i < argc; i++) printf("%s|", dgettext("prova", argv[i]));
+  printf("\n");
+  return 0;
+}
+CEOF
+  "$cc" -o "$d/puntini" "$d/puntini.c" 2>/dev/null || "$cc" -o "$d/puntini" "$d/puntini.c" "$d/shim.so" -Wl,-rpath,"$d"
+  eq "tre puntini → … ; quattro no; più volte nella stessa frase" "Proprietà…|Attendere....|Uno…due…|Fatto|" \
+    "$(env TOD_GETTEXT_LANG=it TOD_GETTEXT_DIR="$d/loc" LD_PRELOAD="$d/shim.so" "$d/puntini" "Properties..." "Wait...." "A...B..." "Done")"
+  rm -rf "$d"
+}
+
+test_lingua_portachiavi() { # la password del portachiavi in italiano: i cataloghi di gcr e gnome-keyring
+  has "cataloghi di gcr e del portachiavi" "gcr gnome-keyring" "$LINGUA_DEB_PKGS"
+  conf_set LINGUA it
+  lingua_setup() { echo chiamata >>"$HOME/ripara"; }
+  touch "$LINGUA_SO"
+  mkdir -p "$LINGUA_DIR/it/LC_MESSAGES"
+  touch "$LINGUA_DIR/it/LC_MESSAGES/thunar.mo"
+  lingua_ripara
+  wait
+  eq "traduzione di prima, senza gcr: i cataloghi si riscaricano da soli" chiamata "$(cat "$HOME/ripara" 2>/dev/null)"
+  rm -f "$HOME/ripara" "$TOD_STATE_DIR/lingua-tentativo"
+  touch "$LINGUA_DIR/it/LC_MESSAGES/gcr.mo" "$LINGUA_DIR/it/LC_MESSAGES/gnome-keyring.mo"
+  lingua_ripara
+  wait
+  eq "completa: niente da fare" "" "$(cat "$HOME/ripara" 2>/dev/null)"
 }
 
 # =============================================================================

@@ -19,6 +19,7 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(1, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # share/: tod_avviso
 import escl  # noqa: E402
 from escl import T  # noqa: E402
 
@@ -63,6 +64,7 @@ def finestra(scelto=None):
     gi.require_version("Gdk", "3.0")   # senza, Termux carica Gdk 4 e GTK 3 non parte
     gi.require_version("GdkPixbuf", "2.0")
     from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk
+    import tod_avviso   # avvisi come macOS (share/tod_avviso.py)
 
     GLib.set_prgname("tod-scanner")   # la barra riconosce la finestra (tod-scanner.desktop)
 
@@ -432,7 +434,7 @@ def finestra(scelto=None):
             d.add_button(T("Annulla", "Cancel"), Gtk.ResponseType.CANCEL)
             b = d.add_button(ok, Gtk.ResponseType.OK)
             b.get_style_context().add_class("destructive-action" if distruttivo else "suggested-action")
-            r = d.run() == Gtk.ResponseType.OK
+            r = tod_avviso.come_macos(d).run() == Gtk.ResponseType.OK
             d.destroy()
             return r
 

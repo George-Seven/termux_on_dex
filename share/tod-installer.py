@@ -23,6 +23,8 @@ gi.require_version("Gdk", "3.0")   # senza, Termux carica Gdk 4 e GTK 3 non part
 gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
+sys.path.insert(1, os.path.dirname(os.path.abspath(__file__)))   # share/ anche se caricato da altrove (i test)
+import tod_avviso  # noqa: E402  (avvisi come macOS, share/tod_avviso.py)
 
 GLib.set_prgname("tod-deb")   # la barra riconosce la finestra (tod-deb.desktop) e ne mostra l'icona
 
@@ -454,7 +456,7 @@ def main():
         d = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.CLOSE,
                               text=T("Pacchetto non trovato", "Package not found"))
         d.format_secondary_text(sys.argv[1] if len(sys.argv) > 1 else "")
-        d.run()
+        tod_avviso.come_macos(d).run()
         return 1
     win = Installer(os.path.abspath(sys.argv[1]))
     win.show_all()

@@ -24,6 +24,8 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")   # senza, Termux carica Gdk 4 e GTK 3 non parte
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk  # noqa: E402
+sys.path.insert(1, os.path.dirname(os.path.abspath(__file__)))   # share/ anche se caricato da altrove (i test)
+import tod_avviso  # noqa: E402  (avvisi come macOS, share/tod_avviso.py)
 
 try:   # GLib 2.86: le funzioni Unix di Gio stanno in GioUnix
     gi.require_version("GioUnix", "2.0")
@@ -1197,7 +1199,7 @@ class Settings(Gtk.Window):
                                   "It won't appear in print dialogs anymore. A USB printer comes back when you plug it in again."))
         d.add_button(T("Annulla", "Cancel"), Gtk.ResponseType.CANCEL)
         d.add_button(T("Rimuovi", "Remove"), Gtk.ResponseType.OK).get_style_context().add_class("destructive-action")
-        ok = d.run() == Gtk.ResponseType.OK
+        ok = tod_avviso.come_macos(d).run() == Gtk.ResponseType.OK
         d.destroy()
         if ok:
             self.stampa("togli", p["nome"], then=lambda *_: self.fill_stampanti(T("Stampante rimossa.", "Printer removed.")))
