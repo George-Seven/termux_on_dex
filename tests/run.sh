@@ -1083,13 +1083,46 @@ test_store_fonte() { # Store: prima Termux, poi Debian, Flathub solo per il rest
     store_trova() { printf 'org.gimp.GIMP'; }
     app_owner() { :; }
     store_fonte() { printf 'termux\tgimp\n'; }
-    apt_cli() { printf 'apt %s\n' "$*"; }
+    apt_cli() { printf 'apt %s | senza domande=%s\n' "$*" "${TOD_CX_SENZA_DOMANDE:-}"; }
     store_fp() { printf 'FLATPAK\n'; }
     store_installa gimp 2>&1
   )
-  has "da Termux con tod apt" "apt install -y gimp" "$out"
+  # 10 novembre (SuperTuxKart si fermava): i file interrotti si riprovano, e nessuna domanda di dpkg o debconf
+  has "da Termux con tod apt" "apt install -y -oAcquire::Retries=3 -oDpkg::Options::=--force-confdef" "$out"
+  has "il pacchetto" "--force-confold gimp | senza domande=1" "$out"
   has "lo dice" "la installo da Termux (pacchetto gimp)" "$out"
   if grep -q FLATPAK <<<"$out"; then eq "niente Flathub" "" "$out"; fi
+}
+
+test_store_link() { # dal browser (flathub.org, 10 novembre): flatpak+https, il file .flatpakref, appstream, la pagina
+  local f="$WORK/slink_$$" out
+  mkdir -p "$f"
+  printf '[Flatpak Ref]\nName=net.supertuxkart.SuperTuxKart\nBranch=stable\nUrl=https://dl.flathub.org/repo/\n' \
+    >"$f/scaricato (1).flatpakref"
+  out=$(cd "$TOD_ROOT/share/store" && python3 -c '
+import sys, catalogo
+for x in sys.argv[1:]:
+    print(catalogo.id_da_link(x))' \
+    "flatpak+https://dl.flathub.org/repo/appstream/net.supertuxkart.SuperTuxKart.flatpakref" \
+    "$f/scaricato (1).flatpakref" "file://$f/scaricato%20(1).flatpakref" \
+    "appstream://org.kde.kwrite.desktop" "appstream:org.gnome.Calculator" \
+    "https://flathub.org/it/apps/org.gimp.GIMP/install" "/sparito/io.github.prova.App.flatpakref" "org.kde.krita")
+  eq "link → id" "$(printf '%s\n' net.supertuxkart.SuperTuxKart net.supertuxkart.SuperTuxKart \
+    net.supertuxkart.SuperTuxKart org.kde.kwrite org.gnome.Calculator org.gimp.GIMP io.github.prova.App org.kde.krita)" "$out"
+  has "la finestra usa i link" "catalogo.id_da_link(args[0])" "$(cat "$ROOT/share/store/tod-store-gui.py")"
+}
+
+test_store_cx_senza_domande() { # cx_apt: niente domande di debconf solo per lo Store, dal terminale apt chiede come sempre
+  fresh_env store4
+  local out
+  out=$(
+    proot-distro() { printf '%s\n' "$*"; }
+    cx_apt install -y gioco
+    TOD_CX_SENZA_DOMANDE=1 cx_apt install -y gioco
+  )
+  eq "dal terminale: come sempre" "login --shared-tmp debian -- env TOD_MENU_SYNC=0 apt install -y gioco" "$(sed -n 1p <<<"$out")"
+  eq "dallo Store: senza domande" \
+    "login --shared-tmp debian -- env TOD_MENU_SYNC=0 DEBIAN_FRONTEND=noninteractive apt install -y gioco" "$(sed -n 2p <<<"$out")"
 }
 
 test_store_aggiornamenti() { # Aggiornamenti: le app dello Store con nome e icona, i runtime tra i componenti di sistema
@@ -1130,7 +1163,13 @@ test_store_voce() { # Store nello Start: con l'installazione e con ogni aggiorna
   desktop_store_entry
   local d
   d=$(cat "$HOME/.local/share/applications/tod-store.desktop")
-  has "apre la finestra" "Exec=python3 $TOD_ROOT/share/store/tod-store-gui.py" "$d"
+  has "apre la finestra (con il link del browser)" "Exec=python3 $TOD_ROOT/share/store/tod-store-gui.py %u" "$d"
+  has "il pulsante Installa di flathub.org" \
+    "MimeType=x-scheme-handler/flatpak+https;x-scheme-handler/appstream;application/vnd.flatpak.ref;" "$d"
+  local m
+  m=$(cat "$HOME/.config/mimeapps.list")
+  has "flatpak+https allo Store" "x-scheme-handler/flatpak+https=tod-store.desktop" "$m"
+  has "i file .flatpakref allo Store" "application/vnd.flatpak.ref=tod-store.desktop" "$m"
   has "nome" "Name[it]=Store" "$d"
   has "la barra la riconosce" "StartupWMClass=tod-store" "$d"
   has "tra le app di sistema" "Categories=System;PackageManager;" "$d"

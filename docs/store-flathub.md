@@ -179,6 +179,25 @@ le app che lì non ci sono arrivano da Flathub (con la loro base di qualche GB).
   Flathub con una versione nuova (`flatpak remote-ls --updates`); le app compaiono con nome e icona, i runtime tra
   i componenti di sistema; "Aggiorna" chiama `tod store aggiorna [id]`, che rifà radici e voci dello Start.
 
+## Dal browser: il pulsante Installa di flathub.org (10 novembre)
+
+Su flathub.org "Installa" porta a una pagina con "Open in software manager"
+(`flatpak+https://dl.flathub.org/repo/appstream/<id>.flatpakref`) e "Download .flatpakref". La voce dello Store
+dichiara `x-scheme-handler/flatpak+https`, `x-scheme-handler/appstream` (GNOME) e `application/vnd.flatpak.ref`, ed
+è l'app predefinita per i tre tipi in `mimeapps.list`: il browser (o Esplora file per il file scaricato) apre lo
+Store sulla pagina dell'app (`id_da_link` in `catalogo.py`; un'app che non c'è per aarch64 diventa una ricerca).
+Provato sullo schermo finto isolato con l'`xdg-open` della sessione: link → SuperTuxKart, file → Planify.
+
+## Scaricamenti lenti o interrotti (SuperTuxKart, 9 novembre)
+
+SuperTuxKart arriva da Termux (repository TUR) con circa 800 MB di dati; due tentativi dallo Store sono caduti sul
+file delle texture (295 MB), poi installato a mano. Il motivo esatto non era rimasto da nessuna parte. Ora:
+- apt dallo Store riprova i file interrotti (`Acquire::Retries=3`) e non fa mai domande (`--force-confdef/confold`,
+  e nel container `DEBIAN_FRONTEND=noninteractive` solo per lo Store: `TOD_CX_SENZA_DOMANDE`);
+- la finestra mostra MB scaricati sul totale, velocità e tempo che manca (anche per Flatpak), e dopo 25 s fermo
+  "il server risponde piano, aspetto…";
+- un lavoro non riuscito scrive l'uscita di apt o Flatpak in `tod.log`.
+
 ## Prossimi passi (da decidere)
 
 1. **Spazio**: (a) accettare il doppio; (b) dopo ogni installazione svuotare il deposito dei file

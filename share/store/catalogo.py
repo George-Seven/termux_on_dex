@@ -188,6 +188,34 @@ def cerca(app, testo):
     return [x[3] for x in ris]
 
 
+def id_da_link(t):
+    """Cosa arriva dal browser → l'id dell'app. Il pulsante Installa di flathub.org dà
+    flatpak+https://dl.flathub.org/repo/appstream/<id>.flatpakref ("Open in software manager") oppure il file
+    <id>.flatpakref da aprire dai Download; GNOME usa appstream://<id>; anche la pagina flathub.org/apps/<id>."""
+    from urllib.parse import unquote
+    t = (t or "").strip()
+    if t.startswith("file://"):
+        t = unquote(t[7:])
+    if t.endswith(".flatpakref") and "://" not in t:   # il file scaricato: Name= dice l'app
+        try:
+            for riga in open(t, encoding="utf-8", errors="replace"):
+                if riga.startswith("Name="):
+                    return riga[5:].strip()
+        except OSError:
+            pass
+        t = os.path.basename(t)
+    if "://" in t and "/apps/" in t:   # https://flathub.org/it/apps/<id>/install
+        t = t.split("/apps/", 1)[1].split("/")[0]
+    elif "://" in t and not t.startswith("appstream:"):   # flatpak+https://…/<id>.flatpakref
+        t = unquote(t.split("?")[0].split("#")[0].rstrip("/").rsplit("/", 1)[-1])
+    if t.startswith("appstream:"):
+        t = t[len("appstream:"):].lstrip("/")
+    for fine in (".flatpakref", ".desktop"):
+        if t.endswith(fine):
+            t = t[:-len(fine)]
+    return t
+
+
 def pango(s):
     return html.escape(s, quote=False)
 

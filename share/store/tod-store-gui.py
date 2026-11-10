@@ -307,6 +307,20 @@ def scarica(url, then):
     threading.Thread(target=lavoro, daemon=True).start()
 
 
+def registra(appid, lavoro):
+    """l'uscita di apt o flatpak di un lavoro non riuscito nel registro di tod (la finestra mostra solo l'ultima
+    riga: SuperTuxKart, 9 novembre, si fermava due volte e il motivo non restava da nessuna parte)."""
+    righe = [r for r in lavoro.righe if not r.startswith(("dlstatus:", "pmstatus:"))][-40:]
+    try:
+        d = os.path.join(CASA, ".local/state/tod")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "tod.log"), "a") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S") + " store: %s %s non riuscito:\n" % (lavoro.comando, appid))
+            f.writelines("  %s\n" % r for r in righe)
+    except OSError:
+        pass
+
+
 def arrotonda(cr, w, h, r):
     cr.new_sub_path()
     for cx, cy, a1 in ((w - r, r, -90), (w - r, h - r, 0), (r, h - r, 90), (r, r, 180)):
@@ -416,6 +430,7 @@ class Lavoro:
     def __init__(self, appid, comando, avviso, fine):
         self.appid, self.comando, self.avviso, self.fine = appid, comando, avviso, fine
         self.frazione, self.testo, self.pezzi, self.righe, self.dove = None, "", {}, [], "flathub"
+        self.totale, self.t0, self.mosso = 0, 0, time.time()   # apt: byte da scaricare, inizio, ultimo passo avanti
         threading.Thread(target=self.esegui, daemon=True).start()
 
     def esegui(self):
@@ -457,6 +472,7 @@ class Lavoro:
         if not parziale:
             self.righe.append(r)
         prima = (self.frazione, self.testo)
+        frazione_prima = self.frazione
         m = self.PEZZO.match(r)
         if m:   # la tabella di flatpak: quanto pesa ogni pezzo ("partial": traduzioni, se ne scarica una piccola parte)
             self.pezzi[int(m.group(1))] = float(m.group(3).replace(".", "").replace(",", ".")) * \
@@ -473,25 +489,54 @@ class Lavoro:
             else:
                 self.frazione = (n - 1 + pc / 100) / tot
                 self.testo = T("Scarico %d%%", "Downloading %d%%") % int(self.frazione * 100)
+            v = re.search(r"\d+%\s+([\d.,]+\s*[kMG]?B/s)(?:\s+(\d+:\d\d))?", r)   # velocità e tempo di flatpak
+            if v and m.group(1) != "Uninstalling":
+                self.testo += " · " + v.group(1) + (" · " + T("ancora ", "") + v.group(2) if v.group(2) else "")
             if m.group(1) == "Uninstalling":
                 self.testo = T("Rimuovo %d%%", "Removing %d%%") % int(self.frazione * 100)
         m = re.search(r"dlstatus:[^:]*:([\d.]+):", r)   # apt (Termux o Debian): righe di stato
         if m:
-            self.frazione = float(m.group(1)) / 100 * 0.75
-            self.testo = T("Scarico %d%%", "Downloading %d%%") % int(float(m.group(1)))
+            pc = float(m.group(1))
+            self.frazione = pc / 100 * 0.75
+            self.testo = T("Scarico %d%%", "Downloading %d%%") % int(pc)
+            self.t0 = self.t0 or time.time()
+            if self.totale:   # MB fatti sul totale, velocità e tempo che manca (come Aggiornamenti)
+                fatto, passati = self.totale * pc / 100, time.time() - self.t0
+                self.testo += " · " + T("%s di %s", "%s of %s") % (misura(fatto), misura(self.totale))
+                if passati > 2 and fatto > 0:
+                    vel = fatto / passati
+                    resta = int((self.totale - fatto) / vel)
+                    self.testo += " · %s/s" % misura(vel)
+                    if resta > 0:
+                        self.testo += " · " + (T("ancora %d min", "%d min left") % (resta // 60) if resta >= 90
+                                               else T("ancora %d s", "%d s left") % resta)
         m = re.search(r"pmstatus:[^:]*:([\d.]+):", r)
         if m:
             self.frazione = 0.75 + float(m.group(1)) / 100 * 0.25
             self.testo = T("Installo %d%%", "Installing %d%%") % int(float(m.group(1)))
-        m = re.search(r"(Need to get|È necessario scaricare|Bisogna prendere) ([\d.,]+ [kMG]?B)", r)
-        if m and not self.testo:
-            self.testo = T("Scarico %s", "Downloading %s") % m.group(2)
+        m = re.search(r"(Need to get|È necessario scaricare|Bisogna prendere) ([\d.,]+) ([kMG]?B)", r)
+        if m:
+            n = m.group(2)
+            if re.fullmatch(r"\d{1,3}([.,]\d{3})+", n):   # 1.234 kB: migliaia
+                n = re.sub(r"[.,]", "", n)
+            try:
+                self.totale = float(n.replace(",", ".")) * self.UNITA.get(m.group(3), 1)
+            except ValueError:
+                self.totale = 0
+            if not self.testo or self.testo.startswith(T("Da ", "From ")):
+                self.testo = T("Scarico %s", "Downloading %s") % misura(self.totale)
         m = re.search(r"(da|from) (Termux|Debian) \(", r)
         if m:
             self.dove = m.group(2).lower()
             self.testo = T("Da %s…", "From %s…") % m.group(2)
+        if self.frazione != frazione_prima:
+            self.mosso = time.time()
         if (self.frazione, self.testo) != prima:
             GLib.idle_add(lambda: self.avviso(self) and False)
+
+    def fermo(self):
+        """secondi senza un passo avanti mentre scarica (server lento o appeso: lo si dice, non sembra bloccato)."""
+        return time.time() - self.mosso if self.frazione is not None and self.frazione < 0.75 else 0
 
 
 class Store(Gtk.Application):
@@ -504,8 +549,8 @@ class Store(Gtk.Application):
         if not self.win:
             self.win = Finestra(self)
         self.win.present()
-        if args:
-            self.win.apri_id(args[0])
+        if args:   # un id, o un link di Flathub dal browser (flatpak+https://, .flatpakref, appstream://)
+            self.win.apri_id(catalogo.id_da_link(args[0]))
         return 0
 
 
@@ -539,6 +584,7 @@ class Finestra(Gtk.ApplicationWindow):
         self.costruisci()
         self.show_all()
         GLib.idle_add(lambda: self.set_focus(None) and False)   # niente fuoco sulla ricerca all'apertura
+        GLib.timeout_add_seconds(1, self.battito)
         self.carica()
 
     # --- struttura ---------------------------------------------------------------------------------
@@ -763,6 +809,8 @@ class Finestra(Gtk.ApplicationWindow):
         a = self.per_id.get(appid)
         if a:
             self.mostra_app(a)
+        elif appid:   # non c'è per questo telefono (aarch64), o il nome è diverso: si cerca per nome
+            self.cerca.set_text(appid.rsplit(".", 1)[-1])
 
     def indietro(self):
         if self.storia:
@@ -1247,6 +1295,12 @@ class Finestra(Gtk.ApplicationWindow):
             self.stato(st)
         self.avanzamento(appid)
 
+    def battito(self):
+        """ogni secondo, mentre c'è un lavoro: l'avviso "il server risponde piano" anche senza righe nuove."""
+        if getattr(self, "passo_id", None) in self.lavori:
+            self.avanzamento(self.passo_id)
+        return True
+
     def avanzamento(self, appid):
         """la barra e il testo accanto all'Ottieni, nella pagina dell'app."""
         if getattr(self, "passo_id", None) != appid or not getattr(self, "avanz_barra", None):
@@ -1264,7 +1318,10 @@ class Finestra(Gtk.ApplicationWindow):
             self.avanz_barra.pulse()
         else:
             self.avanz_barra.set_fraction(l.frazione)
-        self.avanz_testo.set_text(l.testo or T("Preparo…", "Preparing…"))
+        testo = l.testo or T("Preparo…", "Preparing…")
+        if l.fermo() > 25:
+            testo += " · " + T("il server risponde piano, aspetto…", "the server is slow, waiting…")
+        self.avanz_testo.set_text(testo)
 
     def clic(self, b):
         a = b.app
@@ -1308,6 +1365,7 @@ class Finestra(Gtk.ApplicationWindow):
         if rc != 0:
             ultima = next((r for r in reversed(lavoro.righe) if r.startswith(("✘", "error", "Error", "E:"))),
                           lavoro.righe[-1] if lavoro.righe else "")
+            registra(appid, lavoro)
             self.esito[appid] = T("Non riuscito: ", "Failed: ") + re.sub(r"^\W+\s*", "", ultima)
         elif lavoro.comando == "rimuovi":
             self.esito[appid] = T("Rimossa", "Removed")

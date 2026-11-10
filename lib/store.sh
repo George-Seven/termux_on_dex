@@ -225,7 +225,12 @@ store_installa() { # tod store installa [--flathub] <id o nome>
     # per la finestra: le righe di stato di apt (dlstatus/pmstatus con la percentuale)
     local -a stato=()
     if [[ ${TOD_STORE_AVANZAMENTO:-0} == 1 ]]; then stato=(-oAPT::Status-Fd=1); fi
-    apt_cli install -y "${stato[@]}" "$pkg" || die "$(t st_inst_ko "$id" "$TOD_LOG")"
+    # mai domande (la finestra legge da un terminale finto: una domanda di dpkg o debconf la lascerebbe
+    # ferma per sempre) e i file grandi interrotti si riprovano (SuperTuxKart, 9 novembre: 300 MB di
+    # texture dal repository TUR, due tentativi caduti)
+    TOD_CX_SENZA_DOMANDE=1 apt_cli install -y -oAcquire::Retries=3 \
+      -oDpkg::Options::=--force-confdef -oDpkg::Options::=--force-confold "${stato[@]}" "$pkg" ||
+      die "$(t st_inst_ko "$id" "$TOD_LOG")"
     ok "$(t st_installata_sis "$pkg")"
     return 0
   fi

@@ -102,9 +102,17 @@ desktop_scanner_entry() { # "Scanner" nello Start (share/stampa/tod-scanner.py),
 desktop_store_entry() { # "Store" nello Start (share/store/tod-store-gui.py): le app di Termux, Debian e Flathub
   local f="$HOME/.local/share/applications/tod-store.desktop"
   mkdir -p "${f%/*}"
-  desktop_entry "$f" "Store" "Store" "python3 $TOD_ROOT/share/store/tod-store-gui.py" system-software-install false
+  desktop_entry "$f" "Store" "Store" "python3 $TOD_ROOT/share/store/tod-store-gui.py %u" system-software-install false
   sed -i 's/^Categories=.*/Categories=System;PackageManager;/' "$f"
   printf 'StartupWMClass=tod-store\nStartupNotify=true\nComment=Find and install apps\nComment[it]=Trova e installa le app\nKeywords=app;store;flathub;install;installa;\n' >>"$f"
+  # il pulsante Installa di flathub.org nel browser: "Open in software manager" (flatpak+https://…/<id>.flatpakref),
+  # il file .flatpakref scaricato, e appstream://<id> (GNOME): si apre lo Store sulla pagina dell'app
+  local m
+  local -a tipi=(x-scheme-handler/flatpak+https x-scheme-handler/appstream application/vnd.flatpak.ref)
+  printf 'MimeType=%s;\n' "$(IFS=';'; printf '%s' "${tipi[*]}")" >>"$f"
+  for m in "${tipi[@]}"; do
+    _ini_set "$HOME/.config/mimeapps.list" "Default Applications" "$m" tod-store.desktop
+  done
 }
 
 # --- Foto, Lettore multimediale, Lettore musicale (share/media, 9 novembre: al posto di Ristretto, che apriva

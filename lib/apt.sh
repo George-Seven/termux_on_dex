@@ -47,7 +47,11 @@ app_owner() { # app_owner nome → "pacchetto" già installato altrove con la st
 
 cx_apt() { # apt nel container, con l'output normale (il menu si aggiorna dopo, una volta sola)
   local rc=0
-  proot-distro login --shared-tmp "$(cx_distro)" -- env TOD_MENU_SYNC=0 apt "$@" || rc=$?
+  # TOD_CX_SENZA_DOMANDE=1 (lo Store, che legge da un terminale finto): niente domande di debconf nel
+  # container. Non DEBIAN_FRONTEND di tod (pkgs.sh lo esporta per Termux): dal terminale apt chiede come sempre
+  local -a senza=()
+  if [[ ${TOD_CX_SENZA_DOMANDE:-0} == 1 ]]; then senza=(DEBIAN_FRONTEND=noninteractive); fi
+  proot-distro login --shared-tmp "$(cx_distro)" -- env TOD_MENU_SYNC=0 "${senza[@]}" apt "$@" || rc=$?
   return "$rc"
 }
 
