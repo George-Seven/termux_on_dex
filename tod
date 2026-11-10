@@ -61,6 +61,10 @@ tod_main() {
     scanner | scan) scanner_cli "$@" ;;
     rete | network) rete_cli "$@" ;;
     diretto) diretto_cli "$@" ;;
+    foto | photos) media_apri tod-foto.py "$@" ;;
+    video) media_apri tod-lettore.py --video "$@" ;;
+    musica | music) media_apri tod-lettore.py --musica "$@" ;;
+    media) media_cli "$@" ;;
     store) # prototipo: lib/store.sh si carica solo qui, non a ogni comando di tod
       # shellcheck source=/dev/null
       . "$TOD_ROOT/lib/store.sh"

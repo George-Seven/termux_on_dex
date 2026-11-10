@@ -109,6 +109,8 @@ self_update() { # il codice nuovo da GitHub. 0 = aggiornato o già aggiornato
 }
 
 self_after() { # tod _self_after: con il codice nuovo, i file che dipendono da lui (dalla finestra Aggiornamenti)
+  # Foto, video e musica (share/media): i pacchetti di GStreamer e delle immagini, se mancano
+  if [[ -n $(media_mancanti) ]]; then media_install || warn "$(t s_media)"; fi
   desktop_install_entries || true
   # dischi USB: i file di tod-lkl della versione nuova
   if usb_on && ! usb_lkl_ok; then usb_install || warn "$(t s_usb)"; fi
@@ -149,6 +151,9 @@ tod_update() { # tod update [--senza-codice]
     fi
   fi
   if cx_installed; then run_step "$(t s_cx_update)" cx_upgrade || warn "$(t up_cx_fail)"; fi
+  # app nuove di tod che chiedono pacchetti nuovi (Foto, video e musica: GStreamer)
+  if [[ -n $(media_mancanti) ]]; then run_step "$(t s_media)" media_install || warn "$(t s_media)"; fi
+  desktop_install_entries || true
   # dischi USB: i file di tod-lkl della versione nuova (e, una volta, via la vecchia macchina QEMU)
   if usb_on && { ! usb_lkl_ok || [[ -f $(usb_data)/disco.img ]]; }; then run_step "$(t s_usb)" usb_install || warn "$(t s_usb)"; fi
   if (( reprobe )); then run_step "$(t s_gpu_probe)" gpu_reprobe || warn "$(t gpu_none)"; fi

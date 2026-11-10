@@ -305,7 +305,10 @@ APP = [   # (espressione sul nome dell'icona, ricetta) — le app di sistema, di
     (r"^(org\.xfce\.thunar|thunar|system-file-manager|file-manager|org\.xfce\.filemanager|nautilus|org\.gnome\.Nautilus|dolphin|pcmanfm|nemo)$", lambda: V.esplora_file()),
     (r"terminal|konsole|xterm|org\.gnome\.Terminal|utilities-terminal|org\.gnome\.Vte", lambda: V.terminale()),
     (r"mousepad|text-editor|gedit|kate|kwrite|org\.gnome\.TextEditor|accessories-text-editor|leafpad|featherpad|xfce4-notes", note),
-    (r"ristretto|image-viewer|eog|org\.gnome\.eog|shotwell|gthumb|org\.gnome\.Loupe|gwenview|viewnior|feh", foto),
+    (r"ristretto|image-viewer|photo-viewer|tod-foto|eog|org\.gnome\.eog|shotwell|gthumb|org\.gnome\.Loupe|gwenview|viewnior|feh", foto),
+    # Lettore multimediale e Lettore musicale (share/media): play nel viola dei file video, nota nel rosa della musica
+    (r"^(multimedia-video-player|tod-video|org\.xfce\.parole|parole|totem|org\.gnome\.Totem)$", lambda: V.oggetto("play", "#c4a2ff", "#7b4fe0", "#5a35c0")),
+    (r"^(multimedia-audio-player|tod-musica|rhythmbox|org\.gnome\.Rhythmbox3|org\.gnome\.Music|elisa|org\.kde\.elisa|lollypop)$", lambda: V.oggetto("musica", "#ff9ac6", "#f03a7a", "#c8287a")),
     (r"screenshooter|screenshot|flameshot|spectacle|gnome-screenshot", lambda: V.oggetto("fotocamera", "#c4a2ff", "#7b4fe0", "#5a35c0")),
     (r"taskmanager|system-monitor|gnome-system-monitor|htop|ksysguard|plasma-systemmonitor", lambda: V.oggetto("chip", "#5c6378", "#2a2f3d", "#161a24")),
     (r"FileRoller|file-roller|ark|xarchiver|engrampa|archive-manager|org\.gnome\.ArchiveManager", lambda: V.oggetto("archivio", "#ffd36b", "#f2a01c", "#e0701a")),
@@ -350,7 +353,8 @@ APP_NOTE = ["org.xfce.thunar", "system-file-manager", "org.xfce.terminal", "util
             "org.xfce.powermanager", "org.xfce.session", "org.xfce.workspaces", "org.xfce.xfdesktop", "org.xfce.xfwm4",
             "org.xfce.xfwm4-tweaks", "org.xfce.panel", "tod-start", "start-here", "application-x-executable",
             "org.xfce.terminalemulator", "org.xfce.filemanager", "thunar", "xarchiver", "org.gnome.Terminal",
-            "accessories-calculator", "org.xfce.orage", "preferences-desktop-theme", "preferences-desktop"]
+            "accessories-calculator", "org.xfce.orage", "preferences-desktop-theme", "preferences-desktop",
+            "multimedia-photo-viewer", "multimedia-video-player", "multimedia-audio-player"]
 
 
 def ricetta_app(nome, cartelle):

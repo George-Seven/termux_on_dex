@@ -5,7 +5,8 @@
 
 desktop_packages() { # il primo pacchetto è obbligatorio, gli altri facoltativi
   case $1 in
-    xfce) echo "xfce4 xfce4-terminal xfce4-taskmanager xfce4-notifyd xfce4-screenshooter mousepad ristretto thunar-archive-plugin xarchiver" ;;
+    # niente ristretto: immagini, video e musica le aprono le app nostre (share/media, MEDIA_PKGS)
+    xfce) echo "xfce4 xfce4-terminal xfce4-taskmanager xfce4-notifyd xfce4-screenshooter mousepad thunar-archive-plugin xarchiver" ;;
     *) return 1 ;;
   esac
 }
@@ -34,6 +35,7 @@ desktop_install() { # desktop_install xfce
   pkg_install_avail dbus ttf-dejavu fontconfig-utils xdg-utils desktop-file-utils || true
   # shellcheck disable=SC2086
   pkg_install $DESKTOP_TOD_PKGS || return 1
+  media_install || true
   desktop_preconfigure "$de"
   desktop_install_entries
   files_setup
@@ -105,6 +107,104 @@ desktop_store_entry() { # "Store" nello Start (share/store/tod-store-gui.py): le
   printf 'StartupWMClass=tod-store\nStartupNotify=true\nComment=Find and install apps\nComment[it]=Trova e installa le app\nKeywords=app;store;flathub;install;installa;\n' >>"$f"
 }
 
+# --- Foto, Lettore multimediale, Lettore musicale (share/media, 9 novembre: al posto di Ristretto, che apriva
+# anche i video, e di nessun lettore di musica). Stile delle app Foto e Media Player di Windows 11 ---------------
+# GStreamer: decodifica (gst-libav = ffmpeg), contenitori (good/bad), uscita GL (base); le immagini dei telefoni:
+# WebP (WhatsApp) e HEIC (fotocamera); gexiv2: dati di scatto e rotazione delle JPEG senza ricomprimerle
+MEDIA_PKGS="gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav webp-pixbuf-loader libheif gexiv2"
+MEDIA_FOTO_MIME="image/jpeg;image/png;image/gif;image/webp;image/heic;image/heif;image/avif;image/bmp;image/tiff;image/jxl;image/svg+xml;image/x-icon;image/vnd.microsoft.icon;image/x-tga;image/x-portable-pixmap;image/x-portable-anymap;"
+MEDIA_VIDEO_MIME="video/mp4;video/x-m4v;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;video/avi;video/3gpp;video/3gpp2;video/mpeg;video/mp2t;video/x-ms-wmv;video/x-flv;video/ogg;video/x-ogm+ogg;"
+MEDIA_AUDIO_MIME="audio/mpeg;audio/mp3;audio/flac;audio/x-flac;audio/ogg;audio/x-vorbis+ogg;audio/opus;audio/x-opus+ogg;audio/mp4;audio/x-m4a;audio/aac;audio/x-aac;audio/wav;audio/x-wav;audio/x-ms-wma;audio/x-aiff;audio/x-ape;audio/x-wavpack;audio/x-matroska;audio/amr;audio/midi;audio/x-midi;"
+# le app che lasciano il posto alle nostre: se una di queste è la predefinita, o non ce n'è nessuna, il tipo passa
+# alla nostra; una scelta dell'utente (PhotoCraft, GIMP, VLC...) resta com'è
+MEDIA_VECCHIE="org.xfce.ristretto.desktop ristretto.desktop org.xfce.Parole.desktop parole.desktop"
+
+media_mancanti() { # i pacchetti di MEDIA_PKGS non installati (vuoto = tutto a posto)
+  local p out=""
+  for p in $MEDIA_PKGS; do
+    if ! pkg_installed "$p"; then out+="$p "; fi
+  done
+  printf '%s' "${out% }"
+}
+
+media_install() { # i pacchetti che mancano (installazione, Aggiornamenti, tod media prepara)
+  local manca
+  manca=$(media_mancanti)
+  [[ -n $manca ]] || return 0
+  # shellcheck disable=SC2086
+  pkg_install_avail $manca
+}
+
+_mime_predefinita() { # _mime_predefinita mimeapps.list tipo voce.desktop: solo se libero o di un'app che lasciamo
+  local f=$1 tipo=$2 voce=$3 ora=""
+  if [[ -f $f ]]; then
+    ora=$(awk -v t="$tipo" '/^\[/ {s = ($0 == "[Default Applications]")} s && index($0, t "=") == 1 {
+      sub(/^[^=]*=/, ""); sub(/;.*/, ""); print; exit}' "$f")
+  fi
+  if [[ -z $ora || " $MEDIA_VECCHIE " == *" $ora "* ]]; then
+    _ini_set "$f" "Default Applications" "$tipo" "$voce"
+  fi
+}
+
+media_apri() { # tod foto|video|musica [file...]: l'app nel desktop (staccata, come dallo Start)
+  local s=$1 f
+  shift
+  local -a args=()
+  if [[ -z ${DISPLAY:-} ]]; then err "$(t md_no_schermo)"; return 1; fi
+  for f in "$@"; do
+    if [[ $f == -* ]]; then args+=("$f"); else args+=("$(realpath -m -- "$f")"); fi
+  done
+  setsid python3 "$TOD_ROOT/share/media/$s" "${args[@]}" >/dev/null 2>&1 </dev/null &
+}
+
+media_cli() { # tod media prepara|stato
+  local manca
+  case ${1:-stato} in
+    prepara | install)
+      run_step "$(t s_media)" media_install || return 1
+      desktop_media_entries
+      desktop_refresh_caches
+      ok "$(t md_pronte)"
+      ;;
+    stato | status)
+      manca=$(media_mancanti)
+      if [[ -z $manca ]]; then ok "$(t md_pronte)"; else warn "$(t md_mancano "$manca")"; fi
+      ;;
+    *) info "$(t md_uso)"; return 2 ;;
+  esac
+}
+
+desktop_media_entries() { # Foto, Lettore multimediale, Lettore musicale nello Start, e le app predefinite
+  local apps="$HOME/.local/share/applications" py="python3 $TOD_ROOT/share/media" m t f
+  local -a tipi=()
+  mkdir -p "$apps"
+  desktop_entry "$apps/tod-foto.desktop" "Photos" "Foto" "$py/tod-foto.py %F" multimedia-photo-viewer false
+  desktop_entry "$apps/tod-video.desktop" "Media Player" "Lettore multimediale" "$py/tod-lettore.py --video %F" \
+    multimedia-video-player false
+  desktop_entry "$apps/tod-musica.desktop" "Music Player" "Lettore musicale" "$py/tod-lettore.py --musica %F" \
+    multimedia-audio-player false
+  sed -i 's/^Categories=.*/Categories=Graphics;Viewer;Photography;/' "$apps/tod-foto.desktop"
+  sed -i 's/^Categories=.*/Categories=AudioVideo;Video;Player;/' "$apps/tod-video.desktop"
+  sed -i 's/^Categories=.*/Categories=AudioVideo;Audio;Player;Music;/' "$apps/tod-musica.desktop"
+  printf '%s\n' "StartupWMClass=tod-foto" "StartupNotify=true" "MimeType=$MEDIA_FOTO_MIME" \
+    "Comment=View your photos and screenshots" "Comment[it]=Guarda le foto e gli screenshot" \
+    "Keywords=photo;picture;image;gallery;foto;immagini;galleria;" >>"$apps/tod-foto.desktop"
+  printf '%s\n' "StartupWMClass=tod-video" "StartupNotify=true" "MimeType=$MEDIA_VIDEO_MIME" \
+    "Comment=Watch videos" "Comment[it]=Guarda i video" "Keywords=video;movie;player;film;filmati;" \
+    >>"$apps/tod-video.desktop"
+  printf '%s\n' "StartupWMClass=tod-musica" "StartupNotify=true" "MimeType=$MEDIA_AUDIO_MIME" \
+    "Comment=Listen to your music" "Comment[it]=Ascolta la tua musica" \
+    "Keywords=music;audio;player;song;album;musica;brani;canzoni;" >>"$apps/tod-musica.desktop"
+  f="$HOME/.config/mimeapps.list"
+  mkdir -p "${f%/*}"
+  for m in foto:"$MEDIA_FOTO_MIME" video:"$MEDIA_VIDEO_MIME" musica:"$MEDIA_AUDIO_MIME"; do
+    IFS=';' read -ra tipi <<<"${m#*:}"
+    for t in "${tipi[@]}"; do
+      if [[ -n $t ]]; then _mime_predefinita "$f" "$t" "tod-${m%%:*}.desktop"; fi
+    done
+  done
+}
+
 desktop_install_entries() {
   local apps="$HOME/.local/share/applications" auto="$HOME/.config/autostart" tod="$PREFIX/bin/tod"
   mkdir -p "$apps" "$auto"
@@ -123,6 +223,7 @@ desktop_install_entries() {
   desktop_dischi_entry
   desktop_scanner_entry
   desktop_store_entry
+  desktop_media_entries
   # "Spegni": chiude desktop, audio e server X e torna ad Android. Nel menu no: c'è già il pulsante
   # di accensione dello Start
   desktop_entry "$apps/tod-stop.desktop" "Shut down" "Spegni" "$tod spegni" system-shutdown false true
@@ -195,7 +296,8 @@ DESKTOP_USELESS="org.gnome.Vte.App.Gtk3.desktop org.gnome.Vte.App.Gtk4.desktop o
   xfce4-file-manager.desktop xfce4-terminal-emulator.desktop xfce4-mail-reader.desktop xfce4-about.desktop
   xfce4-power-manager-settings.desktop libreoffice-startcenter.desktop
   xfce-display-settings.desktop xfce-session-settings.desktop xfce-wmtweaks-settings.desktop
-  xfce-workspaces-settings.desktop panel-preferences.desktop xfce4-clipman-settings.desktop"
+  xfce-workspaces-settings.desktop panel-preferences.desktop xfce4-clipman-settings.desktop
+  org.xfce.ristretto.desktop"
 # Pannelli di Impostazioni tolti, perché qui non servono o rompono qualcosa: Schermo (la risoluzione
 # la decide Termux:X11, i DPI tod), Sessione e avvio (toglierebbe l'avvio di tod), Regolazioni del
 # gestore delle finestre (il compositore dà lo schermo nero), Spazi di lavoro (uno solo, nessun

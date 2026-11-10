@@ -118,6 +118,11 @@ declare -gA TOD_MSG_it=(
   [stampa_no_pkgs]="Non sono riuscito a installare CUPS nel container"
   [stampa_ok]="Stampa pronta: le stampanti Wi-Fi e USB si aggiungono da sole"
   [s_rete]="Rete in Esplora file (Samba)"
+  [s_media]="Foto, Lettore multimediale e Lettore musicale (GStreamer)"
+  [md_pronte]="Foto, Lettore multimediale e Lettore musicale pronti: immagini, video e musica si aprono con loro"
+  [md_mancano]="Per Foto, video e musica mancano dei pacchetti: %s (tod media prepara)"
+  [md_no_schermo]="Serve il desktop acceso: apri Foto, video e musica dallo Start"
+  [md_uso]="tod foto|video|musica [file...] · tod media prepara|stato"
   [rete_no]="Non sono riuscito a preparare la Rete (Samba o tod-smb)"
   [rete_ok]="Rete pronta: PC e NAS in Esplora file, sotto Rete"
   [s_bv]="Schermata di benvenuto"
@@ -370,6 +375,8 @@ declare -gA TOD_MSG_it=(
   aspetto [tema|accento|puntatore]            aspetto DeX OS (tema chiaro/scuro, colore, puntatore)
   audio [status|test|restart|uscita aaudio|sles]   audio (test: una nota dalle app native e dal container)
   lingua it|en                                lingua del desktop, di Firefox e di LibreOffice
+  foto | video | musica [file...]             Foto, Lettore multimediale, Lettore musicale
+  media prepara|stato                         i pacchetti di Foto, video e musica (GStreamer)
   x11 [status|shared]                         Termux:X11 con lo stesso UID di Termux (più veloce)
   cx install|remove|run|shell|update|probe|backup|restore   container Debian
   diretto [stato|on|off|prepara|riprova]                     app di Debian senza proot (più veloci)
@@ -472,6 +479,11 @@ declare -gA TOD_MSG_en=(
   [stampa_no_pkgs]="Could not install CUPS in the container"
   [stampa_ok]="Printing ready: Wi-Fi and USB printers are added automatically"
   [s_rete]="Network in the file manager (Samba)"
+  [s_media]="Photos, Media Player and Music Player (GStreamer)"
+  [md_pronte]="Photos, Media Player and Music Player ready: pictures, videos and music open with them"
+  [md_mancano]="Photos, videos and music need some packages: %s (tod media prepara)"
+  [md_no_schermo]="The desktop must be running: open Photos, videos and music from Start"
+  [md_uso]="tod foto|video|musica [file...] · tod media prepara|stato"
   [rete_no]="Could not set up the Network (Samba or tod-smb)"
   [rete_ok]="Network ready: PCs and NAS in the file manager, under Network"
   [s_bv]="Welcome screen"
@@ -724,6 +736,8 @@ declare -gA TOD_MSG_en=(
   aspetto [tema|accento|puntatore]            DeX OS look (light/dark theme, colour, pointer)
   audio [status|test|restart|uscita aaudio|sles]   audio (test: a tone from native apps and the container)
   lingua it|en                                desktop, Firefox and LibreOffice language
+  foto | video | musica [file...]             Photos, Media Player, Music Player
+  media prepara|stato                         packages for Photos, videos and music (GStreamer)
   x11 [status|shared]                         Termux:X11 sharing Termux's UID (faster)
   cx install|remove|run|shell|update|probe|backup|restore   Debian container
   diretto [stato|on|off|prepara|riprova]                     Debian apps without proot (faster)

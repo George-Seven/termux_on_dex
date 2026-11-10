@@ -1162,6 +1162,191 @@ test_store_una_app() { # Store: una app, un solo sistema (GIMP già in Debian �
   eq "niente scaricato" "" "$(ls "$HOME")"
 }
 
+test_media_voci() { # Foto, Lettore multimediale e Lettore musicale nello Start, e predefiniti per immagini, video,
+  # audio (9 novembre: i .mp4 si aprivano con Ristretto). Ristretto lascia il posto; le scelte dell'utente restano
+  fresh_env media1
+  local apps="$HOME/.local/share/applications" f="$HOME/.config/mimeapps.list" d
+  mkdir -p "$HOME/.config"
+  printf '%s\n' "[Added Associations]" "image/png=org.xfce.ristretto.desktop;" "" "[Default Applications]" \
+    "image/jpeg=org.xfce.ristretto.desktop" "video/mp4=org.xfce.ristretto.desktop" \
+    "image/svg+xml=tod-cx-ai.storyteller.vectorcraft.desktop" "text/plain=org.xfce.mousepad.desktop" >"$f"
+  desktop_media_entries
+  d=$(cat "$apps/tod-foto.desktop")
+  has "Foto: la finestra" "Exec=python3 $TOD_ROOT/share/media/tod-foto.py %F" "$d"
+  has "Foto: nome" "Name[it]=Foto" "$d"
+  has "Foto: la barra la riconosce" "StartupWMClass=tod-foto" "$d"
+  has "Foto: apre le JPEG" "image/jpeg;" "$d"
+  has "Foto: apre le HEIC del telefono" "image/heic;" "$d"
+  d=$(cat "$apps/tod-video.desktop")
+  has "video: modo video" "share/media/tod-lettore.py --video %F" "$d"
+  has "video: nome" "Name[it]=Lettore multimediale" "$d"
+  has "video: barra" "StartupWMClass=tod-video" "$d"
+  has "video: mp4 e mkv" "video/mp4;video/x-m4v;video/x-matroska;" "$d"
+  d=$(cat "$apps/tod-musica.desktop")
+  has "musica: modo musica" "share/media/tod-lettore.py --musica %F" "$d"
+  has "musica: nome" "Name[it]=Lettore musicale" "$d"
+  has "musica: barra" "StartupWMClass=tod-musica" "$d"
+  has "musica: mp3 e flac" "audio/mpeg;audio/mp3;audio/flac;" "$d"
+  d=$(cat "$f")
+  has "le JPEG non più a Ristretto" "image/jpeg=tod-foto.desktop" "$d"
+  has "i video non più a Ristretto" "video/mp4=tod-video.desktop" "$d"
+  has "tipo senza app: alla nostra" "image/heic=tod-foto.desktop" "$d"
+  has "audio a Lettore musicale" "audio/mpeg=tod-musica.desktop" "$d"
+  has "scelta dell'utente: resta" "image/svg+xml=tod-cx-ai.storyteller.vectorcraft.desktop" "$d"
+  has "altri tipi: intatti" "text/plain=org.xfce.mousepad.desktop" "$d"
+  has "le associazioni aggiunte non si toccano" "image/png=org.xfce.ristretto.desktop;" "$d"
+  desktop_media_entries   # a ogni aggiornamento: nessun doppione
+  eq "una riga per tipo" 1 "$(grep -c '^image/jpeg=' "$f")"
+  eq "una voce sola nel file" 1 "$(grep -c '^MimeType=' "$apps/tod-foto.desktop")"
+  # l'utente sceglie un'altra app per i video (Esplora file → Apri con): resta anche dopo l'aggiornamento
+  sed -i 's|^video/mp4=.*|video/mp4=vlc.desktop|' "$f"
+  desktop_media_entries
+  has "VLC scelto dall'utente resta" "video/mp4=vlc.desktop" "$(cat "$f")"
+  has "all'installazione e dopo gli aggiornamenti" "desktop_media_entries" "$(declare -f desktop_install_entries)"
+  has "Ristretto non più nello Start" "org.xfce.ristretto.desktop" "$DESKTOP_USELESS"
+  hasnt "Ristretto non più installato" "ristretto" "$(desktop_packages xfce)"
+}
+
+test_media_pacchetti() { # GStreamer e i caricatori di immagini: con l'installazione, gli Aggiornamenti e tod update
+  pkg_has() { return 0; }
+  pkg_installed() { [[ $1 != gst-libav && $1 != webp-pixbuf-loader ]]; }
+  pkg_install() { echo "install $*" >>"$WORK/mpk_$$"; }
+  pkg_install_avail() { echo "avail $*" >>"$WORK/mpk_$$"; }
+  desktop_preconfigure() { :; }
+  desktop_install_entries() { :; }
+  files_setup() { :; }
+  eq "mancano solo quelli non installati" "gst-libav webp-pixbuf-loader" "$(media_mancanti)"
+  desktop_install xfce
+  has "installazione: solo i mancanti" "avail gst-libav webp-pixbuf-loader" "$(cat "$WORK/mpk_$$")"
+  : >"$WORK/mpk_$$"
+  usb_on() { return 1; }
+  rete_on() { return 1; }
+  x11_glamor_da_aggiornare() { return 1; }
+  self_after >/dev/null
+  has "Aggiornamenti (tod _self_after): i mancanti" "avail gst-libav webp-pixbuf-loader" "$(cat "$WORK/mpk_$$")"
+  has "tod update: anche lì" "media_install" "$(declare -f tod_update)"
+  local p
+  for p in gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav webp-pixbuf-loader libheif gexiv2; do
+    has "pacchetto $p" " $p " " $MEDIA_PKGS "
+  done
+  pkg_installed() { return 0; }
+  : >"$WORK/mpk_$$"
+  media_install
+  eq "tutto installato: nessuna installazione" "" "$(cat "$WORK/mpk_$$")"
+}
+
+test_media_comandi() { # tod foto|video|musica: aprono l'app (staccata); senza desktop un messaggio chiaro
+  fresh_env media3
+  setsid() { echo "$*" >>"$WORK/mcmd_$$"; }
+  local out rc=0
+  out=$(unset DISPLAY; media_apri tod-foto.py x.jpg 2>&1) || rc=$?
+  eq "senza desktop: errore" 1 "$rc"
+  has "senza desktop: perché" "$(t md_no_schermo)" "$out"
+  (
+    export DISPLAY=:9
+    cd "$WORK" && media_apri tod-lettore.py --video "film con spazi.mkv"
+    wait
+  )
+  has "percorso completo, spazi compresi" "share/media/tod-lettore.py --video $WORK/film con spazi.mkv" "$(cat "$WORK/mcmd_$$")"
+  pkg_installed() { [[ $1 != gexiv2 ]]; }
+  has "stato: cosa manca" "gexiv2" "$(media_cli stato 2>&1)"
+  for c in foto video musica media; do
+    has "tod $c nel case di tod" "$c" "$(sed -n '/^tod_main() {/,/^}/p' "$ROOT/tod" | grep -E "^\s+${c}[ |)]")"
+  done
+}
+
+test_media_libreria() { # Foto, Video, Musica senza finestre: date dai nomi, coda (casuale, ripeti), posizioni, album
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(cd "$ROOT/share/media" && TZ=UTC LANGUAGE=it HOME="$WORK/mlib_$$" python3 - <<'PY'
+import os, time, libreria as L
+def eq(n, a, b):
+    if a != b:
+        print("✘", n, "atteso", repr(a), "ottenuto", repr(b))
+t = L.data_da_nome("IMG_20260601_183012.jpg", 1)
+eq("data dalla fotocamera", (2026, 6, 1, 18, 30), time.localtime(t)[:5])
+eq("screenshot di Samsung", (2026, 10, 27), time.localtime(L.data_da_nome("Screenshot_20261027-101200_Chrome.jpg", 1))[:3])
+eq("solo la data", (2026, 10, 29), time.localtime(L.data_da_nome("20261029_171043.jpg", 1))[:3])
+eq("niente data nel nome: quella del file", 12345.0, L.data_da_nome("vacanze.jpg", 12345.0))
+eq("numeri a caso non sono date", 7.0, L.data_da_nome("IMG_99999999.jpg", 7.0))
+g = L.per_mese([{"data": L.data_da_nome("IMG_20261103_100000.jpg", 0)}, {"data": L.data_da_nome("IMG_20260601_100000.jpg", 0)},
+                {"data": L.data_da_nome("IMG_20261101_100000.jpg", 0)}])
+eq("mesi, dal più recente", ["novembre 2026", "giugno 2026"], [x[0] for x in g])
+eq("due foto a novembre", 2, len(g[0][1]))
+eq("tempo", ["0:00", "3:07", "1:02:03"], [L.tempo(0), L.tempo(187.9), L.tempo(3723)])
+eq("misura con la virgola", "2,4 MB", L.misura(2400000))
+eq("ordine naturale", ["foto 2.jpg", "foto 10.jpg"], sorted(["foto 10.jpg", "foto 2.jpg"], key=L.chiave_naturale))
+c = L.Coda(["a", "b", "c"])
+eq("avanti", "b", c.avanti())
+eq("fine coda senza ripeti", None, (c.avanti(), c.avanti(automatico=True))[1])
+c.ripeti = c.TUTTI
+eq("ripeti tutti: si ricomincia", "a", c.avanti(automatico=True))
+c.ripeti = c.UNO
+eq("ripeti uno: da sola ripete", "a", c.avanti(automatico=True))
+eq("ripeti uno: avanti a mano va avanti", "b", c.avanti())
+c = L.Coda([str(i) for i in range(20)])
+c.vai(5)
+c.metti_casuale(True)
+vis = [c.corrente()] + [c.avanti() for _ in range(19)]
+eq("casuale: tutti una volta sola", sorted(str(i) for i in range(20)), sorted(vis))
+eq("casuale: si parte da quello in corso", "5", vis[0])
+c.metti_casuale(False)
+eq("senza casuale: l'ordine vero dal brano in corso", str(int(c.corrente()) + 1) if c.corrente() != "19" else None, c.avanti())
+c = L.Coda(["a", "b", "c"])
+c.aggiungi(["x"], subito_dopo=True)
+eq("riproduci dopo", ["a", "x", "b", "c"], c.elementi)
+eq("e il prossimo è quello", "x", c.avanti())
+c.togli(0)
+eq("togliere prima del corrente", ("x", ["x", "b", "c"]), (c.corrente(), c.elementi))
+p = L.Posizioni(os.path.join(os.environ["HOME"], "pos.json"))
+p.scrivi("/v.mp4", 754.2, 3600)
+eq("riprendi da", 754.2, L.Posizioni(p.percorso).leggi("/v.mp4", 3600))
+p.scrivi("/v.mp4", 3590, 3600)
+eq("finito: dall'inizio", 0, p.leggi("/v.mp4", 3600))
+p.scrivi("/w.mp4", 4, 3600)
+eq("appena iniziato: niente", 0, p.leggi("/w.mp4", 3600))
+b = L.brano_vuoto("/m/03 - Pioggia sui tetti.flac")
+eq("senza tag: titolo e traccia dal nome", ("Pioggia sui tetti", 3), (b["titolo"], b["traccia"]))
+br = {"/m/2.mp3": dict(L.brano_vuoto("/m/2.mp3"), titolo="B", album="Uno", artista="X", traccia=2),
+      "/m/1.mp3": dict(L.brano_vuoto("/m/1.mp3"), titolo="A", album="Uno", artista="X", traccia=1),
+      "/n/1.mp3": dict(L.brano_vuoto("/n/1.mp3"), titolo="C", album="Uno", artista="Y", traccia=1)}
+al = L.raggruppa_album(br)
+eq("stesso titolo, artisti diversi: due album", 2, len(al))
+eq("album in ordine di traccia", ["/m/1.mp3", "/m/2.mp3"], al[("uno", "x")]["brani"])
+eq("ordine senza articolo", "beatles", L.chiave_ordine("The Beatles"))
+eq("ricerca a parole", (True, False), (L.cerca("luce nord", "Luce del nord"), L.cerca("luce sud", "Luce del nord")))
+os.makedirs(os.path.join(os.environ["HOME"], ".config"), exist_ok=True)
+os.makedirs(os.path.join(os.environ["HOME"], "Immagini"), exist_ok=True)
+open(os.path.join(os.environ["HOME"], ".config", "user-dirs.dirs"), "w").write('XDG_MUSIC_DIR="$HOME/Musica"\n')
+u = L.cartelle_utente()
+eq("cartelle da user-dirs", os.path.join(os.environ["HOME"], "Musica"), u.get("MUSIC"))
+eq("e i ripieghi", os.path.join(os.environ["HOME"], "Immagini"), u.get("PICTURES"))
+os.environ["TOD_FOTO_CARTELLE"] = os.path.join(os.environ["HOME"], "Immagini") + ":/non/esiste"
+eq("cartelle di prova (TOD_FOTO_CARTELLE): solo quelle che esistono", 1, len(L.cartelle_foto()))
+print("fine")
+PY
+  )
+  hasnt "nessun errore" "✘" "$out"
+  has "arrivato in fondo" "fine" "$out"
+}
+
+test_media_finestre_compilano() { # le tre app: Python valido, prgname uguale alla voce dello Start, niente schermo
+  command -v python3 >/dev/null || return 0
+  python3 -m py_compile "$ROOT/share/media/libreria.py" "$ROOT/share/media/comune.py" "$ROOT/share/media/tod-foto.py" \
+    "$ROOT/share/media/tod-lettore.py" || { echo "share/media non compila"; return 1; }
+  has "Foto: prgname" 'GLib.set_prgname("tod-foto")' "$(cat "$ROOT/share/media/tod-foto.py")"
+  has "lettore: prgname dei due modi" 'GLib.set_prgname("tod-video" if VIDEO else "tod-musica")' \
+    "$(cat "$ROOT/share/media/tod-lettore.py")"
+  # le prove a vista vanno su uno schermo finto: le cartelle vere si cambiano con queste variabili
+  local v
+  for v in TOD_FOTO_CARTELLE TOD_VIDEO_CARTELLE TOD_MUSICA_CARTELLE TOD_TELEFONO_DIR; do
+    has "$v" "$v" "$(cat "$ROOT/share/media/libreria.py")"
+  done
+  has "uscita video scelta a mano" "TOD_VIDEO_USCITA" "$(cat "$ROOT/share/media/tod-lettore.py")"
+  has "icona DeX OS di Foto" "tod-foto" "$(cat "$ROOT/share/dexos/dexos-icons.py")"
+  has "icona DeX OS del lettore" "multimedia-video-player" "$(cat "$ROOT/share/dexos/dexos-icons.py")"
+}
+
 test_diretto_correggi() { # la copia del glibc: set_robust_list → -ENOSYS, file interni → /dev/fd/NN
   local f="$WORK/glibc_$$" out
   python3 -c '
@@ -3536,6 +3721,7 @@ test_x11_glamor_nuova_versione() { # la Termux:X11 nuova si propone solo da tod 
   x11_glamor_da_aggiornare || { echo "  ✘ versione 2 uscita: da aggiornare"; return 1; }
   usb_on() { return 1; }
   rete_on() { return 1; }   # niente apt veri dai test (samba)
+  media_mancanti() { :; }   # né GStreamer
   desktop_install_entries() { :; }
   eq "dopo il codice nuovo: avviso per la finestra" "x11=nuova" "$(self_after)"
   conf_set X11_GLAMOR_INSTALLATA 2
