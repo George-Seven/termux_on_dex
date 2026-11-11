@@ -3278,7 +3278,11 @@ typedef struct { tod_gtype g_type; long long dati[2]; } TodValue;   /* GValue */
 static int tod_ap_chi(void) {   /* 1 = Esplora file (Thunar), 2 = scrivania (xfdesktop), 0 = un altro programma */
     static int chi = -1;
     if (chi < 0) {
+#ifdef __BIONIC__
         const char *n = getprogname();
+#else   /* glibc (il controllo automatico su GitHub gira su Ubuntu): getprogname c'è solo in Bionic e nei BSD */
+        const char *n = program_invocation_short_name;
+#endif
         chi = !n || getenv("TOD_ANTEPRIMA_SPENTA") ? 0 : !strcasecmp(n, "thunar") ? 1 : !strcasecmp(n, "xfdesktop") ? 2 : 0;
     }
     return chi;

@@ -1437,6 +1437,8 @@ test_anteprima_spazio() { # barra spaziatrice in Esplora file e sulla scrivania:
   local src="$ROOT/share/tod-gettext.c" cc ap="$ROOT/share/media/tod-anteprima.py"
   has "aggancio prima che parta l'app" "int g_application_run(void *app, int argc, char **argv)" "$(cat "$src")"
   has "solo Thunar e xfdesktop" '!strcasecmp(n, "thunar") ? 1 : !strcasecmp(n, "xfdesktop") ? 2 : 0' "$(cat "$src")"
+  has "compila anche con glibc (controllo su GitHub, Ubuntu): getprogname solo su Bionic" \
+    "const char *n = program_invocation_short_name;" "$(sed -n '/^static int tod_ap_chi(void)/,/^}/p' "$src")"
   has "si può spegnere" "TOD_ANTEPRIMA_SPENTA" "$(cat "$src")"
   has "mai mentre si scrive (rinomina, indirizzo, ricerca)" 'tod_ap_e_un(fuoco, "GtkEditable") || tod_ap_e_un(fuoco, "GtkTextView")' "$(cat "$src")"
   has "spazio senza modificatori" "kv != 0x20" "$(cat "$src")"
