@@ -32,7 +32,7 @@ NAMES = {"light": "DeX-OS", "dark": "DeX-OS-Dark"}
 FLUENT_HUE = 214.0          # il blu di Fluent (#1A73E8, #3281EA, #1567d3...)
 FLUENT_SL = (0.818, 0.506)  # saturazione e luminosità di #1A73E8
 DEFAULT_ACCENT = "#0067c0"
-VERSION = 14   # nel nome dei temi: cambiando il disegno si rifanno da soli
+VERSION = 15   # nel nome dei temi: cambiando il disegno si rifanno da soli
 
 
 # --- colori ---------------------------------------------------------------------------------
@@ -454,6 +454,16 @@ AVVISI = """
 .tod-avviso.csd label.tod-avviso-tenue { font-size: 8.5pt; color: {tenue}; }
 .tod-avviso.csd label.tod-avviso-errore { font-size: 9pt; color: {errore}; }
 .tod-avviso.csd .tod-scheda { background-color: {scheda}; border-radius: 12px; padding: 8px 10px; }
+/* Fluent sposta di 6 px a sinistra (e riga in alto) l'ultimo riquadro di una griglia di dialogo: in "Sostituire il
+   file?" era la scheda del secondo file, disallineata (11 novembre, Pietro: "deve essere tutto perfetto") */
+.tod-avviso.csd .tod-scheda, .tod-avviso.csd .tod-scheda:first-child, .tod-avviso.csd .tod-scheda:last-child,
+dialog.background.tod-avviso.csd > box.dialog-vbox.vertical > grid.horizontal > box.horizontal.tod-scheda:last-child {
+  margin: 0; border: none;
+}
+.tod-avviso.csd .tod-scheda > label, .tod-avviso.csd .tod-scheda > image,
+dialog.background.tod-avviso.csd > box.dialog-vbox.vertical > grid.horizontal > box.horizontal.tod-scheda:last-child > label {
+  margin: 0;
+}
 .tod-avviso.csd spinner { color: {accento}; }
 .tod-avviso.csd combobox button.combo, .tod-avviso.csd spinbutton { border-radius: 8px; }
 .tod-avviso.csd .tod-avviso-pulsanti button, .tod-avviso.csd .tod-avviso-pulsanti button:first-child,
@@ -502,6 +512,10 @@ messagedialog:not(.tod-avviso) .dialog-action-area button.suggested-action label
 /* la copia in corso di Thunar (ThunarProgressDialog): una scheda come quella del Finder */
 .tod-avviso-avanzamento.csd .tod-avanzamento-vista { padding: 14px 16px 12px 16px; }
 .tod-avviso-avanzamento.csd .tod-avanzamento-vista label.tod-avviso-titolo { font-size: 10pt; font-weight: 600; }
+/* l'icona del lavoro (copia, spostamento...) a tinta unita nel colore del testo: quella di Fluent è grigio scuro e nel
+   tema scuro non si vedeva */
+.tod-avviso-avanzamento.csd .tod-avanzamento-vista image { -gtk-icon-style: symbolic; color: {testo}; }
+.tod-avviso-avanzamento.csd .tod-avanzamento-vista button.tod-tondo image { color: {tenue}; }
 .tod-avviso-avanzamento.csd .tod-avanzamento-vista button.tod-tondo {
   min-width: 22px; min-height: 22px; padding: 1px; margin: 0 0 0 6px; border-radius: 999px; border: none;
   background-image: none; background-color: {traccia}; box-shadow: none; color: {tenue};

@@ -1291,6 +1291,22 @@ static int tod_avviso_cornice(void *win) {
     return 1;
 }
 
+/* Sempre al centro, come macOS: della finestra da cui viene se è sullo schermo, sennò dello schermo. Senza, xfwm4 la
+ * metteva in un posto libero quando c'era già la finestrella della copia (11 novembre: finita a sinistra). Una
+ * posizione scelta dal programma resta. */
+static int tod_avviso_posto(void *win) {
+    GTKFN(void, g_object_get, void *, const char *, ...)
+    GTKFN(void, gtk_window_set_position, void *, int)
+    GTKFN(void *, gtk_window_get_transient_for, void *)
+    GTKFN(int, gtk_widget_get_mapped, void *)
+    int pos = 0;
+    f_g_object_get(win, "window-position", &pos, NULL);
+    if (pos != 0 /* GTK_WIN_POS_NONE */) return 0;
+    void *genitore = f_gtk_window_get_transient_for(win);
+    f_gtk_window_set_position(win, genitore && f_gtk_widget_get_mapped(genitore) ? 4 /* CENTER_ON_PARENT */ : 1 /* CENTER */);
+    return 1;
+}
+
 /* L'icona dell'app (quella delle sue finestre), sennò quella del tipo di messaggio */
 static const char *tod_avviso_nome_icona(void *win, int tipo) {
     GTKFN(void *, gtk_window_get_transient_for, void *)
@@ -1350,6 +1366,41 @@ static void *tod_avviso_icona(void *win, int tipo, double sc) {
     return o;
 }
 
+/* "Lettera.txt" → «Lettera.txt» (italiano e lingue con le caporali, come il resto del desktop), sennò “Lettera.txt”.
+ * Thunar scrive i nomi tra virgolette diritte; GLib e le nostre app già con le caporali. Solo coppie complete. */
+static int tod_virgolette(void *label) {
+    GTKFN(const char *, gtk_label_get_label, void *)
+    GTKFN(int, gtk_label_get_use_markup, void *)
+    GTKFN(void, gtk_label_set_label, void *, const char *)
+    static const char *const caporali[] = {"it", "fr", "es", "pt", "ru", "uk", "el", "ca", "nb", "de", NULL};
+    if (f_gtk_label_get_use_markup(label)) return 0;
+    const char *s = f_gtk_label_get_label(label), *lang = getenv("TOD_GETTEXT_LANG");
+    if (!s || !strchr(s, '"')) return 0;
+    int n = 0, cap = 0;
+    for (const char *p = s; *p; p++) n += *p == '"';
+    if (n % 2) return 0;
+    for (int i = 0; lang && caporali[i]; i++) cap |= !strncmp(lang, caporali[i], 2);
+    if (lang && !strncmp(lang, "de", 2)) cap = 2;   /* in tedesco »…« */
+    const char *apri = cap == 2 ? "\xc2\xbb" : cap ? "\xc2\xab" : "\xe2\x80\x9c";
+    const char *chiudi = cap == 2 ? "\xc2\xab" : cap ? "\xc2\xbb" : "\xe2\x80\x9d";
+    size_t l = strlen(s);
+    char *out = malloc(l + (size_t)n * 3 + 1), *o = out;
+    if (!out) return 0;
+    int aperta = 0;
+    for (const char *p = s; *p; p++) {
+        if (*p != '"') { *o++ = *p; continue; }
+        const char *v = aperta ? chiudi : apri;
+        size_t lv = strlen(v);
+        memcpy(o, v, lv);
+        o += lv;
+        aperta = !aperta;
+    }
+    *o = '\0';
+    f_gtk_label_set_label(label, out);
+    free(out);
+    return 1;
+}
+
 /* un testo dell'avviso: centrato, a capo alla larghezza della finestra (anche dentro le parole lunghe come i percorsi) */
 static int tod_avviso_testo(void *label, const char *classe) {
     GTKFN(void, gtk_label_set_xalign, void *, float)
@@ -1363,6 +1414,7 @@ static int tod_avviso_testo(void *label, const char *classe) {
     GTKFN(void, gtk_widget_set_halign, void *, int)
     GTKFN(void, gtk_widget_set_hexpand, void *, int)
     f_gtk_label_set_attributes(label, NULL);   /* il grassetto grande di GTK: misure e peso li dà il tema */
+    tod_virgolette(label);
     f_gtk_label_set_selectable(label, 0);      /* sennò il clic non arriva alla finestra (trascinamento) */
     f_gtk_label_set_line_wrap(label, 1);
     f_gtk_label_set_line_wrap_mode(label, 2 /* PANGO_WRAP_WORD_CHAR */);
@@ -1632,6 +1684,48 @@ static int tod_avviso_griglia(void *griglia, double sc) {
     return 1;
 }
 
+/* TOD_AVVISI_DEBUG: dove sono finiti davvero i pezzi della griglia (posizione, misura, margini, celle) */
+static int tod_avviso_misura(void *griglia) {
+    GTKFN(TodList *, gtk_container_get_children, void *)
+    GTKFN(void, g_list_free, TodList *)
+    GTKFN(void, gtk_widget_get_allocation, void *, int *)
+    GTKFN(int, gtk_widget_get_margin_start, void *)
+    GTKFN(int, gtk_widget_get_halign, void *)
+    GTKFN(int, gtk_widget_get_visible, void *)
+    GTKFN(void, gtk_container_child_get, void *, void *, ...)
+    TodList *kids = f_gtk_container_get_children(griglia);
+    for (TodList *l = kids; l; l = l->next) {
+        int a[4] = {0}, x = 0, y = 0, w = 0;
+        f_gtk_widget_get_allocation(l->data, a);
+        f_gtk_container_child_get(griglia, l->data, "left-attach", &x, "top-attach", &y, "width", &w, NULL);
+        fprintf(stderr, "tod-avviso: misura %s%s cella %d,%d larga %d → x=%d y=%d w=%d h=%d margine %d halign %d\n",
+                tod_type_name(l->data), f_gtk_widget_get_visible(l->data) ? "" : " (nascosto)", x, y, w, a[0], a[1], a[2],
+                a[3], f_gtk_widget_get_margin_start(l->data), f_gtk_widget_get_halign(l->data));
+        if (tod_is_container(l->data)) {
+            GTKFN(void *, gtk_widget_get_style_context, void *)
+            GTKFN(void, gtk_style_context_get_margin, void *, int, int16_t *)
+            GTKFN(void, gtk_style_context_get_padding, void *, int, int16_t *)
+            GTKFN(int, gtk_style_context_get_state, void *)
+            GTKFN(char *, gtk_style_context_to_string, void *, int)
+            int16_t mg[4] = {0}, pd[4] = {0};
+            void *ctx = f_gtk_widget_get_style_context(l->data);
+            f_gtk_style_context_get_margin(ctx, f_gtk_style_context_get_state(ctx), mg);
+            f_gtk_style_context_get_padding(ctx, f_gtk_style_context_get_state(ctx), pd);
+            char *s = f_gtk_style_context_to_string(ctx, 1 /* RECURSE */);
+            fprintf(stderr, "tod-avviso: misura   css margine %d,%d padding %d,%d nodi: %s\n", mg[0], mg[1], pd[0], pd[1], s);
+            TodList *dentro = f_gtk_container_get_children(l->data);
+            for (TodList *k = dentro; k; k = k->next) {
+                f_gtk_widget_get_allocation(k->data, a);
+                fprintf(stderr, "tod-avviso: misura     %s → x=%d w=%d margine %d halign %d\n", tod_type_name(k->data),
+                        a[0], a[2], f_gtk_widget_get_margin_start(k->data), f_gtk_widget_get_halign(k->data));
+            }
+            f_g_list_free(dentro);
+        }
+    }
+    f_g_list_free(kids);
+    return 0;   /* una volta */
+}
+
 /* una griglia con l'icona del dialogo in alto a sinistra, nel corpo della finestra */
 static void *tod_avviso_trova_griglia(void *corpo) {
     GTKFN(TodList *, gtk_container_get_children, void *)
@@ -1660,6 +1754,10 @@ static int tod_avviso_finestrella(void *dialog, int tipo) {
     tod_avviso_pulsanti(f_gtk_dialog_get_action_area(dialog), sc);
     tod_avviso_misure(dialog, griglia, sc, 268);
     tod_classe(dialog, "tod-avviso-finestrella");
+    if (tod_avvisi_debug()) {
+        GTKFN(unsigned, g_timeout_add, unsigned, void *, void *)
+        f_g_timeout_add(1500, (void *)tod_avviso_misura, griglia);
+    }
     return 1;
 }
 
@@ -1820,6 +1918,7 @@ int tod_avviso(void *w) {
     }
     if (!forma || !tod_avvisi_attivi()) return 0;
     if (!tod_avviso_cornice(w)) return 0;
+    if (forma != 3) tod_avviso_posto(w);   /* la copia in corso resta dove la mette Thunar */
     if (forma == 1) tod_avviso_messaggio(w);
     else if (forma == 2 && !strcmp(t, "GcrPromptDialog")) {
         static const char *const domini[] = {"gnome-keyring", "gcr", NULL};
@@ -1848,6 +1947,7 @@ int tod_avviso_libero(void *w) {
         tod_avviso_pulsanti(f_gtk_dialog_get_action_area(w), sc);
         tod_avviso_misure(w, NULL, sc, 0);
     }
+    tod_avviso_posto(w);
     tod_classe(w, "tod-avviso-finestrella");
     fprintf(stderr, "tod-avviso: %s come macOS (finestrella nostra)\n", tod_type_name(w));
     return 1;

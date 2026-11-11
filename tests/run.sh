@@ -3097,7 +3097,7 @@ EOF
 import importlib.util as u
 s = u.spec_from_file_location('dx', '$ROOT/share/dexos/dexos-theme.py'); m = u.module_from_spec(s); s.loader.exec_module(m)
 print(' '.join(m.names('#8A5CF5', 1.125).values()), '|', ' '.join(m.names('#0067c0', 1.0).values()))")
-  eq "nomi" "DeX-OS-8a5cf5-v14 DeX-OS-Dark-8a5cf5-v14 DeX-OS-WM-1.125-v14 DeX-OS-WM-Dark-1.125-v14 | DeX-OS-0067c0-v14 DeX-OS-Dark-0067c0-v14 DeX-OS-WM-1-v14 DeX-OS-WM-Dark-1-v14" "$nm"
+  eq "nomi" "DeX-OS-8a5cf5-v15 DeX-OS-Dark-8a5cf5-v15 DeX-OS-WM-1.125-v15 DeX-OS-WM-Dark-1.125-v15 | DeX-OS-0067c0-v15 DeX-OS-Dark-0067c0-v15 DeX-OS-WM-1-v15 DeX-OS-WM-Dark-1-v15" "$nm"
   # menu, popup e suggerimenti nello stile di DeX OS: fondi pieni (niente vetro), voce attiva nell'accento
   local menu
   menu=$(python3 -c "
@@ -5364,6 +5364,7 @@ test_avvisi_macos() { # 10 novembre, Pietro: "niente grafica linux, i popup di s
   has "rinomina e Nuova cartella restano come sono" '!tod_find_type(corpo, "GtkEntry")) forma = 2;' "$src"
   # forma: niente barra di Linux, icona dell'app in alto, testi centrati, pulsanti a pillola
   has "cornice di GTK (angoli tondi, ombra) al posto della barra di xfwm4" "f_gtk_window_set_titlebar(win, testa);" "$src"
+  has "sempre al centro della finestra da cui viene, o dello schermo" "genitore && f_gtk_widget_get_mapped(genitore) ? 4 /* CENTER_ON_PARENT */ : 1 /* CENTER */" "$src"
   has "si sposta trascinandola da un punto qualsiasi" "f_gtk_window_begin_move_drag(win, 1, (int)x, (int)y" "$src"
   has "l'icona dell'app prima di quella della finestra" "prova[n++] = f_gtk_window_get_default_icon_name();" "$src"
   has "triangolo sull'icona per avvertimenti ed errori" '(tipo == 1 || tipo == 3) && strncmp(nome, "dialog-", 7)' "$src"
@@ -5427,7 +5428,7 @@ def avviso(w): return f(cap(w.__gpointer__, None))
 def classi(w): return " ".join(sorted(c for c in w.get_style_context().list_classes() if c.startswith("tod-") or c == "default"))
 def etichette(box): return [b.get_label() for b in box.get_children()]
 Gtk.Settings.get_default().set_property("gtk-theme-name", "DeX-OS-0067c0-v13")
-d = Gtk.MessageDialog(message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.NONE, text="Eliminare per sempre?")
+d = Gtk.MessageDialog(message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.NONE, text='Eliminare per sempre "a.txt"?')
 d.format_secondary_text("Il file non si potrà recuperare.")
 for i, n in enumerate(("Annulla", "Salta", "Elimina")):
     d.add_button(n, i + 1)
@@ -5437,10 +5438,12 @@ print("barra", classi(d.get_titlebar()))
 k = d.get_message_area().get_children()
 print("icona in alto", type(k[0]).__name__, classi(k[0]))
 print("testi", classi(k[1]), "|", classi(k[2]), "| selezionabile", k[1].get_selectable())
+print("virgolette", k[1].get_label())
 aa = d.get_action_area()
 print("colonna", aa.get_orientation() == Gtk.Orientation.VERTICAL, etichette(aa))
 print("predefinito", classi(aa.get_children()[0]))
 print("di nuovo", avviso(d))
+print("posto", d.get_property("window-position").value_nick)
 d2 = Gtk.MessageDialog(message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.NONE, text="Disinstallare?")
 d2.add_button("Annulla", 1)
 d2.add_button("Disinstalla", 2)
@@ -5480,7 +5483,9 @@ Gtk.Settings.get_default().set_property("gtk-theme-name", "Adwaita")
 a = Gtk.MessageDialog(text="Altro tema")
 print("altro tema", avviso(a), a.get_titlebar())
 PYEOF
-  out=$(env -u LD_PRELOAD DISPLAY=":$x" HOME="$HOME" timeout 60 "$py" "$d/prova.py" "$d/ta.so" "$ROOT/share" 2>&1) || true
+  mkdir -p "$d/loc"   # lingua italiana senza cataloghi: solo per le virgolette
+  out=$(env -u LD_PRELOAD DISPLAY=":$x" HOME="$HOME" TOD_GETTEXT_LANG=it TOD_GETTEXT_DIR="$d/loc" \
+    timeout 60 "$py" "$d/prova.py" "$d/ta.so" "$ROOT/share" 2>&1) || true
   kill "$pid" 2>/dev/null || true
   rm -rf "$d"
   has "messaggio trasformato" "messaggio 1 tod-avviso tod-avviso-messaggio" "$out"
@@ -5490,6 +5495,8 @@ PYEOF
   has "tre pulsanti: in colonna, il predefinito in cima" "colonna True ['Elimina', 'Salta', 'Annulla']" "$out"
   has "il predefinito resta tale (accento nel tema)" "predefinito default" "$out"
   has "una volta sola" "di nuovo 0" "$out"
+  has "senza finestra madre: al centro dello schermo" "posto center" "$out"
+  has "virgolette diritte di Thunar → caporali, come il resto del desktop" "virgolette Eliminare per sempre «a.txt»?" "$out"
   has "due pulsanti affiancati, nell'ordine di prima" "affiancati True ['Annulla', 'Disinstalla']" "$out"
   has "la rinomina non si tocca" "rinomina 0 None" "$out"
   has "Sostituire il file?: l'icona in alto" "sostituisci 1 Overlay" "$out"
@@ -5527,12 +5534,21 @@ PYEOF
   has "più forte dei pulsanti piatti di Fluent" ".tod-avviso.csd .tod-avviso-pulsanti button:first-child" "$chiaro"
   has "testo secondario" "color: #6e6e73;" "$chiaro"
   has "copia in corso: pulsanti tondi" ".tod-avanzamento-vista button.tod-tondo {" "$chiaro"
+  has "copia in corso: icona visibile anche nel tema scuro" ".tod-avanzamento-vista image { -gtk-icon-style: symbolic; color: #f5f5f7; }" "$scuro"
   eq "mai un blu fisso" 0 "$(grep -ci '#0067c0\|#005fb8\|#0a84ff\|#1a73e8' <<<"$chiaro$scuro")"
   has "nel tema generato" "f.write(avvisi_css(mode, accent))" "$(cat "$ROOT/share/dexos/dexos-theme.py")"
   has "notifiche: angoli dei banner di macOS" "border-radius: 18px;" "$out"
   has "notifiche: al passaggio appena più scure, niente bordo colorato" "#XfceNotifyWindow:hover { background-color: #f6f6f8; }" "$out"
   has "suggerimenti più compatti" "tooltip.csd decoration { border-radius: 7px;" "$out"
   has "voci di menu" "padding: 4px 10px; min-height: 18px; border-radius: 6px;" "$out"
+  # 11 novembre: Fluent spostava di 6 px (con una riga sopra) l'ultimo riquadro della griglia: la seconda scheda di
+  # "Sostituire il file?" non era allineata alla prima. La nostra regola deve battere la sua (più classi)
+  has "schede tutte allineate, anche l'ultima della griglia" \
+    "dialog.background.tod-avviso.csd > box.dialog-vbox.vertical > grid.horizontal > box.horizontal.tod-scheda:last-child {
+  margin: 0; border: none;" "$chiaro"
+  has "anche il testo dentro l'ultima scheda (Fluent gli dava 8 px in più)" \
+    "box.horizontal.tod-scheda:last-child > label {
+  margin: 0;" "$chiaro"
   has "testo d'errore delle finestrelle nostre" "label.tod-avviso-errore { font-size: 9pt; color: #c42b1c; }" "$chiaro"
   has "ripiego senza il modulo (app del container): pulsanti a pillola" "messagedialog:not(.tod-avviso) .dialog-action-area button," "$chiaro"
   # un collegamento rotto tra i temi vecchi non deve fermare il generatore (11 novembre, nella cartella di prova)
