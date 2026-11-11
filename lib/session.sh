@@ -425,6 +425,10 @@ session_hook() { # autostart dentro il desktop: DPI per lo schermo attuale, env 
     # link e file aperti dalle app di Debian → app del desktop (vedi share/tod-open-host)
     (setsid env TOD_CX_ROOTFS="$(cx_rootfs)" bash "$TOD_ROOT/share/tod-open-host" </dev/null \
       >>"$TOD_STATE_DIR/open-host.log" 2>&1 &)
+    # domande e avvisi delle app di Debian (zenity del container) come gli altri popup (share/tod-avvisi-host.py)
+    if [[ $(conf_get AVVISI_DEBIAN 1) == 1 ]] && have python3; then
+      (setsid python3 "$TOD_ROOT/share/tod-avvisi-host.py" </dev/null >>"$TOD_STATE_DIR/avvisi.log" 2>&1 &)
+    fi
     cx_sync_session_env || true
     cx_install_runner || true   # tod-run (e pkexec, se scelto) sempre aggiornati
     cx_sync_look || true

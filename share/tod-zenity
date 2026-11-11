@@ -1,0 +1,125 @@
+#!/usr/bin/python3
+# zenity - generato da Termux On DeX (share/tod-zenity, scritto nel container da cx_install_runner).
+#
+# Le app di Debian (PhotoCraft e le altre della suite Craft, con la libreria rfd) chiedono e avvisano con zenity, che
+# qui è GTK 4 + libadwaita: aspetto di GNOME. Le domande, gli avvisi e gli errori li mostra invece il desktop
+# (share/tod-avvisi-host.py) come tutti gli altri popup, in stile macOS e con l'icona dell'app. Tutto il resto (scelta
+# dei file, elenchi, moduli...) e ogni caso dubbio passano al zenity vero, con gli stessi argomenti.
+import json
+import os
+import socket
+import sys
+
+VERO = os.environ.get("TOD_ZENITY_VERO", "/usr/bin/zenity")
+TIPI = ("question", "info", "warning", "error")
+CON_VALORE = {"title", "text", "ok-label", "cancel-label", "extra-button", "icon", "icon-name", "window-icon",
+              "timeout", "width", "height", "attach", "display", "class", "name"}
+SENZA_VALORE = {"modal", "no-wrap", "no-markup", "default-cancel", "ellipsize", "question", "info", "warning", "error"}
+
+
+def leggi(argv):
+    """Gli argomenti di zenity → la richiesta per il desktop, o None (allora il zenity vero)."""
+    r = {"tipo": None, "livello": None, "extra": [], "markup": True}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if not a.startswith("--"):
+            return None
+        nome, uguale, valore = a[2:].partition("=")
+        if nome in CON_VALORE:
+            if not uguale:
+                i += 1
+                if i >= len(argv):
+                    return None
+                valore = argv[i]
+            if nome == "title":
+                r["titolo"] = valore
+            elif nome == "text":
+                r["testo"] = valore.replace("\\n", "\n").replace("\\t", "\t")
+            elif nome == "ok-label":
+                r["ok"] = valore
+            elif nome == "cancel-label":
+                r["annulla"] = valore
+            elif nome == "extra-button":
+                r["extra"].append(valore)
+            elif nome in ("icon", "icon-name", "window-icon") and "/" not in valore and valore not in TIPI:
+                r["icona"] = valore
+            elif nome == "timeout":
+                try:
+                    r["scadenza"] = max(1, int(valore))
+                except ValueError:
+                    return None
+        elif nome in SENZA_VALORE and not uguale:
+            if nome == "question":
+                r["tipo"] = "question"
+            elif nome in TIPI:
+                r["livello"] = nome   # rfd: --warning e poi --question per "Avvertimento: OK/Annulla?"
+                r["tipo"] = r["tipo"] or nome
+            elif nome == "no-markup":
+                r["markup"] = False
+            elif nome == "default-cancel":
+                r["predefinito_annulla"] = True
+        else:
+            return None   # un'opzione che non conosciamo: meglio il zenity vero
+        i += 1
+    if r["tipo"] not in TIPI:
+        return None
+    if r["tipo"] == "question" and r["livello"] == "question":
+        r["livello"] = None
+    return r
+
+
+def chi():
+    """Gli argomenti del programma che ci ha lanciati: il desktop ne trova nome e icona."""
+    try:
+        with open(f"/proc/{os.getppid()}/cmdline", "rb") as f:
+            return [x.decode(errors="replace") for x in f.read().split(b"\0") if x][:6]
+    except OSError:
+        return []
+
+
+def presa():
+    """Il servizio del desktop: TOD_AVVISI_SOCK (e allora solo quello: le prove non arrivano mai al desktop vero),
+    sennò nella /tmp di Termux (senza proot arriva come TMPDIR, in proot è la /tmp del container)."""
+    scelto = os.environ.get("TOD_AVVISI_SOCK")
+    for p in [scelto] if scelto else [os.path.join(os.environ.get("TMPDIR", "/tmp"), "tod-avvisi.sock"),
+                                      "/tmp/tod-avvisi.sock"]:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def chiedi(r):
+    p = presa()
+    if not p:
+        return None
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.settimeout(5)
+        s.connect(p)
+        s.sendall((json.dumps(dict(r, chi=chi())) + "\n").encode())
+        s.settimeout(None)   # l'utente può pensarci quanto vuole
+        risposta = s.makefile("r", encoding="utf-8", errors="replace").readline()
+        return json.loads(risposta) if risposta else None
+    except (OSError, ValueError):
+        return None
+    finally:
+        s.close()
+
+
+def principale(argv):
+    r = leggi(argv)
+    esito = chiedi(r) if r else None
+    if not esito:
+        try:
+            os.execv(VERO, [VERO] + argv)
+        except OSError as e:
+            print(f"zenity: {e}", file=sys.stderr)
+            return 255
+    sys.stdout.write(esito.get("stampa", ""))
+    sys.stdout.flush()
+    return int(esito.get("codice", 1))
+
+
+if __name__ == "__main__":
+    sys.exit(principale(sys.argv[1:]))

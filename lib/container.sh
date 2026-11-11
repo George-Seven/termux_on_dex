@@ -303,6 +303,14 @@ EOF
   # segue un /usr/local/... assoluto fuori dal container (fakechroot traduce solo il primo percorso)
   local root
   root=$(cx_rootfs) || return 0
+  # avvisi delle app di Debian come gli altri popup del desktop (11 novembre, Pietro: "niente grafica linux"): domande,
+  # avvisi ed errori di zenity (GTK 4 + libadwaita, stile GNOME) li mostra share/tod-avvisi-host.py in stile macOS; il
+  # resto va al zenity vero. Solo se nel container c'è python3 (sennò zenity non partirebbe più); AVVISI_DEBIAN=0 lo toglie
+  if [[ $(conf_get AVVISI_DEBIAN 1) == 1 && -x $root/usr/bin/python3 ]]; then
+    cx_write /usr/local/bin/zenity 755 <"$TOD_ROOT/share/tod-zenity"
+  elif grep -q 'generato da Termux On DeX' "$root/usr/local/bin/zenity" 2>/dev/null; then
+    rm -f "$root/usr/local/bin/zenity"
+  fi
   if [[ $(conf_get CX_PKEXEC 1) != 1 ]]; then
     if grep -q 'generato da Termux On DeX' "$root/usr/local/bin/pkexec" 2>/dev/null; then
       rm -f "$root/usr/local/bin/pkexec"

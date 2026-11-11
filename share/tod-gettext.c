@@ -1301,9 +1301,11 @@ static int tod_avviso_posto(void *win) {
     GTKFN(int, gtk_widget_get_mapped, void *)
     int pos = 0;
     f_g_object_get(win, "window-position", &pos, NULL);
-    if (pos != 0 /* GTK_WIN_POS_NONE */) return 0;
     void *genitore = f_gtk_window_get_transient_for(win);
-    f_gtk_window_set_position(win, genitore && f_gtk_widget_get_mapped(genitore) ? 4 /* CENTER_ON_PARENT */ : 1 /* CENTER */);
+    int madre = genitore && f_gtk_widget_get_mapped(genitore);
+    /* GtkDialog nasce "al centro della madre": senza madre sullo schermo GTK non la mette da nessuna parte */
+    if (pos != 0 /* NONE */ && !(pos == 4 /* CENTER_ON_PARENT */ && !madre)) return 0;
+    f_gtk_window_set_position(win, madre ? 4 /* CENTER_ON_PARENT */ : 1 /* CENTER */);
     return 1;
 }
 

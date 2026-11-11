@@ -5364,7 +5364,8 @@ test_avvisi_macos() { # 10 novembre, Pietro: "niente grafica linux, i popup di s
   has "rinomina e Nuova cartella restano come sono" '!tod_find_type(corpo, "GtkEntry")) forma = 2;' "$src"
   # forma: niente barra di Linux, icona dell'app in alto, testi centrati, pulsanti a pillola
   has "cornice di GTK (angoli tondi, ombra) al posto della barra di xfwm4" "f_gtk_window_set_titlebar(win, testa);" "$src"
-  has "sempre al centro della finestra da cui viene, o dello schermo" "genitore && f_gtk_widget_get_mapped(genitore) ? 4 /* CENTER_ON_PARENT */ : 1 /* CENTER */" "$src"
+  has "sempre al centro della finestra da cui viene, o dello schermo" "f_gtk_window_set_position(win, madre ? 4 /* CENTER_ON_PARENT */ : 1 /* CENTER */);" "$src"
+  has "anche i dialoghi nati \"al centro della madre\" senza madre" "!(pos == 4 /* CENTER_ON_PARENT */ && !madre)" "$src"
   has "si sposta trascinandola da un punto qualsiasi" "f_gtk_window_begin_move_drag(win, 1, (int)x, (int)y" "$src"
   has "l'icona dell'app prima di quella della finestra" "prova[n++] = f_gtk_window_get_default_icon_name();" "$src"
   has "triangolo sull'icona per avvertimenti ed errori" '(tipo == 1 || tipo == 3) && strncmp(nome, "dialog-", 7)' "$src"
@@ -5443,7 +5444,7 @@ aa = d.get_action_area()
 print("colonna", aa.get_orientation() == Gtk.Orientation.VERTICAL, etichette(aa))
 print("predefinito", classi(aa.get_children()[0]))
 print("di nuovo", avviso(d))
-print("posto", d.get_property("window-position").value_nick)
+print("posto", repr(d.get_property("window-position").value_nick))
 d2 = Gtk.MessageDialog(message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.NONE, text="Disinstallare?")
 d2.add_button("Annulla", 1)
 d2.add_button("Disinstalla", 2)
@@ -5486,6 +5487,17 @@ PYEOF
   mkdir -p "$d/loc"   # lingua italiana senza cataloghi: solo per le virgolette
   out=$(env -u LD_PRELOAD DISPLAY=":$x" HOME="$HOME" TOD_GETTEXT_LANG=it TOD_GETTEXT_DIR="$d/loc" \
     timeout 60 "$py" "$d/prova.py" "$d/ta.so" "$ROOT/share" 2>&1) || true
+  # zenity delle app di Debian → servizio del desktop → avviso vero (che si chiude da solo: --timeout → uscita 5)
+  local av zout
+  # (senza timeout: è un programma di Debian e il modulo di Termux nel suo LD_PRELOAD lo fermerebbe)
+  env DISPLAY=":$x" HOME="$HOME" TOD_AVVISI_SOCK="$d/av.sock" LD_PRELOAD="$d/ta.so" \
+    "$py" "$ROOT/share/tod-avvisi-host.py" >"$d/av.log" 2>&1 &
+  av=$!
+  for _ in $(seq 80); do [[ -S $d/av.sock ]] && break; sleep 0.1; done
+  zout=$(TOD_AVVISI_SOCK="$d/av.sock" TOD_ZENITY_VERO=/bin/false timeout 30 "$py" "$ROOT/share/tod-zenity" \
+    --warning --title Prova --text "Avviso di prova" --timeout 1; echo "uscita=$?")
+  kill "$av" 2>/dev/null || true
+  out+=$'\n'"zenity $zout"$'\n'"$(cat "$d/av.log")"
   kill "$pid" 2>/dev/null || true
   rm -rf "$d"
   has "messaggio trasformato" "messaggio 1 tod-avviso tod-avviso-messaggio" "$out"
@@ -5495,7 +5507,7 @@ PYEOF
   has "tre pulsanti: in colonna, il predefinito in cima" "colonna True ['Elimina', 'Salta', 'Annulla']" "$out"
   has "il predefinito resta tale (accento nel tema)" "predefinito default" "$out"
   has "una volta sola" "di nuovo 0" "$out"
-  has "senza finestra madre: al centro dello schermo" "posto center" "$out"
+  has "senza finestra madre sullo schermo: al centro dello schermo" "posto 'center'" "$out"
   has "virgolette diritte di Thunar → caporali, come il resto del desktop" "virgolette Eliminare per sempre «a.txt»?" "$out"
   has "due pulsanti affiancati, nell'ordine di prima" "affiancati True ['Annulla', 'Disinstalla']" "$out"
   has "la rinomina non si tocca" "rinomina 0 None" "$out"
@@ -5506,6 +5518,8 @@ PYEOF
   has "testa(): icona, titolo, testo, larga come un avviso" "testa ['tod-avviso-icona', 'tod-avviso-titolo', 'tod-avviso-testo'] True" "$out"
   has "finestrella nostra: pulsanti affiancati, il principale nell'accento" "libera pulsanti ['Annulla', 'Connetti']" "$out"
   has "con un altro tema niente" "altro tema 0 None" "$out"
+  has "zenity delle app di Debian: l'avviso lo mostra il desktop, la scadenza torna all'app" "zenity uscita=5" "$out"
+  has "e ha la forma di macOS" "tod-avviso: GtkMessageDialog come macOS (forma 1)" "$out"
 }
 
 test_avvisi_macos_tema() { # tema DeX OS: avvisi come macOS, chiaro e scuro, solo l'accento; ritocchi a notifiche e suggerimenti
@@ -5677,6 +5691,94 @@ CEOF
   if grep -q "dimensioni|salta" <<<"$out"; then echo "  (GLib non caricabile: salto le dimensioni)"; return 0; fi
   has "byte al singolare e plurale italiani, decimali con la virgola, anche nella forma lunga" \
     "dimensioni|8 byte|159,6 MiB|1,2 kB (1234 byte)" "$out"
+}
+
+test_avvisi_debian_zenity() { # 11 novembre: domande e avvisi delle app di Debian (zenity) come gli altri popup del desktop
+  command -v python3 >/dev/null || return 0
+  local z="$ROOT/share/tod-zenity" d="$WORK/zen_$$" out
+  mkdir -p "$d/app"
+  # come PhotoCraft (rfd): livello, titolo, testo, poi --question con le etichette; e le forme --opzione=valore
+  out=$(python3 - "$z" <<'PYEOF'
+import importlib.machinery as m, importlib.util as u, sys
+s = u.spec_from_loader("z", m.SourceFileLoader("z", sys.argv[1])); z = u.module_from_spec(s); s.loader.exec_module(z)
+r = z.leggi(["--warning", "--title", "PhotoCraft", "--text", "Salvare?", "--question", "--ok-label", "Salva",
+             "--cancel-label", "Cancel", "--extra-button", "Non salvare"])
+print("rfd", r["tipo"], r["livello"], r["titolo"], r["ok"], r["annulla"], r["extra"])
+r = z.leggi(["--info", "--text=Fatto\\nsotto", "--timeout=7", "--no-markup", "--icon-name=gimp"])
+print("info", r["tipo"], repr(r["testo"]), r["scadenza"], r["markup"], r["icona"])
+print("file", z.leggi(["--file-selection", "--title", "Apri"]))
+print("sconosciuta", z.leggi(["--question", "--text", "x", "--forms"]))
+print("solo-domanda", z.leggi(["--question", "--text", "x"])["livello"])
+PYEOF
+)
+  has "rfd: domanda con il livello d'avvertimento e le sue etichette" "rfd question warning PhotoCraft Salva Cancel ['Non salvare']" "$out"
+  has "forme --opzione=valore, \\n, scadenza, icona" "info info 'Fatto\nsotto' 7 False gimp" "$out"
+  has "la scelta dei file resta a zenity vero" "file None" "$out"
+  has "un'opzione sconosciuta: zenity vero" "sconosciuta None" "$out"
+  has "domanda semplice: niente triangolo" "solo-domanda None" "$out"
+  # il giro intero: un finto servizio del desktop risponde "Non salvare" → stampa e uscita 1 come zenity
+  printf '#!/bin/sh\necho "vero $*"\nexit 3\n' >"$d/zenity-vero"
+  chmod +x "$d/zenity-vero"
+  python3 - "$d/s.sock" "$d/richiesta" <<'PYEOF' &
+import json, os, socket, sys
+s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1)
+c, _ = s.accept()
+open(sys.argv[2], "w").write(c.makefile("r").readline())
+c.sendall(b'{"codice": 1, "stampa": "Non salvare\\n"}\n'); c.close()
+PYEOF
+  local srv=$!
+  for _ in $(seq 50); do [[ -S $d/s.sock ]] && break; sleep 0.1; done
+  out=$(TOD_AVVISI_SOCK="$d/s.sock" TOD_ZENITY_VERO="$d/zenity-vero" python3 "$z" --question --text "Salvare?" \
+    --extra-button "Non salvare"; echo "uscita=$?")
+  wait "$srv" || true
+  eq "la risposta del desktop arriva all'app come da zenity" "Non salvare
+uscita=1" "$out"
+  has "chi chiede: il servizio ne trova nome e icona" '"chi": [' "$(cat "$d/richiesta")"
+  out=$(TOD_AVVISI_SOCK="$d/niente.sock" TOD_ZENITY_VERO="$d/zenity-vero" python3 "$z" --question --text "x"; echo "uscita=$?")
+  eq "servizio spento: zenity vero, stessi argomenti" "vero --question --text x
+uscita=3" "$out"
+  # il servizio: nome e icona dall'app che chiede, testi e pulsanti come macOS
+  printf '[Desktop Entry]\nName=PhotoCraft\nExec=/x/bin/tod cx run -- photocraft %%U\nIcon=ai.storyteller.photocraft\n' \
+    >"$d/app/tod-cx-ai.storyteller.photocraft.desktop"
+  printf '[Desktop Entry]\nName=Altro\nExec=/x/bin/tod cx run -- altro\nIcon=altro\n[Desktop Action n]\nExec=photocraft\n' \
+    >"$d/app/tod-cx-altro.desktop"
+  out=$(LANGUAGE=it python3 - "$ROOT/share/tod-avvisi-host.py" "$d/app" <<'PYEOF'
+import importlib.util as u, sys
+s = u.spec_from_file_location("h", sys.argv[1]); h = u.module_from_spec(s); s.loader.exec_module(h)
+print("app", h.app_di(["/home/x/.local/share/tod-diretto/ld.so", "--argv0", "/usr/bin/photocraft", "/opt/pc/photocraft"], [sys.argv[2]]))
+print("nessuna", h.app_di(["/usr/bin/sconosciuto"], [sys.argv[2]]))
+print("titolo=app", h.testi("PhotoCraft", "Salvare le modifiche?\nAltrimenti vanno perse.", "PhotoCraft"))
+print("titolo vero", h.testi("Esporta", "Il file c'è già.", "PhotoCraft"))
+print("pulsanti", h.pulsanti({"tipo": "question", "ok": "Ok", "annulla": "Cancel", "extra": ["No"]}))
+print("predefinito annulla", h.pulsanti({"tipo": "question", "predefinito_annulla": True})[1])
+print("avviso", h.pulsanti({"tipo": "error"}))
+PYEOF
+)
+  has "nome e icona dell'app che chiede (anche senza proot: caricatore e --argv0)" "app ('PhotoCraft', 'ai.storyteller.photocraft')" "$out"
+  has "le azioni delle voci ([Desktop Action]) non contano" "nessuna (None, None)" "$out"
+  has "titolo = nome dell'app: in grassetto la prima riga del testo" "titolo=app ('Salvare le modifiche?', 'Altrimenti vanno perse.')" "$out"
+  has "un titolo vero resta il titolo" "titolo vero ('Esporta', \"Il file c'è già.\")" "$out"
+  has "le etichette inglesi di rfd nella lingua del desktop; l'OK a destra e predefinito" \
+    "pulsanti ([('No', ('extra', 'No')), ('Annulla', 'annulla'), ('OK', 'ok')], 'ok')" "$out"
+  has "--default-cancel" "predefinito annulla annulla" "$out"
+  has "errore: solo OK" "avviso ([('OK', 'ok')], 'ok')" "$out"
+  # nel container solo con python3 (sennò zenity non partirebbe più), via con AVVISI_DEBIAN=0; il servizio dall'hook
+  local zr="$WORK/zroot_$$"
+  mkdir -p "$zr/usr/bin" "$zr/usr/local/bin" "$zr/home/dex"
+  cx_rootfs() { echo "$zr"; }
+  cx_user() { echo dex; }
+  cx_install_runner
+  [[ ! -e $zr/usr/local/bin/zenity ]] || { echo "  ✘ zenity nostro senza python3 nel container"; return 1; }
+  printf '#!/bin/sh\n' >"$zr/usr/bin/python3"
+  chmod +x "$zr/usr/bin/python3"
+  cx_install_runner
+  has "zenity nostro nel container" "generato da Termux On DeX (share/tod-zenity" "$(cat "$zr/usr/local/bin/zenity")"
+  [[ -x $zr/usr/local/bin/zenity ]] || { echo "  ✘ zenity nostro non eseguibile"; return 1; }
+  conf_set AVVISI_DEBIAN 0
+  cx_install_runner
+  [[ ! -e $zr/usr/local/bin/zenity ]] || { echo "  ✘ AVVISI_DEBIAN=0: il zenity nostro doveva sparire"; return 1; }
+  has "il servizio parte con la sessione" 'share/tod-avvisi-host.py" </dev/null >>"$TOD_STATE_DIR/avvisi.log"' \
+    "$(sed -n '/^session_hook() {/,/^}/p' "$ROOT/lib/session.sh")"
 }
 
 # =============================================================================
