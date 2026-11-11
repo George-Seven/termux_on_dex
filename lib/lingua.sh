@@ -15,10 +15,11 @@ LINGUA_DEB_PKGS="xfce4-session xfce4-settings xfdesktop4 xfdesktop4-data xfwm4 t
   libexo-common libexo-2-0 exo-utils libxfce4ui-common libxfce4util-common libgarcon-common xfce4-terminal
   mousepad ristretto xfce4-taskmanager xfce4-screenshooter xfce4-notifyd xfce4-power-manager-data
   xfce4-appfinder xarchiver tumbler-common libgtk-3-common libgtk-4-common libglib2.0-data file-roller
-  gcr gnome-keyring"
+  gcr gnome-keyring libsecret-common libc-l10n"
 # cataloghi che una traduzione completa deve avere: se ne manca uno (aggiunto dopo, come gcr e gnome-keyring per la
-# richiesta della password del portachiavi, 10 novembre) lingua_ripara riscarica i cataloghi da sola
-LINGUA_RICHIESTI="thunar gcr gnome-keyring"
+# richiesta della password del portachiavi, 10 novembre, o libc per i messaggi di errore, 11 novembre) lingua_ripara
+# riscarica i cataloghi da sola
+LINGUA_RICHIESTI="thunar gcr gnome-keyring libc"
 
 # app di Termux con i cataloghi in pacchetti Debian a parte (programma:pacchetti): si scaricano solo se
 # l'app c'è. GIMP di Termux è compilato senza traduzioni: così si traducono le sue librerie e i plug-in (26 ottobre)

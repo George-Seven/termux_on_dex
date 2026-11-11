@@ -528,13 +528,15 @@ def finestra(scelto=None):
             box = d.get_content_area()
             box.set_spacing(10)
             box.set_border_width(18)
-            box.pack_start(Gtk.Label(label=T("L'indirizzo dello scanner nella tua rete (lo trovi nel menu della stampante, "
-                                             "alla voce Wi-Fi o Rete):", "The scanner's address on your network (see the "
-                                             "printer's menu, under Wi-Fi or Network):"), xalign=0, wrap=True,
-                                     max_width_chars=48), False, False, 0)
+            # come un avviso di macOS (11 novembre): icona in alto, titolo, testo, la casella, pulsanti a pillola
+            box.pack_start(tod_avviso.testa("scanner", T("Aggiungi uno scanner", "Add a scanner"),
+                                            T("L'indirizzo dello scanner nella tua rete (lo trovi nel menu della "
+                                              "stampante, alla voce Wi-Fi o Rete):", "The scanner's address on your "
+                                              "network (see the printer's menu, under Wi-Fi or Network):")),
+                           False, False, 0)
             voce = Gtk.Entry(placeholder_text="192.168.1.50", activates_default=True)
             box.pack_start(voce, False, False, 0)
-            msg = Gtk.Label(xalign=0, wrap=True, max_width_chars=48)
+            msg = tod_avviso.etichetta("")
             box.pack_start(msg, False, False, 0)
             vivo = [True]
 
@@ -570,6 +572,7 @@ def finestra(scelto=None):
                     GLib.idle_add(fatto, nuovo, err)
                 threading.Thread(target=lavoro, daemon=True).start()
             d.connect("response", risposta)
+            tod_avviso.come_macos(d, libero=True)
             d.show_all()
 
         def chiudi(self, *_):

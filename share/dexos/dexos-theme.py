@@ -32,7 +32,7 @@ NAMES = {"light": "DeX-OS", "dark": "DeX-OS-Dark"}
 FLUENT_HUE = 214.0          # il blu di Fluent (#1A73E8, #3281EA, #1567d3...)
 FLUENT_SL = (0.818, 0.506)  # saturazione e luminosità di #1A73E8
 DEFAULT_ACCENT = "#0067c0"
-VERSION = 13   # nel nome dei temi: cambiando il disegno si rifanno da soli
+VERSION = 14   # nel nome dei temi: cambiando il disegno si rifanno da soli
 
 
 # --- colori ---------------------------------------------------------------------------------
@@ -430,11 +430,12 @@ scale highlight, scale trough highlight, progressbar progress, levelbar block.fi
 AVVISI_CSS = {
     "light": dict(fondo="#f2f2f5", scheda="#ffffff", testo="#1d1d1f", tenue="#6e6e73", bottone="#ffffff",
                   bottone_su="#f7f7f9", bottone_giu="#e5e5ea", bordo="rgba(0, 0, 0, 0.10)", ombra="rgba(0, 0, 0, 0.30)",
-                  campo="#ffffff", linea="rgba(0, 0, 0, 0.14)", traccia="rgba(0, 0, 0, 0.08)", traccia_su="rgba(0, 0, 0, 0.14)"),
+                  campo="#ffffff", linea="rgba(0, 0, 0, 0.14)", traccia="rgba(0, 0, 0, 0.08)", traccia_su="rgba(0, 0, 0, 0.14)",
+                  errore="#c42b1c"),
     "dark": dict(fondo="#242428", scheda="#2e2e33", testo="#f5f5f7", tenue="#a1a1a6", bottone="#3a3a40",
                  bottone_su="#44444a", bottone_giu="#4e4e55", bordo="rgba(255, 255, 255, 0.12)", ombra="rgba(0, 0, 0, 0.60)",
                  campo="#1c1c1f", linea="rgba(255, 255, 255, 0.14)", traccia="rgba(255, 255, 255, 0.12)",
-                 traccia_su="rgba(255, 255, 255, 0.20)"),
+                 traccia_su="rgba(255, 255, 255, 0.20)", errore="#ff6b5e"),
 }
 AVVISI = """
 /* --- DeX OS: avvisi e finestrelle di sistema come macOS (classe tod-avviso, da tod-gettext.c) --- */
@@ -451,7 +452,10 @@ AVVISI = """
 .tod-avviso.csd label.tod-avviso-titolo { font-weight: 700; font-size: 10.5pt; color: {testo}; }
 .tod-avviso.csd label.tod-avviso-testo { font-size: 9pt; color: {testo}; }
 .tod-avviso.csd label.tod-avviso-tenue { font-size: 8.5pt; color: {tenue}; }
+.tod-avviso.csd label.tod-avviso-errore { font-size: 9pt; color: {errore}; }
 .tod-avviso.csd .tod-scheda { background-color: {scheda}; border-radius: 12px; padding: 8px 10px; }
+.tod-avviso.csd spinner { color: {accento}; }
+.tod-avviso.csd combobox button.combo, .tod-avviso.csd spinbutton { border-radius: 8px; }
 .tod-avviso.csd .tod-avviso-pulsanti button, .tod-avviso.csd .tod-avviso-pulsanti button:first-child,
 .tod-avviso.csd .tod-avviso-pulsanti button:last-child, .tod-avviso.csd .tod-avviso-pulsanti button:only-child {
   min-height: 24px; padding: 3px 14px; margin: 0; border-radius: 999px; border: none; background-image: none;
@@ -480,6 +484,21 @@ AVVISI = """
 .tod-avviso.csd entry:focus { border-color: {accento}; box-shadow: 0 0 0 3px alpha({accento}, 0.30); }
 .tod-avviso.csd progressbar trough { min-height: 6px; border-radius: 3px; background-color: {traccia}; border: none; }
 .tod-avviso.csd progressbar progress { min-height: 6px; border-radius: 3px; background-color: {accento}; border: none; }
+/* ripiego per le finestrelle senza tod-gettext.c (app del container, TOD_AVVISI_CLASSICI): la barra resta, ma
+   testi centrati, fondo del pannello e pulsanti a pillola distanziati, il predefinito nell'accento */
+messagedialog:not(.tod-avviso), messagedialog:not(.tod-avviso).background { background-color: {fondo}; }
+messagedialog:not(.tod-avviso) .dialog-action-area { padding: 0 12px 12px 12px; border: none; }
+messagedialog:not(.tod-avviso) .dialog-action-area button, messagedialog:not(.tod-avviso) .dialog-action-area button:first-child,
+messagedialog:not(.tod-avviso) .dialog-action-area button:last-child {
+  margin: 0 4px; min-height: 24px; padding: 3px 14px; border-radius: 999px; border: none; background-image: none;
+  background-color: {bottone}; color: {testo}; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16), inset 0 0 0 1px {bordo};
+}
+messagedialog:not(.tod-avviso) .dialog-action-area button:hover { background-color: {bottone_su}; }
+messagedialog:not(.tod-avviso) .dialog-action-area button.default, messagedialog:not(.tod-avviso) .dialog-action-area button.suggested-action {
+  background-color: {accento}; color: #ffffff;
+}
+messagedialog:not(.tod-avviso) .dialog-action-area button.default label,
+messagedialog:not(.tod-avviso) .dialog-action-area button.suggested-action label { color: #ffffff; }
 /* la copia in corso di Thunar (ThunarProgressDialog): una scheda come quella del Finder */
 .tod-avviso-avanzamento.csd .tod-avanzamento-vista { padding: 14px 16px 12px 16px; }
 .tod-avviso-avanzamento.csd .tod-avanzamento-vista label.tod-avviso-titolo { font-size: 10pt; font-weight: 600; }
@@ -547,7 +566,7 @@ def build(accent, scale, out):
     # qualcuna recente, così tornare al colore di prima resta immediato
     keep = set(want.values())
     old = sorted((d for d in os.listdir(out) if d.startswith("DeX-OS") and d not in keep),
-                 key=lambda d: os.path.getmtime(os.path.join(out, d)), reverse=True)
+                 key=lambda d: os.lstat(os.path.join(out, d)).st_mtime, reverse=True)   # lstat: anche un collegamento rotto
     for d in old[6:] + [d for d in old if d.endswith(".nuovo") or d in ("DeX-OS", "DeX-OS-Dark")]:
         shutil.rmtree(os.path.join(out, d), ignore_errors=True)
     return [want[k] for k in ("light", "dark", "wm-light", "wm-dark")]

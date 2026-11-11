@@ -381,6 +381,102 @@ const char *g_dpgettext2(const char *domain, const char *context, const char *ms
     return get_g_dpgettext2() ? real_g_dpgettext2(domain, context, msgid) : msgid;
 }
 
+/* ------------------------------------------------- frasi di GLib e degli errori di sistema (11 novembre)
+ * Pietro: "sistema tutto". Le frasi scritte da GIO ("Error opening file …: Permission denied", "Dimensione: 8 bytes")
+ * restavano in inglese: dentro libglib le traduzioni non passano da LD_PRELOAD (GLib è collegata con
+ * -Bsymbolic-functions), ma GIO e i programmi chiamano da fuori glib_gettext, glib_pgettext, g_strerror e
+ * g_format_size: si traducono qui, con i cataloghi glib20 e libc (libc-l10n di Debian: Bionic scrive gli errori solo
+ * in inglese, con le stesse parole di glibc). */
+const char *glib_gettext(const char *str) {
+    static const char *(*real)(const char *);
+    const char *t = translate("glib20", str);
+    if (t) return t;
+    if (!real) real = (const char *(*)(const char *))tod_next("glib_gettext");
+    return real ? real(str) : str;
+}
+
+const char *glib_pgettext(const char *msgctxtid, size_t msgidoffset) {
+    return g_dpgettext("glib20", msgctxtid, msgidoffset);
+}
+
+const char *g_strerror(int errnum) {
+    static const char *(*real)(int);
+    if (!real) real = (const char *(*)(int))tod_next("g_strerror");
+    const char *s = real ? real(errnum) : strerror(errnum);
+    const char *t = s ? translate("libc", s) : NULL;
+    return t ? t : s;
+}
+
+/* lingue che scrivono i decimali con la virgola ("159,6 MB") */
+static int tod_virgola(void) {
+    static const char *const virgola[] = {"it", "de", "fr", "es", "pt", "nl", "pl", "ru", "cs", "sk", "sv", "da", "nb",
+                                          "fi", "tr", "el", "ro", "hu", "uk", "ca", "hr", "sl", "bg", "sr", "lt", "lv",
+                                          "et", "id", "vi", NULL};
+    const char *l = getenv("TOD_GETTEXT_LANG");
+    for (int i = 0; l && virgola[i]; i++)
+        if (!strncmp(l, virgola[i], 2)) return 1;
+    return 0;
+}
+
+/* "%s byte" del catalogo glib20 (con il plurale giusto) riempito con il numero; 0 se non c'è */
+static int tod_byte(char *out, size_t max, uint64_t n, const char *numero) {
+    const char *tr = translate_plural("glib20", "%s byte", (unsigned long)n);
+    const char *p = tr ? strstr(tr, "%s") : NULL;
+    if (!p) return 0;
+    snprintf(out, max, "%.*s%s%s", (int)(p - tr), tr, numero, p + 2);
+    return 1;
+}
+
+/* "8 bytes" → "8 byte", "159.6 MiB" → "159,6 MiB", "1.2 kB (1234 bytes)" → "1,2 kB (1234 byte)" */
+char *g_format_size_full(uint64_t size, int flags) {
+    static char *(*real)(uint64_t, int);
+    static void *(*gmalloc)(size_t);
+    static void (*gfree)(void *);
+    if (!real) real = (char *(*)(uint64_t, int))tod_next("g_format_size_full");
+    if (!gmalloc) gmalloc = (void *(*)(size_t))tod_next("g_malloc");
+    if (!gfree) gfree = (void (*)(void *))tod_next("g_free");
+    char *r = real ? real(size, flags) : NULL;
+    const char *lang = getenv("TOD_GETTEXT_LANG");
+    if (!r || !gmalloc || !gfree || !lang || !*lang || !strncmp(lang, "en", 2)) return r;
+    char num[64], out[192], dentro[64];
+    /* tra numero e unità GLib mette uno spazio normale ("8 bytes") o quello che non va a capo ("159.6\u00a0MiB") */
+    const char *sp = strchr(r, ' '), *nb = strstr(r, "\xc2\xa0");
+    size_t lsep = 1;
+    if (nb && (!sp || nb < sp)) { sp = nb; lsep = 2; }
+    if (!sp || (size_t)(sp - r) >= sizeof num) return r;
+    memcpy(num, r, (size_t)(sp - r));
+    num[sp - r] = '\0';
+    if (tod_virgola()) { char *p = strchr(num, '.'); if (p) *p = ','; }
+    const char *unita = sp + lsep, *aperta = strstr(unita, " (");
+    size_t lu = strlen(unita);
+    if (!strcmp(unita, "bytes") || !strcmp(unita, "byte")) {
+        if (!tod_byte(out, sizeof out, size, num)) snprintf(out, sizeof out, "%s %s", num, unita);
+    } else if (aperta && lu > 7 && (!strcmp(unita + lu - 7, " bytes)") || !strcmp(unita + lu - 6, " byte)"))) {
+        /* forma lunga: "1.2 kB (1234 bytes)" */
+        char breve[96];
+        size_t lb = (size_t)(aperta - unita), ld = strcspn(aperta + 2, " ");
+        if (lb >= 64 || ld >= sizeof dentro) return r;
+        snprintf(breve, sizeof breve, "%s%.*s%.*s", num, (int)lsep, sp, (int)lb, unita);
+        memcpy(dentro, aperta + 2, ld);
+        dentro[ld] = '\0';
+        char tra[96];   /* GLib fa "%s (%s)" con dentro il "%s byte" del catalogo */
+        if (!tod_byte(tra, sizeof tra, size, dentro)) return r;
+        snprintf(out, sizeof out, "%s (%s)", breve, tra);
+    } else {
+        snprintf(out, sizeof out, "%s%.*s%s", num, (int)lsep, sp, unita);
+    }
+    if (!strcmp(out, r)) return r;
+    char *nuovo = gmalloc(strlen(out) + 1);
+    if (!nuovo) return r;
+    strcpy(nuovo, out);
+    gfree(r);
+    return nuovo;
+}
+
+char *g_format_size(uint64_t size) {
+    return g_format_size_full(size, 0);
+}
+
 /* ------------------------------------------------------------ nome utente
  * Su Android l'utente si chiama u0_a715 e la sua home è quella di Termux. Nella
  * sessione grafica TOD_USER, TOD_USER_HOME e TOD_USER_FULLNAME danno un utente vero
@@ -1587,10 +1683,20 @@ static char *tod_traduci_testo(const char *dom, const char *testo) {
             if (v1 && (!v || v1 < v)) { v = v1; salta = 4; }
             if (!v) continue;
             size_t arg = lt - pre - suf, lv = strlen(x->val);
+            /* anche il nome dentro la frase, se è uno dei soliti ("Default keyring" di libsecret) */
+            char nome[256];
+            const char *ins = testo + pre;
+            if (arg < sizeof nome) {
+                memcpy(nome, testo + pre, arg);
+                nome[arg] = '\0';
+                const char *tn = translate("libsecret", nome);
+                if (!tn) { const Entry *en = cat_find(c, nome); tn = en ? en->val : NULL; }
+                if (tn) { ins = tn; arg = strlen(tn); }
+            }
             char *out = malloc(lv + arg + 1);
             if (!out) return NULL;
             memcpy(out, x->val, (size_t)(v - x->val));
-            memcpy(out + (v - x->val), testo + pre, arg);
+            memcpy(out + (v - x->val), ins, arg);
             strcpy(out + (v - x->val) + arg, v + salta);
             return out;
         }
@@ -1722,6 +1828,28 @@ int tod_avviso(void *w) {
     } else if (forma == 2) tod_avviso_finestrella(w, 2);
     else { tod_classe(w, "tod-avviso-avanzamento"); tod_avanzamento(w); }
     fprintf(stderr, "tod-avviso: %s come macOS (forma %d)\n", t, forma);
+    return 1;
+}
+
+/* Le finestrelle fatte da noi (app Python: password della Rete, Dischi, Scanner): il contenuto lo dispongono loro come
+ * macOS (share/tod_avviso.py: testa(), etichetta()); qui la cornice, i pulsanti e i margini, come per le altre. */
+int tod_avviso_libero(void *w) {
+    GTKFN(int, gtk_widget_get_realized, void *)
+    GTKFN(void *, g_object_get_data, void *, const char *)
+    GTKFN(void, g_object_set_data, void *, const char *, void *)
+    GTKFN(int, gtk_widget_is_toplevel, void *)
+    GTKFN(void *, gtk_dialog_get_action_area, void *)
+    if (!w || !tod_is_a(w, "gtk_window_get_type") || !f_gtk_widget_is_toplevel(w)) return 0;
+    if (f_g_object_get_data(w, TOD_AVVISO_FATTO) || f_gtk_widget_get_realized(w)) return 0;
+    f_g_object_set_data(w, TOD_AVVISO_FATTO, (void *)1);
+    if (!tod_avvisi_attivi() || !tod_avviso_cornice(w)) return 0;
+    if (tod_is_a(w, "gtk_dialog_get_type")) {
+        double sc = tod_avviso_scala(w);
+        tod_avviso_pulsanti(f_gtk_dialog_get_action_area(w), sc);
+        tod_avviso_misure(w, NULL, sc, 0);
+    }
+    tod_classe(w, "tod-avviso-finestrella");
+    fprintf(stderr, "tod-avviso: %s come macOS (finestrella nostra)\n", tod_type_name(w));
     return 1;
 }
 

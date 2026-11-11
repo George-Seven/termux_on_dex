@@ -457,53 +457,52 @@ class Servizio:
 # --- la finestra della password (GTK, nel filo principale) ------------------------------------------------------
 
 def finestra_password(Gtk, nome, utente, dominio, errore):
+    """Come la richiesta di password di macOS (11 novembre, Pietro: "sistema tutto"): icona in alto, testi centrati,
+    caselle con il nome dentro, pulsanti a pillola (share/tod_avviso.py; forma e cornice da tod-gettext.c)."""
+    share = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # share/: tod_avviso
+    if share not in sys.path:
+        sys.path.insert(1, share)
+    import tod_avviso
     d = Gtk.Dialog(title=T("Cartelle condivise", "Shared folders"), modal=True)
     d.set_keep_above(True)
     d.set_position(Gtk.WindowPosition.CENTER_ALWAYS)
-    d.set_default_size(420, -1)
     d.set_icon_name("network-server")
     d.add_button(T("Annulla", "Cancel"), Gtk.ResponseType.CANCEL)
     b = d.add_button(T("Connetti", "Connect"), Gtk.ResponseType.OK)
     b.get_style_context().add_class("suggested-action")
     d.set_default_response(Gtk.ResponseType.OK)
     box = d.get_content_area()
-    box.set_spacing(10)
+    box.set_spacing(8)
     box.set_border_width(18)
-    testa = Gtk.Box(spacing=12)
-    img = Gtk.Image.new_from_icon_name("network-server", Gtk.IconSize.DIALOG)
-    testa.pack_start(img, False, False, 0)
-    t = Gtk.Label(xalign=0, wrap=True)
-    t.set_markup(T(f"<b>Connetti a «{nome}»</b>\nIl computer chiede nome utente e password per aprire le sue cartelle condivise.",
-                   f"<b>Connect to “{nome}”</b>\nThis computer asks for a user name and password to open its shared folders."))
-    testa.pack_start(t, True, True, 0)
-    box.pack_start(testa, False, False, 0)
+    box.pack_start(tod_avviso.testa("network-server", T(f"Connetti a «{nome}»", f"Connect to “{nome}”"),
+                                    T("Il computer chiede nome utente e password per aprire le sue cartelle condivise.",
+                                      "This computer asks for a user name and password to open its shared folders.")),
+                   False, False, 0)
     if errore:
-        e = Gtk.Label(xalign=0, wrap=True)
-        e.set_markup("<span foreground='#c42b1c'>" + T("Nome utente o password non accettati: riprova.",
-                                                      "User name or password not accepted: try again.") + "</span>")
-        box.pack_start(e, False, False, 0)
-    g = Gtk.Grid(column_spacing=10, row_spacing=8)
+        box.pack_start(tod_avviso.etichetta(T("Nome utente o password non accettati: riprova.",
+                                              "User name or password not accepted: try again."), "tod-avviso-errore"),
+                       False, False, 0)
     voci = {}
-    for i, (k, etichetta, valore, nascosto) in enumerate((
+    for k, etichetta, valore, nascosto in (
             ("utente", T("Nome utente", "User name"), utente, False),
             ("password", T("Password", "Password"), "", True),
-            ("dominio", T("Dominio (facoltativo)", "Domain (optional)"), dominio, False))):
-        g.attach(Gtk.Label(label=etichetta, xalign=1), 0, i, 1, 1)
-        en = Gtk.Entry(text=valore, visibility=not nascosto, activates_default=True, hexpand=True)
-        g.attach(en, 1, i, 1, 1)
+            ("dominio", T("Dominio (facoltativo)", "Domain (optional)"), dominio, False)):
+        en = Gtk.Entry(text=valore, visibility=not nascosto, activates_default=True, hexpand=True,
+                       placeholder_text=etichetta)
+        box.pack_start(en, False, False, 0)
         voci[k] = en
-    box.pack_start(g, False, False, 0)
-    nota = Gtk.Label(xalign=0, wrap=True, label=T("Su Windows: il nome dell'account del PC, o l'email dell'account Microsoft.",
-                                                  "On Windows: the PC account name, or the Microsoft account email."))
-    nota.get_style_context().add_class("dim-label")
-    box.pack_start(nota, False, False, 0)
-    ricorda = Gtk.CheckButton(label=T("Ricorda la password", "Remember the password"), active=True)
+    box.pack_start(tod_avviso.etichetta(T("Su Windows: il nome dell'account del PC, o l'email dell'account Microsoft.",
+                                          "On Windows: the PC account name, or the Microsoft account email."),
+                                        "tod-avviso-tenue"), False, False, 0)
+    ricorda = Gtk.CheckButton(label=T("Ricorda la password", "Remember the password"), active=True,
+                              halign=Gtk.Align.CENTER)
     box.pack_start(ricorda, False, False, 0)
 
     def pieno(*_):   # "Connetti" solo con un nome utente: un Invio a vuoto non chiude la finestra
         d.set_response_sensitive(Gtk.ResponseType.OK, bool(voci["utente"].get_text().strip()))
     voci["utente"].connect("changed", pieno)
     pieno()
+    tod_avviso.come_macos(d, libero=True)
     d.show_all()
     (voci["password"] if utente else voci["utente"]).grab_focus()
     r = d.run()

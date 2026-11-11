@@ -3097,7 +3097,7 @@ EOF
 import importlib.util as u
 s = u.spec_from_file_location('dx', '$ROOT/share/dexos/dexos-theme.py'); m = u.module_from_spec(s); s.loader.exec_module(m)
 print(' '.join(m.names('#8A5CF5', 1.125).values()), '|', ' '.join(m.names('#0067c0', 1.0).values()))")
-  eq "nomi" "DeX-OS-8a5cf5-v13 DeX-OS-Dark-8a5cf5-v13 DeX-OS-WM-1.125-v13 DeX-OS-WM-Dark-1.125-v13 | DeX-OS-0067c0-v13 DeX-OS-Dark-0067c0-v13 DeX-OS-WM-1-v13 DeX-OS-WM-Dark-1-v13" "$nm"
+  eq "nomi" "DeX-OS-8a5cf5-v14 DeX-OS-Dark-8a5cf5-v14 DeX-OS-WM-1.125-v14 DeX-OS-WM-Dark-1.125-v14 | DeX-OS-0067c0-v14 DeX-OS-Dark-0067c0-v14 DeX-OS-WM-1-v14 DeX-OS-WM-Dark-1-v14" "$nm"
   # menu, popup e suggerimenti nello stile di DeX OS: fondi pieni (niente vetro), voce attiva nell'accento
   local menu
   menu=$(python3 -c "
@@ -5379,9 +5379,15 @@ test_avvisi_macos() { # 10 novembre, Pietro: "niente grafica linux, i popup di s
   for f in "$ROOT"/share/*.py "$ROOT"/share/*/*.py; do
     n=$(grep -c 'Gtk\.MessageDialog(' "$f" || true)
     if ((n == 0)); then continue; fi
-    m=$(grep -c 'tod_avviso\.come_macos(' "$f" || true)
+    m=$(grep 'tod_avviso\.come_macos(' "$f" | grep -vc 'libero=True' || true)   # le libere sono le Gtk.Dialog nostre
     eq "avvisi come macOS in ${f#"$ROOT"/}" "$n" "$m"
   done
+  # le finestrelle fatte da noi: contenuto disposto come macOS (testa), cornice e pulsanti da tod_avviso_libero
+  has "finestrelle nostre: cornice, pulsanti e margini" "int tod_avviso_libero(void *w) {" "$src"
+  eq "Dischi: formatta, rinomina, lavoro in corso" 3 "$(grep -c 'tod_avviso.come_macos(dl, libero=True)' "$ROOT/share/tod-dischi.py")"
+  eq "Rete: la password" 1 "$(grep -c 'tod_avviso.come_macos(d, libero=True)' "$ROOT/share/rete/tod-rete.py")"
+  eq "Scanner: aggiungi per indirizzo" 1 "$(grep -c 'tod_avviso.come_macos(d, libero=True)' "$ROOT/share/stampa/tod-scanner.py")"
+  has "Rete: il nome dentro le caselle (come macOS)" 'placeholder_text=etichetta)' "$(cat "$ROOT/share/rete/tod-rete.py")"
   if command -v python3 >/dev/null; then
     eq "fuori dal desktop (modulo non caricato) non fa niente" True \
       "$(LD_PRELOAD= python3 -c "import sys; sys.path.insert(0, '$ROOT/share'); import tod_avviso; o = object(); print(tod_avviso.come_macos(o) is o)")"
@@ -5458,11 +5464,23 @@ s.get_content_area().show_all()
 print("sostituisci", avviso(s), type(s.get_content_area().get_children()[0]).__name__)
 print("scheda", sum("tod-scheda" in classi(w) for w in g.get_children()))
 print("principale", etichette(s.get_action_area())[0], classi(s.get_action_area().get_children()[0]))
+sys.path.insert(0, sys.argv[2])
+import tod_avviso
+lib = ctypes.CDLL(sys.argv[1]).tod_avviso_libero
+lib.argtypes, lib.restype = [ctypes.c_void_p], ctypes.c_int
+p = Gtk.Dialog()   # una finestrella nostra (come la password della Rete)
+p.add_button("Annulla", 1)
+p.add_button("Connetti", 2).get_style_context().add_class("suggested-action")
+t = tod_avviso.testa("network-server", "Connetti a «PC»", "Nome utente e password.")
+p.get_content_area().add(t)
+print("libera", lib(cap(p.__gpointer__, None)), classi(p), classi(p.get_titlebar()))
+print("testa", [classi(w) for w in t.get_children()], t.get_size_request()[0] >= 268)
+print("libera pulsanti", etichette(p.get_action_area()), classi(p.get_action_area().get_children()[1]))
 Gtk.Settings.get_default().set_property("gtk-theme-name", "Adwaita")
 a = Gtk.MessageDialog(text="Altro tema")
 print("altro tema", avviso(a), a.get_titlebar())
 PYEOF
-  out=$(env -u LD_PRELOAD DISPLAY=":$x" HOME="$HOME" timeout 60 "$py" "$d/prova.py" "$d/ta.so" 2>&1) || true
+  out=$(env -u LD_PRELOAD DISPLAY=":$x" HOME="$HOME" timeout 60 "$py" "$d/prova.py" "$d/ta.so" "$ROOT/share" 2>&1) || true
   kill "$pid" 2>/dev/null || true
   rm -rf "$d"
   has "messaggio trasformato" "messaggio 1 tod-avviso tod-avviso-messaggio" "$out"
@@ -5477,6 +5495,9 @@ PYEOF
   has "Sostituire il file?: l'icona in alto" "sostituisci 1 Overlay" "$out"
   has "il file in una scheda" "scheda 1" "$out"
   has "senza predefinito: quello a destra, in cima e nell'accento" "principale Sostituisci tod-predefinito" "$out"
+  has "finestrella nostra: cornice e classi" "libera 1 tod-avviso tod-avviso-finestrella tod-avviso-testa" "$out"
+  has "testa(): icona, titolo, testo, larga come un avviso" "testa ['tod-avviso-icona', 'tod-avviso-titolo', 'tod-avviso-testo'] True" "$out"
+  has "finestrella nostra: pulsanti affiancati, il principale nell'accento" "libera pulsanti ['Annulla', 'Connetti']" "$out"
   has "con un altro tema niente" "altro tema 0 None" "$out"
 }
 
@@ -5512,6 +5533,21 @@ PYEOF
   has "notifiche: al passaggio appena più scure, niente bordo colorato" "#XfceNotifyWindow:hover { background-color: #f6f6f8; }" "$out"
   has "suggerimenti più compatti" "tooltip.csd decoration { border-radius: 7px;" "$out"
   has "voci di menu" "padding: 4px 10px; min-height: 18px; border-radius: 6px;" "$out"
+  has "testo d'errore delle finestrelle nostre" "label.tod-avviso-errore { font-size: 9pt; color: #c42b1c; }" "$chiaro"
+  has "ripiego senza il modulo (app del container): pulsanti a pillola" "messagedialog:not(.tod-avviso) .dialog-action-area button," "$chiaro"
+  # un collegamento rotto tra i temi vecchi non deve fermare il generatore (11 novembre, nella cartella di prova)
+  local temi="$WORK/temi_$$"
+  mkdir -p "$temi"
+  eq "temi già fatti, collegamento rotto accanto: nessun errore" ok "$(python3 - "$ROOT/share/dexos/dexos-theme.py" "$temi" <<'PYEOF'
+import importlib.util as u, os, sys
+s = u.spec_from_file_location("dx", sys.argv[1]); m = u.module_from_spec(s); s.loader.exec_module(m)
+for n in m.names("#8a5cf5", 1.0).values():
+    os.makedirs(os.path.join(sys.argv[2], n)); open(os.path.join(sys.argv[2], n, "index.theme"), "w").close()
+os.symlink("/non/esiste", os.path.join(sys.argv[2], "DeX-OS-0067c0-v12"))
+m.build("#8a5cf5", 1.0, sys.argv[2])
+print("ok")
+PYEOF
+)"
 }
 
 test_puntini_come_macos() { # i tre puntini dei cataloghi diventano "…" (stessi 3 byte: sul posto), quattro restano
@@ -5553,6 +5589,7 @@ CEOF
 
 test_lingua_portachiavi() { # la password del portachiavi in italiano: i cataloghi di gcr e gnome-keyring
   has "cataloghi di gcr e del portachiavi" "gcr gnome-keyring" "$LINGUA_DEB_PKGS"
+  has "nome del portachiavi (libsecret) ed errori di sistema (libc)" "libsecret-common libc-l10n" "$LINGUA_DEB_PKGS"
   conf_set LINGUA it
   lingua_setup() { echo chiamata >>"$HOME/ripara"; }
   touch "$LINGUA_SO"
@@ -5565,7 +5602,65 @@ test_lingua_portachiavi() { # la password del portachiavi in italiano: i catalog
   touch "$LINGUA_DIR/it/LC_MESSAGES/gcr.mo" "$LINGUA_DIR/it/LC_MESSAGES/gnome-keyring.mo"
   lingua_ripara
   wait
+  eq "manca ancora libc (errori di sistema): si riscarica" chiamata "$(cat "$HOME/ripara" 2>/dev/null)"
+  rm -f "$HOME/ripara" "$TOD_STATE_DIR/lingua-tentativo"
+  touch "$LINGUA_DIR/it/LC_MESSAGES/libc.mo"
+  lingua_ripara
+  wait
   eq "completa: niente da fare" "" "$(cat "$HOME/ripara" 2>/dev/null)"
+}
+
+test_glib_in_italiano() { # 11 novembre: le frasi di GIO ("Error opening file…: Permission denied", "8 bytes") in italiano
+  local cc d out
+  cc=$(command -v cc || command -v clang || true)
+  if [[ -z $cc ]] || ! command -v python3 >/dev/null; then echo "  (compilatore o python3 assente: salto)"; return 0; fi
+  d="$WORK/glib_$$"
+  if [[ -d /data/data/com.termux/cache && -w /data/data/com.termux/cache ]]; then d=$(mktemp -d /data/data/com.termux/cache/tod-glib-XXXXXX); fi
+  mkdir -p "$d/loc/it/LC_MESSAGES"
+  "$cc" -shared -fPIC -O2 -o "$d/shim.so" "$ROOT/share/tod-gettext.c" -ldl
+  python3 - "$d/loc/it/LC_MESSAGES" <<'PYEOF'
+import struct, sys
+def mo(path, msgs, plurale=False):
+    keys = sorted(msgs); ids = b""; strs = b""; o = []; t = []
+    for k in keys:
+        o.append((len(k), len(ids))); ids += k + b"\0"
+        t.append((len(msgs[k]), len(strs))); strs += msgs[k] + b"\0"
+    n = len(keys); start = 7 * 4 + 16 * n
+    out = struct.pack("Iiiiiii", 0x950412de, 0, n, 7 * 4, 7 * 4 + 8 * n, 0, 0)
+    out += b"".join(struct.pack("ii", l, start + p) for l, p in o)
+    out += b"".join(struct.pack("ii", l, start + len(ids) + p) for l, p in t)
+    open(path, "wb").write(out + ids + strs)
+testa = b"Content-Type: text/plain; charset=UTF-8\nPlural-Forms: nplurals=2; plural=(n != 1);\n"
+mo(sys.argv[1] + "/glib20.mo", {b"": testa, "Error opening file “%s”: %s".encode(): "Errore nell'aprire il file «%s»: %s".encode(),
+                                 b"%s byte\0%s bytes": b"%s byte\0%s byte"})
+mo(sys.argv[1] + "/libc.mo", {b"": testa, b"Permission denied": b"Permesso negato"})
+PYEOF
+  cat >"$d/glib.c" <<'CEOF'
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <stdio.h>
+#include <errno.h>
+int main(void) {
+  void *glib = dlopen("libglib-2.0.so.0", RTLD_NOW | RTLD_GLOBAL);
+  if (!glib) glib = dlopen("libglib-2.0.so", RTLD_NOW | RTLD_GLOBAL);
+  const char *(*gt)(const char *) = (const char *(*)(const char *))dlsym(RTLD_DEFAULT, "glib_gettext");
+  const char *(*se)(int) = (const char *(*)(int))dlsym(RTLD_DEFAULT, "g_strerror");
+  char *(*fs)(unsigned long long, int) = (char *(*)(unsigned long long, int))dlsym(RTLD_DEFAULT, "g_format_size_full");
+  printf("gio|%s\n", gt("Error opening file “%s”: %s"));
+  printf("errore|%s\n", se(EACCES));
+  if (!glib) { puts("dimensioni|salta"); return 0; }
+  printf("dimensioni|%s|%s|%s\n", fs(8, 0), fs(167303987ULL, 2), fs(1234, 1));
+  return 0;
+}
+CEOF
+  "$cc" -o "$d/glib" "$d/glib.c" -ldl 2>/dev/null || "$cc" -o "$d/glib" "$d/glib.c"
+  out=$(env TOD_GETTEXT_LANG=it TOD_GETTEXT_DIR="$d/loc" LD_PRELOAD="$d/shim.so" "$d/glib" 2>&1 | sed 's/\xc2\xa0/ /g')
+  rm -rf "$d"
+  has "le frasi di GIO dal catalogo glib20" "gio|Errore nell'aprire il file «%s»: %s" "$out"
+  has "gli errori di sistema dal catalogo libc" "errore|Permesso negato" "$out"
+  if grep -q "dimensioni|salta" <<<"$out"; then echo "  (GLib non caricabile: salto le dimensioni)"; return 0; fi
+  has "byte al singolare e plurale italiani, decimali con la virgola, anche nella forma lunga" \
+    "dimensioni|8 byte|159,6 MiB|1,2 kB (1234 byte)" "$out"
 }
 
 # =============================================================================

@@ -465,7 +465,11 @@ class Dischi(Gtk.Window):
         dl.add_button(T("Annulla", "Cancel"), Gtk.ResponseType.CANCEL)
         ok = dl.add_button(testo_ok, Gtk.ResponseType.OK)
         ok.get_style_context().add_class("destructive-action" if not max_byte else "suggested-action")
-        g = Gtk.Grid(column_spacing=12, row_spacing=10, margin=16)
+        # come il foglio "Inizializza" di Utility Disco: intestazione da avviso di macOS, poi etichetta: controllo
+        dl.get_content_area().set_spacing(10)
+        dl.get_content_area().add(tod_avviso.testa("drive-removable-media", titolo,
+                                                   T("Scegli il nome e il formato.", "Choose a name and a format.")))
+        g = Gtk.Grid(column_spacing=10, row_spacing=8, margin_top=4)
         dl.get_content_area().add(g)
         g.attach(Gtk.Label(label=T("Nome", "Name"), xalign=1), 0, 0, 1, 1)
         e = Gtk.Entry(text=nome, activates_default=True, hexpand=True)
@@ -477,8 +481,9 @@ class Dischi(Gtk.Window):
             fmt.append(k, n if k != "ntfs" or ntfs else n + T(" (installa ntfs-3g)", " (install ntfs-3g)"))
         fmt.set_active_id("exfat")
         g.attach(fmt, 1, 1, 1, 1)
-        spieg = Gtk.Label(xalign=0, wrap=True)
+        spieg = Gtk.Label(xalign=0, wrap=True, max_width_chars=1, hexpand=True)   # a capo: la finestra resta stretta
         spieg.get_style_context().add_class("hint")
+        spieg.get_style_context().add_class("tod-avviso-tenue")   # grigia e piccola, come nei fogli di macOS
         g.attach(spieg, 1, 2, 1, 1)
         fmt.connect("changed", lambda *a: spieg.set_text(next(f[2] for f in FORMATI if f[0] == fmt.get_active_id())))
         spieg.set_text(FORMATI[0][2])
@@ -500,6 +505,7 @@ class Dischi(Gtk.Window):
             dim.set_value(mb)
             g.attach(dim, 1, riga, 1, 1)
         dl.set_default_response(Gtk.ResponseType.OK)
+        tod_avviso.come_macos(dl, libero=True)
         dl.show_all()
         while True:
             if dl.run() != Gtk.ResponseType.OK:
@@ -546,10 +552,15 @@ class Dischi(Gtk.Window):
         dl = Gtk.Dialog(title=T("Rinomina", "Rename"), transient_for=self, modal=True)
         dl.add_button(T("Annulla", "Cancel"), Gtk.ResponseType.CANCEL)
         dl.add_button(T("Rinomina", "Rename"), Gtk.ResponseType.OK).get_style_context().add_class("suggested-action")
-        e = Gtk.Entry(text=p["etichetta"], activates_default=True, margin=16)
+        nome = p["etichetta"] or p["dev"]
+        dl.get_content_area().set_spacing(10)
+        dl.get_content_area().add(tod_avviso.testa("drive-removable-media", T(f"Rinomina «{nome}»", f"Rename “{nome}”"),
+                                                   T("Il nuovo nome del volume:", "The volume's new name:")))
+        e = Gtk.Entry(text=p["etichetta"], activates_default=True, placeholder_text=T("Nome", "Name"))
         e.set_max_length(f[3] if f else 32)
         dl.get_content_area().add(e)
         dl.set_default_response(Gtk.ResponseType.OK)
+        tod_avviso.come_macos(dl, libero=True)
         dl.show_all()
         ok = dl.run() == Gtk.ResponseType.OK
         n = e.get_text().strip()
@@ -614,12 +625,11 @@ class Dischi(Gtk.Window):
         una lista, una coppia (lista, testo da mandargli) o una funzione che dà i comandi seguenti."""
         self.occupato = True
         dl = Gtk.Dialog(title=T("Dischi", "Disks"), transient_for=self, modal=True, deletable=False)
-        h = Gtk.Box(spacing=14, margin=22)
-        sp = Gtk.Spinner()
+        sp = Gtk.Spinner()   # come macOS: la rotella al posto dell'icona, il lavoro in grassetto
+        sp.set_size_request(int(32 * tod_avviso.scala()), int(32 * tod_avviso.scala()))
         sp.start()
-        h.pack_start(sp, False, False, 0)
-        h.pack_start(Gtk.Label(label=titolo, xalign=0), True, True, 0)
-        dl.get_content_area().add(h)
+        dl.get_content_area().add(tod_avviso.testa(sp, titolo, T("Non togliere il disco.", "Don't remove the disk.")))
+        tod_avviso.come_macos(dl, libero=True)
         dl.show_all()
 
         def gira():
