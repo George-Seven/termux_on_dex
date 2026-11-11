@@ -9,9 +9,12 @@ share/tod_avviso.py: la stessa finestrella in stile macOS di Thunar, della scriv
 dell'app che ha chiesto. Il resto di zenity (scelta dei file, elenchi...) resta a quello vero.
 
   tod-avvisi-host.py               il servizio (dall'hook della sessione; uno per sessione)
+Anche la finestra Apri / Salva (zenity --file-selection) è nostra, come quella di macOS: share/tod_apri_salva.py.
 Protocollo: socket Unix $TMPDIR/tod-avvisi.sock (TOD_AVVISI_SOCK), una riga JSON per richiesta
   {"tipo": "question|info|warning|error", "titolo", "testo", "ok", "annulla", "extra": [...], "markup": bool,
    "predefinito_annulla": bool, "scadenza": secondi, "icona": nome, "chi": [argomenti del programma che chiede]}
+  oppure {"tipo": "file", "titolo", "file": {"modo": "apri|salva|cartella", "multipli", "cartella", "nome",
+   "filtri": ["Nome | *.png *.jpg", ...], "conferma", "separatore"}}  (percorsi del container)
 e una riga di risposta {"codice": uscita di zenity, "stampa": testo per lo standard output}.
 """
 import json
@@ -124,7 +127,18 @@ def pulsanti(r):
 
 def mostra(Gtk, r):
     """La finestrella (nel filo di GTK). → (codice, stampa)"""
-    sys.path.insert(1, QUI)
+    if QUI not in sys.path:
+        sys.path.insert(1, QUI)
+    if r.get("tipo") == "file":   # Apri / Salva come macOS (share/tod_apri_salva.py)
+        import tod_apri_salva
+        f = r.get("file") or {}
+        nome = f.get("nome")
+        cartella = f.get("cartella")
+        _nome_app, icona_app = app_di(r.get("chi"))
+        return tod_apri_salva.scegli({"modo": f.get("modo", "apri"), "multipli": f.get("multipli"), "nome": nome,
+                                      "cartella": cartella, "filtri": tod_apri_salva.filtri_zenity(f.get("filtri")),
+                                      "conferma": f.get("conferma", True), "titolo": r.get("titolo"),
+                                      "separatore": f.get("separatore") or "|", "icona": icona_app})
     import tod_avviso
     from gi.repository import GLib
     nome_app, icona_app = app_di(r.get("chi"))

@@ -5733,14 +5733,14 @@ r = z.leggi(["--warning", "--title", "PhotoCraft", "--text", "Salvare?", "--ques
 print("rfd", r["tipo"], r["livello"], r["titolo"], r["ok"], r["annulla"], r["extra"])
 r = z.leggi(["--info", "--text=Fatto\\nsotto", "--timeout=7", "--no-markup", "--icon-name=gimp"])
 print("info", r["tipo"], repr(r["testo"]), r["scadenza"], r["markup"], r["icona"])
-print("file", z.leggi(["--file-selection", "--title", "Apri"]))
+print("file", z.leggi(["--file-selection", "--title", "Apri"])["tipo"])
 print("sconosciuta", z.leggi(["--question", "--text", "x", "--forms"]))
 print("solo-domanda", z.leggi(["--question", "--text", "x"])["livello"])
 PYEOF
 )
   has "rfd: domanda con il livello d'avvertimento e le sue etichette" "rfd question warning PhotoCraft Salva Cancel ['Non salvare']" "$out"
   has "forme --opzione=valore, \\n, scadenza, icona" "info info 'Fatto\nsotto' 7 False gimp" "$out"
-  has "la scelta dei file resta a zenity vero" "file None" "$out"
+  has "anche la scelta dei file la fa il desktop (finestra Apri/Salva nostra)" "file file" "$out"
   has "un'opzione sconosciuta: zenity vero" "sconosciuta None" "$out"
   has "domanda semplice: niente triangolo" "solo-domanda None" "$out"
   # il giro intero: un finto servizio del desktop risponde "Non salvare" → stampa e uscita 1 come zenity
@@ -5804,8 +5804,110 @@ PYEOF
   conf_set AVVISI_DEBIAN 0
   cx_install_runner
   [[ ! -e $zr/usr/local/bin/zenity ]] || { echo "  ✘ AVVISI_DEBIAN=0: il zenity nostro doveva sparire"; return 1; }
-  has "il servizio parte con la sessione" 'share/tod-avvisi-host.py" </dev/null >>"$TOD_STATE_DIR/avvisi.log"' \
+  has "il servizio parte con la sessione, sapendo dov'è il container (percorsi di Apri/Salva)" \
+    'TOD_CX_ROOTFS="$(cx_rootfs)" python3 "$TOD_ROOT/share/tod-avvisi-host.py"' \
     "$(sed -n '/^session_hook() {/,/^}/p' "$ROOT/lib/session.sh")"
+}
+
+test_apri_salva_come_macos() { # 11 novembre: la finestra Apri/Salva delle app di Debian (zenity --file-selection) come macOS
+  command -v python3 >/dev/null || return 0
+  local out d="$WORK/apri_$$"
+  mkdir -p "$d"
+  # gli argomenti che passa rfd (le app Craft) per aprire, scegliere più file, cartelle, salvare
+  out=$(python3 - "$ROOT/share/tod-zenity" <<'PYEOF'
+import importlib.machinery as m, importlib.util as u, sys
+s = u.spec_from_loader("z", m.SourceFileLoader("z", sys.argv[1])); z = u.module_from_spec(s); s.loader.exec_module(z)
+r = z.leggi(["--file-selection", "--file-filter", "PDF | *.pdf", "--filename", "/home/dex/Documenti/", "--title", "Apri"])
+print("apri", r["tipo"], r["file"]["modo"], r["file"]["cartella"], r["file"]["filtri"], r["titolo"])
+r = z.leggi(["--file-selection", "--multiple", "--separator=:"])
+print("multipli", r["file"]["multipli"], r["file"]["separatore"])
+print("cartella", z.leggi(["--file-selection", "--directory"])["file"]["modo"])
+r = z.leggi(["--file-selection", "--save", "--confirm-overwrite", "--filename", "/home/dex/Relazione.pdf"])
+print("salva", r["file"]["modo"], r["file"]["cartella"], r["file"]["nome"], r["file"]["conferma"])
+PYEOF
+)
+  has "Apri: cartella, formati e titolo" "apri file apri /home/dex/Documenti/ ['PDF | *.pdf'] Apri" "$out"
+  has "più file, con il separatore" "multipli True :" "$out"
+  has "una cartella" "cartella cartella" "$out"
+  has "Salva: cartella e nome, sempre con la conferma" "salva salva /home/dex Relazione.pdf True" "$out"
+  has "il servizio passa la scelta dei file alla finestra nostra" "import tod_apri_salva" "$(cat "$ROOT/share/tod-avvisi-host.py")"
+  # le parti senza schermo, con il Python di Termux (PyGObject); il resto con GTK vera su Xvfb
+  local T=/data/data/com.termux/files/usr py x pid
+  py=$T/bin/python3
+  if [[ ! -x $py ]] || ! "$py" -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null; then
+    echo "  (PyGObject di Termux assente: salto)"; return 0
+  fi
+  mkdir -p "$d/radice/home/dex/Lavori/Sotto" "$d/casa/.config" "$d/casa/Documenti/Fatture" "$d/telefono/Documents" "$d/tmp"
+  echo x >"$d/radice/home/dex/Lavori/x.txt"
+  ln -s "$d/telefono/Documents" "$d/casa/Documenti2"
+  printf 'XDG_DOCUMENTS_DIR="$HOME/Documenti"\n' >"$d/casa/.config/user-dirs.dirs"
+  for f in "Relazione.pdf" "Note.txt" "Foto.png"; do echo x >"$d/casa/Documenti/$f"; done
+  x=$((350 + RANDOM % 100))
+  while [[ -e $T/tmp/.X11-unix/X$x ]]; do x=$((x + 1)); done
+  "$T/bin/Xvfb" ":$x" -screen 0 1200x800x24 -nolisten tcp >/dev/null 2>&1 &
+  pid=$!
+  for _ in $(seq 50); do [[ -S $T/tmp/.X11-unix/X$x ]] && break; sleep 0.1; done
+  out=$(env -u LD_PRELOAD DISPLAY=":$x" HOME="$d/casa" TMPDIR="$d/tmp" TOD_CX_ROOTFS="$d/radice" LANGUAGE=it \
+    TOD_TELEFONO_DIR="$d/telefono" timeout 60 "$py" - "$ROOT/share" "$d" <<'PYEOF' 2>&1
+import os, sys, time
+sys.path.insert(0, sys.argv[1])
+d = sys.argv[2]
+import tod_apri_salva as a
+from gi.repository import Gtk
+print("dal", a.dal_container("/home/dex/x.pdf") == d + "/radice/home/dex/x.pdf", a.dal_container("/storage/emulated/0/a"),
+      a.dal_container("/tmp/b") == d + "/tmp/b")
+print("al", a.al_container(d + "/radice/home/dex/x.pdf"), a.al_container(d + "/casa/Documenti2/n.pdf") == d + "/telefono/Documents/n.pdf",
+      a.al_container(d + "/tmp/c"))
+print("filtri", a.filtri_zenity(["Immagini | *.png *.JPG", "*.txt"]), a.corrisponde("A.jpg", ["*.JPG"]), a.corrisponde("a.pdf", ["*.png"]))
+print("dimensioni", a.dimensione(6), a.dimensione(12300), a.dimensione(1234567), a.dimensione(0))
+print("nome", a.nome_senza_estensione("Relazione finale.pdf"), a.nome_senza_estensione("Archivio"))
+now = time.mktime((2026, 11, 11, 15, 0, 0, 0, 0, -1))
+print("date", a.data_breve(now - 600, now), "|", a.data_breve(now - 86400, now), "|", a.data_breve(now - 86400 * 30, now))
+print("posti", [(s, n) for s, n, _i, _p in a.posti()])
+a.carica_css()
+esiti = []
+p = a.Pannello({"modo": "apri", "cartella": "/home/dex/", "filtri": [["PDF", ["*.pdf"]]]}, esiti.append)
+p.vai(d + "/casa/Documenti")
+righe = {r[a.Pannello.NOME]: r for r in p.ordinato}
+print("righe", list(righe), "attive", [n for n, r in righe.items() if r[a.Pannello.ATTIVA]])
+sel = p.elenco.get_selection()
+for n in ("Note.txt", "Relazione.pdf"):
+    sel.unselect_all()
+    sel.select_path(righe[n].path)
+    print("scelto", n, p.scelti() and os.path.basename(p.scelti()[0]), p.principale.get_sensitive())
+p.conferma()
+print("apri ->", [os.path.basename(x) for x in esiti[0]])
+esiti = []
+s = a.Pannello({"modo": "salva", "nome": "Nuovo.pdf", "cartella": "/home/dex/Lavori/", "conferma": False}, esiti.append)
+print("salva nome", s.nome.get_text(), s.principale.get_sensitive(), os.path.basename(s.qui))
+s.conferma()
+print("salva ->", a.al_container(esiti[0][0]))
+esiti = []
+c = a.Pannello({"modo": "cartella", "cartella": "/home/dex/Lavori/"}, esiti.append)
+righe = {r[a.Pannello.NOME]: r for r in c.ordinato}
+print("cartella attive", [n for n, r in righe.items() if r[a.Pannello.ATTIVA]])
+c.conferma()
+print("cartella ->", a.al_container(esiti[0][0]))
+PYEOF
+)
+  kill "$pid" 2>/dev/null || true
+  rm -rf "$d"
+  has "percorsi del container → veri (container, Android, /tmp)" "dal True /storage/emulated/0/a True" "$out"
+  has "veri → del container (radice tolta, collegamenti risolti, /tmp)" "al /home/dex/x.pdf True /tmp/c" "$out"
+  has "formati di zenity, maiuscole indifferenti" "filtri [['Immagini', ['*.png', '*.JPG']], ['*.txt', ['*.txt']]] True False" "$out"
+  has "dimensioni come il Finder, in italiano" "dimensioni 6 byte 12 KB 1,2 MB 0 byte" "$out"
+  has "Salva: il nome si sceglie senza estensione" "nome 16 8" "$out"
+  has "date come il Finder" "date oggi, 14:50 | ieri, 15:00 | 12 ott 2026" "$out"
+  has "barra laterale: Recenti, la casa, le cartelle dell'utente, il Telefono" "('pref', 'Recenti')" "$out"
+  has "cartelle prima, poi i file per nome" "righe ['Fatture', 'Foto.png', 'Note.txt', 'Relazione.pdf']" "$out"
+  has "il formato esclude gli altri file (le cartelle restano)" "attive ['Fatture', 'Relazione.pdf']" "$out"
+  has "un file escluso non si sceglie, Apri spento" "scelto Note.txt [] False" "$out"
+  has "un PDF si sceglie, Apri acceso" "scelto Relazione.pdf Relazione.pdf True" "$out"
+  has "Apri restituisce il file" "apri -> ['Relazione.pdf']" "$out"
+  has "Salva: nome proposto, cartella data dall'app (percorso del container)" "salva nome Nuovo.pdf True Lavori" "$out"
+  has "Salva restituisce cartella e nome, come li vede l'app" "salva -> /home/dex/Lavori/Nuovo.pdf" "$out"
+  has "Cartella: solo le cartelle" "cartella attive ['Sotto']" "$out"
+  has "Cartella: senza scelta, quella aperta" "cartella -> /home/dex/Lavori" "$out"
 }
 
 # =============================================================================

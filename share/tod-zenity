@@ -5,6 +5,8 @@
 # qui è GTK 4 + libadwaita: aspetto di GNOME. Le domande, gli avvisi e gli errori li mostra invece il desktop
 # (share/tod-avvisi-host.py) come tutti gli altri popup, in stile macOS e con l'icona dell'app. Tutto il resto (scelta
 # dei file, elenchi, moduli...) e ogni caso dubbio passano al zenity vero, con gli stessi argomenti.
+# Anche la scelta dei file (--file-selection: Apri, Salva, cartelle) la fa il desktop, come la finestra di macOS
+# (share/tod_apri_salva.py); i percorsi viaggiano come li vede l'app.
 import json
 import os
 import socket
@@ -13,13 +15,15 @@ import sys
 VERO = os.environ.get("TOD_ZENITY_VERO", "/usr/bin/zenity")
 TIPI = ("question", "info", "warning", "error")
 CON_VALORE = {"title", "text", "ok-label", "cancel-label", "extra-button", "icon", "icon-name", "window-icon",
-              "timeout", "width", "height", "attach", "display", "class", "name"}
-SENZA_VALORE = {"modal", "no-wrap", "no-markup", "default-cancel", "ellipsize", "question", "info", "warning", "error"}
+              "timeout", "width", "height", "attach", "display", "class", "name", "filename", "file-filter", "separator"}
+SENZA_VALORE = {"modal", "no-wrap", "no-markup", "default-cancel", "ellipsize", "question", "info", "warning", "error",
+                "file-selection", "multiple", "directory", "save", "confirm-overwrite"}
 
 
 def leggi(argv):
     """Gli argomenti di zenity → la richiesta per il desktop, o None (allora il zenity vero)."""
     r = {"tipo": None, "livello": None, "extra": [], "markup": True}
+    f = {"modo": "apri", "multipli": False, "filtri": [], "conferma": False}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -44,6 +48,15 @@ def leggi(argv):
                 r["extra"].append(valore)
             elif nome in ("icon", "icon-name", "window-icon") and "/" not in valore and valore not in TIPI:
                 r["icona"] = valore
+            elif nome == "filename":
+                if valore.endswith("/"):
+                    f["cartella"] = valore
+                else:
+                    f["cartella"], f["nome"] = os.path.split(valore)
+            elif nome == "file-filter":
+                f["filtri"].append(valore)
+            elif nome == "separator":
+                f["separatore"] = valore
             elif nome == "timeout":
                 try:
                     r["scadenza"] = max(1, int(valore))
@@ -55,6 +68,16 @@ def leggi(argv):
             elif nome in TIPI:
                 r["livello"] = nome   # rfd: --warning e poi --question per "Avvertimento: OK/Annulla?"
                 r["tipo"] = r["tipo"] or nome
+            elif nome == "file-selection":
+                r["tipo"] = "file"
+            elif nome == "multiple":
+                f["multipli"] = True
+            elif nome == "directory":
+                f["modo"] = "cartella" if f["modo"] != "salva" else "salva"
+            elif nome == "save":
+                f["modo"] = "salva"
+            elif nome == "confirm-overwrite":
+                f["conferma"] = True
             elif nome == "no-markup":
                 r["markup"] = False
             elif nome == "default-cancel":
@@ -62,6 +85,11 @@ def leggi(argv):
         else:
             return None   # un'opzione che non conosciamo: meglio il zenity vero
         i += 1
+    if r["tipo"] == "file":
+        if f["modo"] == "salva":
+            f["conferma"] = True   # zenity 4 chiede sempre prima di sovrascrivere
+        r["file"] = f
+        return r
     if r["tipo"] not in TIPI:
         return None
     if r["tipo"] == "question" and r["livello"] == "question":
