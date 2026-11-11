@@ -168,6 +168,15 @@ class Sottotitoli:
 
 
 # --- il motore: GStreamer -----------------------------------------------------------------------------------------
+GIRA = "videoflip video-direction=auto ! "   # come chiede il file (vedi metti_uscita); anche comune.fotogramma
+
+
+def gira_misure(w, h, tags):
+    """larghezza e altezza come si vedono: scambiate se il file chiede di girare di 90° (video verticali)."""
+    ok, o = tags.get_string("image-orientation") if tags is not None else (False, None)
+    return (h, w) if ok and o and o.endswith(("-90", "-270")) else (w, h)
+
+
 def gl_lento():
     """niente GPU vera (llvmpipe, schermo finto): glimagesink andrebbe a scatti."""
     s = os.environ.get("TOD_VIDEO_USCITA", "")
@@ -214,13 +223,16 @@ class Motore:
 
     # uscita video
     def metti_uscita(self):
-        oc = "overlaycomposition name=oc ! " if self.sub else ""
+        # i video girati in verticale col telefono sono salvati in orizzontale con l'indicazione "ruota di 90°"
+        # (image-orientation): videoflip li gira (11 nov: si vedevano di lato), prima dei sottotitoli, che così
+        # restano dritti. Senza indicazione videoflip lascia passare i fotogrammi così come sono (niente costo)
+        oc = GIRA + ("overlaycomposition name=oc ! " if self.sub else "")
         if not self.cairo:
             try:
                 # i sottotitoli li fonde overlaycomposition (capsfilter senza la "meta" della composizione): passata a
                 # glimagesink incastrato nella finestra GTK, zink cadeva creando la swapchain (10 nov, H.264 1080p)
                 b = Gst.parse_bin_from_description(
-                    (oc + "video/x-raw ! " if oc else "") + "glimagesink name=s handle-events=false force-aspect-ratio=true",
+                    oc + ("video/x-raw ! " if self.sub else "") + "glimagesink name=s handle-events=false force-aspect-ratio=true",
                     True)
             except GLib.Error:
                 b = None

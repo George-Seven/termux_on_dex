@@ -634,6 +634,8 @@ def leggi_miniatura(percorso, mtime):
         return None, None
     if pb.get_option("tEXt::Thumb::MTime") != str(int(mtime)):
         return None, None
+    if pb.get_option("tEXt::Software") == "Termux On DeX" and L.tipo_di(percorso) == "video":
+        return None, None   # fatta da noi prima dell'11 novembre: i video verticali erano di lato, si rifà
     dur = pb.get_option("tEXt::Thumb::Movie::Length")
     try:
         dur = float(dur) if dur else None
@@ -649,7 +651,7 @@ def salva_miniatura(percorso, mtime, pb, durata=None):
         uri = uri_di(percorso)
         m = os.path.join(d, hashlib.md5(uri.encode()).hexdigest() + ".png")
         chiavi = ["tEXt::Thumb::URI", "tEXt::Thumb::MTime", "tEXt::Software"]
-        valori = [uri, str(int(mtime)), "Termux On DeX"]
+        valori = [uri, str(int(mtime)), "Termux On DeX 2"]   # "2": i video verticali girati (leggi_miniatura)
         if durata:
             chiavi.append("tEXt::Thumb::Movie::Length")
             valori.append(str(int(durata)))
@@ -687,7 +689,8 @@ def fotogramma(percorso, larghezza=0, dove=0.1):
     pb_.set_property("uri", uri_di(percorso))
     pb_.set_property("flags", 0x1)   # solo video: niente audio
     sink = Gst.parse_bin_from_description(
-        "videoconvertscale ! video/x-raw,format=RGB,pixel-aspect-ratio=1/1 ! appsink name=a sync=false max-buffers=1",
+        "videoflip video-direction=auto ! videoconvertscale ! video/x-raw,format=RGB,pixel-aspect-ratio=1/1"
+        " ! appsink name=a sync=false max-buffers=1",   # videoflip: i video verticali del telefono, dritti
         True)
     pb_.set_property("video-sink", sink)
     app = sink.get_by_name("a")

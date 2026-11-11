@@ -1406,6 +1406,33 @@ test_media_finestre_compilano() { # le tre app: Python valido, prgname uguale al
   has "icona DeX OS del lettore" "multimedia-video-player" "$(cat "$ROOT/share/dexos/dexos-icons.py")"
 }
 
+test_media_video_verticali() { # 11 novembre: i video girati in verticale col telefono si vedevano di lato
+  command -v python3 >/dev/null || return 0
+  local m="$ROOT/share/media/motore.py" c="$ROOT/share/media/comune.py" out
+  # le misure come si vedono (la finestra dell'Anteprima diventa alta): la funzione vera, presa dal file
+  out=$(python3 - "$m" <<'PY'
+import ast, sys
+f = next(n for n in ast.parse(open(sys.argv[1]).read()).body if isinstance(n, ast.FunctionDef) and n.name == "gira_misure")
+ns = {}
+exec(compile(ast.Module(body=[f], type_ignores=[]), "motore.py", "exec"), ns)
+class Tag:
+    def __init__(self, o): self.o = o
+    def get_string(self, k): return (self.o is not None and k == "image-orientation", self.o)
+g = ns["gira_misure"]
+print(g(1920, 1080, Tag("rotate-90")), g(1920, 1080, Tag("rotate-270")), g(1920, 1080, Tag("flip-rotate-90")),
+      g(1920, 1080, Tag("rotate-180")), g(1920, 1080, Tag(None)), g(1920, 1080, None))
+PY
+  )
+  eq "girati di 90 e 270: alti; 180 e senza indicazione: come sono" \
+    "(1080, 1920) (1080, 1920) (1080, 1920) (1920, 1080) (1920, 1080) (1920, 1080)" "$out"
+  has "il video si gira come chiede il file" 'GIRA = "videoflip video-direction=auto ! "' "$(cat "$m")"
+  has "prima dei sottotitoli, con la GPU e con cairo" 'oc = GIRA + (' "$(sed -n '/    def metti_uscita(self):/,/    def collega_sub/p' "$m")"
+  has "anche le miniature dei video" '"videoflip video-direction=auto ! videoconvertscale' "$(cat "$c")"
+  has "le miniature vecchie (di lato) si rifanno" '== "Termux On DeX" and L.tipo_di(percorso) == "video"' "$(cat "$c")"
+  has "quelle nuove hanno il segno nuovo" '"Termux On DeX 2"' "$(cat "$c")"
+  has "l'Anteprima usa le misure girate" "self.M.gira_misure(" "$(cat "$ROOT/share/media/tod-anteprima.py")"
+}
+
 test_anteprima_spazio() { # barra spaziatrice in Esplora file e sulla scrivania: anteprima come Quick Look di macOS
   local src="$ROOT/share/tod-gettext.c" cc ap="$ROOT/share/media/tod-anteprima.py"
   has "aggancio prima che parta l'app" "int g_application_run(void *app, int argc, char **argv)" "$(cat "$src")"

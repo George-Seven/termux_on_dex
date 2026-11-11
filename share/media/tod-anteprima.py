@@ -170,7 +170,9 @@ class Lettore:
         vs = inf.get_video_streams()
         if vs and vs[0].get_width() and vs[0].get_height():
             par = vs[0].get_par_num() / max(1, vs[0].get_par_denom())
-            self.vw, self.vh = vs[0].get_width() * (par or 1), float(vs[0].get_height())
+            # video verticale del telefono: il motore lo gira, la finestra diventa alta
+            self.vw, self.vh = self.M.gira_misure(vs[0].get_width() * (par or 1), float(vs[0].get_height()),
+                                                  vs[0].get_tags() or inf.get_tags())
 
     def area_pronta(self, w):
         if not self.motore.cairo:
@@ -393,9 +395,10 @@ class Lettore:
         barra = px(46)
         s = min(mw / self.vw, (mh - barra) / self.vh, 1.0)
         w, h = self.vw * s, self.vh * s
-        if w < px(480):    # i video piccoli un po' più grandi, come Quick Look
-            w, h = px(480), h * px(480) / w
-        return int(w), int(h) + barra
+        k = min(px(480) / w, (mh - barra) / h)
+        if k > 1:   # i video piccoli un po' più grandi, come Quick Look (mai più alti dello schermo)
+            w, h = w * k, h * k
+        return max(px(480), int(w)), int(h) + barra   # i verticali stretti: bande nere ai lati
 
     def chiudi(self):
         if self.timer:
