@@ -138,6 +138,16 @@ def am(action):
     spawn([os.path.join(PREFIX, "bin/am"), "start", "--user", "0", "-a", action])
 
 
+def firma_rete():
+    """Cosa mostra la pagina Wi-Fi e rete: i PC in rete (l'elenco del servizio) e lo stato del Wi-Fi."""
+    try:
+        pc = open(os.path.join(TMP, "tod-rete/volumi")).read()
+    except OSError:
+        pc = ""
+    w = phone_state().get("wifi") or {}
+    return pc, w.get("ip"), w.get("ssid"), w.get("supplicant_state")
+
+
 # --- finestra -----------------------------------------------------------------------------
 CSS = b"""
 .side { background-color: alpha(@theme_fg_color, 0.035); border-right: 1px solid alpha(@theme_fg_color, 0.08); }
@@ -378,7 +388,13 @@ class Settings(Gtk.Window):
         if not righe:
             righe.append(self.row(T("Nessun computer trovato", "No computers found"), None,
                                   T("PC e NAS della rete Wi-Fi compaiono da soli.", "PCs and NAS on the Wi-Fi network appear automatically.")))
+        # "Aggiorna" (9 novembre, Pietro): il servizio cerca subito; da solo lo fa ogni minuto e quando cambi rete
+        cerca = self.button(T("Aggiorna", "Refresh"), lambda: self.rete_aggiorna(cerca))
+        righe.append(self.row(T("Cerca di nuovo in rete", "Search the network again"), cerca,
+                              T("I computer si cercano anche da soli ogni minuto e quando il telefono cambia rete.",
+                                "Computers are also searched for automatically every minute and when the phone changes network.")))
         voce = Gtk.Entry(placeholder_text=T("192.168.1.10 o nome", "192.168.1.10 or name"), width_chars=20)
+        self.rete_voce = voce
         voce.connect("activate", lambda w: self.rete_cmd("aggiungi", w.get_text()))
         hb = Gtk.Box(spacing=6)
         hb.pack_start(voce, False, False, 0)
@@ -388,6 +404,30 @@ class Settings(Gtk.Window):
         righe.append(self.row(T("Apri la Rete in Esplora file", "Open Network in the file manager"),
                               self.button(T("Apri", "Open"), lambda: spawn(["exo-open", "--launch", "FileManager", "/media/rete"]))))
         self.group(box, T("Computer in rete", "Computers on the network"), righe)
+        self.rete_firma = firma_rete()
+        if not getattr(self, "rete_segue", False):
+            self.rete_segue = True
+            GLib.timeout_add_seconds(3, self.segui_rete)
+
+    def segui_rete(self):
+        """Pagina aperta: si rifà se cambiano i PC (il servizio li aggiunge e li toglie da sé) o il Wi-Fi. Non mentre si
+        scrive un indirizzo da aggiungere."""
+        if self.stack.get_visible_child_name() != "rete":
+            self.rete_segue = False
+            return False
+        voce = getattr(self, "rete_voce", None)
+        if firma_rete() != self.rete_firma and not (voce and (voce.has_focus() or voce.get_text().strip())):
+            self.ricarica_rete()
+        return True
+
+    def rete_aggiorna(self, pulsante):
+        pulsante.set_sensitive(False)
+        pulsante.set_label(T("Cerco…", "Searching…"))
+
+        def work():
+            subprocess.run([sys.executable, RETE, "aggiorna"], capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+            GLib.idle_add(lambda: self.ricarica_rete() and False)
+        threading.Thread(target=work, daemon=True).start()
 
     def rete_cmd(self, *args):
         if args[-1].strip() == "":

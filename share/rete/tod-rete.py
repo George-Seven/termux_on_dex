@@ -4,13 +4,15 @@
 Ogni PC ha il suo share/rete/tod-smb (Samba), che tod-fs.so raggiunge come le partizioni dei dischi USB: le cartelle
 condivise sono cartelle vere per ogni app del desktop, anche nel container. Qui:
 - si cercano i PC ogni minuto: Bonjour (_smb._tcp: Mac e NAS) e WS-Discovery (Windows, NAS con wsdd), con il nome
-  NetBIOS per i Windows; più quelli aggiunti con l'indirizzo (~/.config/tod/rete.json). Un PC che non risponde da
-  10 minuti sparisce (quelli aggiunti a mano restano);
+  NetBIOS per i Windows; più quelli aggiunti con l'indirizzo (~/.config/tod/rete.json). Ogni 15 s si bussa alla porta
+  dei PC in elenco: chi non risponde da 40 s sparisce (quelli aggiunti a mano restano);
+- se il telefono cambia rete (un altro Wi-Fi, i dati mobili) i PC trovati spariscono subito, con i loro tod-smb, e si
+  cerca nella rete nuova; "Aggiorna" (Esplora file, Impostazioni, tod rete aggiorna) cerca subito ("CERCA");
 - l'elenco va in $TMPDIR/tod-rete/volumi (lo legge tod-fs.so) e per ogni PC gira un tod-smb;
 - quando un PC vuole nome utente e password, tod-smb li chiede qui ($TMPDIR/tod-rete/servizio.sock): dal portachiavi
   del desktop, o con una finestra. La prima volta si prova da ospite: le cartelle aperte a tutti non chiedono niente.
 
-  tod-rete.py sorveglia | ferma | stato | cerca [--json] | elenco --json
+  tod-rete.py sorveglia | ferma | stato | cerca [--json] | aggiorna | elenco --json
   tod-rete.py aggiungi INDIRIZZO [NOME] | togli NOME | dimentica NOME
 """
 import fcntl
@@ -38,8 +40,13 @@ CONF = os.path.join(TH, ".config/tod/rete.json")
 SMB = os.environ.get("TOD_SMB_BIN") or os.path.join(TH, ".local/share/tod-rete/tod-smb")
 ITALIAN = os.environ.get("LANGUAGE", os.environ.get("LANG", "")).startswith("it")
 OGNI = 60       # secondi tra una ricerca e l'altra
-SCADE = 600     # un PC che non risponde da 10 minuti sparisce
-PAUSA = 15      # dopo "Annulla" quel PC non chiede la password per 15 secondi: Esplora file riprova di continuo, e l'8
+BATTITO = 15    # ogni 15 s si bussa alla porta dei PC in elenco (Windows non risponde sempre alla ricerca)
+SCADE = 40      # un PC che non risponde da 40 s (3 battiti di fila) sparisce. Prima 10 minuti: 9 novembre, Pietro:
+                # "per i dispositivi di rete ci vuole un controllo costante, metti che cambio rete in corso d'opera"
+PERSA = 6       # senza rete da 6 s: via i PC trovati. Un Wi-Fi che va e torna subito con lo stesso indirizzo non li tocca
+RAFFICA = (4, 12, 30)   # dopo un cambio di rete si cerca subito e di nuovo dopo 4, 12 e 30 s: appena collegato il
+                        # telefono non ha ancora tutto, e i PC Windows non rispondono a ogni domanda
+PAUSA = 15     # dopo "Annulla" quel PC non chiede la password per 15 secondi: Esplora file riprova di continuo, e l'8
                 # novembre la FRITZ!Box ha riaperto la finestra 20 volte in 20 secondi
 SCHEMA = "org.termuxondex.Rete"
 
@@ -211,6 +218,21 @@ def porta_aperta(ip, porta, attesa=1.0):
         return False
 
 
+def rete_attuale():
+    """L'indirizzo del telefono nella rete da cui partono le domande Bonjour; "" senza rete. connect() su UDP sceglie solo
+    l'indirizzo, senza mandare niente (0,3 ms). Android non dà a Termux il nome del Wi-Fi senza il permesso Posizione
+    ("<unknown ssid>") né l'elenco delle interfacce (if_nameindex: Permission denied): l'indirizzo è ciò che cambia."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(scoperta.MDNS)
+        ip = s.getsockname()[0]
+        return "" if ip == "0.0.0.0" else ip
+    except OSError:
+        return ""
+    finally:
+        s.close()
+
+
 def stesso_pc(nome, netbios):
     """Il nome NetBIOS (al più 15 lettere) è di questo PC? Vuoto o solo l'indirizzo: non si sa, si tiene."""
     if not netbios or solo_indirizzo(netbios):
@@ -273,6 +295,13 @@ class Servizio:
         self.m = threading.Lock()
         self.fine = False
         self.conf_mtime = 0
+        self.rete = None      # l'indirizzo del telefono (rete_attuale) all'ultimo controllo; None = non ancora visto
+        self.persa_da = None  # da quando non c'è rete (PERSA)
+        self.raffica = []     # quando rifare la ricerca dopo un cambio di rete (RAFFICA)
+        self.subito = threading.Event()    # "Aggiorna": una ricerca adesso
+        self.cv = threading.Condition()    # chi ha chiesto "Aggiorna" aspetta la fine della ricerca
+        self.giri = 0                      # ricerche finite
+        self.cercando = False
 
     # tod-smb: uno per PC, nel suo gruppo di processi (con i figli dei collegamenti)
     def avvia_smb(self, nome, p):
@@ -312,6 +341,7 @@ class Servizio:
         adesso = time.time()
         conf = carica_conf()
         with self.m:
+            prima = {n: q["ip"] for n, q in self.pc.items()}
             for p in trovati:
                 vecchio = next((n for n, q in self.pc.items() if q["ip"] == p["ip"]), None)
                 if vecchio and vecchio != p["nome"] and not self.pc[vecchio].get("manuale"):
@@ -332,37 +362,144 @@ class Servizio:
                 if nome not in self.proc or self.proc[nome].poll() is not None:
                     self.avvia_smb(nome, q)
             self.scrivi_volumi()
+            self.cambi_nel_registro(prima)
         for p in trovati:
             if p["nome"] in conf["credenziali"]:
                 ricorda_indirizzo(p["nome"], p["ip"], p["porta"])
 
+    def controlla_rete(self, adesso):
+        """Il telefono ha cambiato rete (un altro Wi-Fi, i dati mobili) o l'ha persa da PERSA secondi? Allora i PC trovati
+        spariscono subito e si cerca nella rete nuova, più volte (RAFFICA). True = cambiata."""
+        ora = rete_attuale()
+        if self.rete is None:
+            self.rete = ora
+            return False
+        if ora == self.rete:
+            self.persa_da = None
+            return False
+        if not ora:
+            if self.persa_da is None:
+                self.persa_da = adesso
+            if adesso - self.persa_da < PERSA:
+                return False
+        log(f"rete cambiata: {self.rete or 'nessuna'} → {ora or 'nessuna'}")
+        self.rete, self.persa_da = ora, None
+        self.dimentica_trovati()
+        self.raffica = [adesso + d for d in RAFFICA] if ora else []
+        return True
+
+    def dimentica_trovati(self):
+        """Cambio di rete: via i PC trovati e i loro tod-smb (chi aspettava un PC che non si raggiunge più ha subito un
+        errore, invece di restare appeso). I tod-smb dei PC aggiunti a mano ripartono: i loro collegamenti erano dell'altra
+        rete. Esplora file, dentro un PC sparito, torna da sé alla Rete (tod-fs rilegge l'elenco ogni mezzo secondo)."""
+        with self.m:
+            prima = {n: q["ip"] for n, q in self.pc.items()}
+            for nome in list(self.pc):
+                self.ferma_smb(nome)
+                if not self.pc[nome]["manuale"]:
+                    del self.pc[nome]
+            for nome, q in self.pc.items():
+                self.avvia_smb(nome, q)
+            self.scrivi_volumi()
+            self.cambi_nel_registro(prima)
+
+    def cambi_nel_registro(self, prima):
+        """I PC comparsi e spariti (con self.m preso): nel registro, per capire poi che cosa è successo e quando."""
+        for n in sorted(set(self.pc) - set(prima)):
+            log(f"PC comparso: {n} ({self.pc[n]['ip']})")
+        for n in sorted(set(prima) - set(self.pc)):
+            log(f"PC sparito: {n} ({prima[n]})")
+
+    def battito(self):
+        """Si bussa alla porta SMB dei PC trovati: chi risponde resta anche se la ricerca non l'ha visto (8 novembre:
+        DESKTOP-I78AUDA risponde a WS-Discovery 3 volte su 4); chi non risponde da SCADE secondi sparisce."""
+        with self.m:
+            prova = [(n, q["ip"], q["porta"]) for n, q in self.pc.items() if not q["manuale"]]
+        vivi = set()
+
+        def uno(n, ip, porta):
+            if porta_aperta(ip, porta, 2.0):
+                vivi.add(n)
+        fili = [threading.Thread(target=uno, args=x) for x in prova]
+        for f in fili:
+            f.start()
+        for f in fili:
+            f.join()
+        adesso = time.time()
+        with self.m:
+            for n, ip, _ in prova:
+                if n in vivi and self.pc.get(n, {}).get("ip") == ip:
+                    self.pc[n]["visto"] = adesso
+        self.aggiorna([])
+
+    def cerca(self):
+        """Una ricerca. Se intanto il telefono ha cambiato rete, il risultato (della rete di prima) si butta."""
+        prima = self.rete
+        with self.cv:
+            self.cercando = True
+        try:
+            trovati = tutti_i_nomi(cerca_pc(ricordati=pc_ricordati(carica_conf())))
+            if prima is None or rete_attuale() == prima:
+                self.aggiorna(trovati)
+            else:
+                log("rete cambiata durante la ricerca: risultato scartato")
+        except Exception as e:
+            log(f"ricerca: {type(e).__name__}: {e}")
+        finally:
+            with self.cv:
+                self.cercando = False
+                self.giri += 1
+                self.cv.notify_all()
+
+    def cerca_adesso(self, attesa=30.0):
+        """"Aggiorna" (Esplora file, Impostazioni, tod rete aggiorna): una ricerca subito; si risponde quando è finita, con
+        quanti PC ci sono. Se una ricerca è già in corso si aspetta anche la successiva (quella era partita prima)."""
+        log("Aggiorna: ricerca subito")
+        with self.cv:
+            fine = self.giri + (2 if self.cercando else 1)
+            self.subito.set()
+            self.cv.wait_for(lambda: self.giri >= fine, attesa)
+        return f"OK\t{len(self.pc)}\n"
+
     def giro_ricerca(self):
-        ultima = 0.0
+        ultima = ultimo_battito = -float(OGNI)
         while not self.fine:
+            adesso = time.monotonic()
+            cambiata = self.controlla_rete(adesso)
+            raffica = bool(self.raffica) and adesso >= self.raffica[0]
+            if raffica:
+                self.raffica = [t for t in self.raffica if t > adesso]
             try:
                 mt = os.stat(CONF).st_mtime
             except OSError:
                 mt = 0
-            if time.time() - ultima >= OGNI:
-                ultima = time.time()
-                try:
-                    self.aggiorna(tutti_i_nomi(cerca_pc(ricordati=pc_ricordati(carica_conf()))))
-                except Exception as e:
-                    log(f"ricerca: {type(e).__name__}: {e}")
-            elif mt != self.conf_mtime:   # un PC aggiunto o tolto (tod rete aggiungi, Impostazioni)
+            fatto = False
+            if cambiata or raffica or self.subito.is_set() or adesso - ultima >= OGNI:
+                self.subito.clear()
+                ultima = adesso
+                self.cerca()
+                fatto = True
+            if time.monotonic() - ultimo_battito >= BATTITO:
+                ultimo_battito = time.monotonic()
+                self.battito()
+                fatto = True
+            if not fatto and mt != self.conf_mtime:   # un PC aggiunto o tolto (tod rete aggiungi, Impostazioni)
                 self.conf_mtime = mt
                 self.aggiorna([])
-            else:
+            elif not fatto:
                 with self.m:   # un tod-smb caduto si riaccende
                     for nome, q in self.pc.items():
                         if nome not in self.proc or self.proc[nome].poll() is not None:
                             self.avvia_smb(nome, q)
-            time.sleep(2)
+            self.subito.wait(1)
 
-    # le richieste di tod-smb: "AUTH\t<nome>\t<pc>\t<cartella>\t<motivo>", motivo primo|ospite|rifiutate
+    # le richieste di tod-smb: "AUTH\t<nome>\t<pc>\t<cartella>\t<motivo>", motivo primo|ospite|rifiutate; e "CERCA"
+    # ("Aggiorna": Esplora file con tod-gettext.c, le Impostazioni, tod rete aggiorna)
     def risposta(self, riga, chiedi):
         """La risposta per tod-smb. CHIEDI(nome, utente, dominio, errore) mostra la finestra: dict o None."""
         c = riga.rstrip("\n").split("\t")
+        if c[0] == "CERCA":
+            return self.cerca_adesso()
         if len(c) < 5 or c[0] != "AUTH":
             return "NO\n"
         nome, cartella, motivo = c[1], c[3], c[4]
@@ -588,6 +725,20 @@ def ferma():
     return 0
 
 
+def al_servizio(riga, attesa=40.0):
+    """Una richiesta al servizio acceso (servizio.sock): la sua risposta, o None se è spento."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(attesa)
+    try:
+        s.connect(SOCK)
+        s.sendall(riga.encode())
+        return s.makefile("r", encoding="utf-8", errors="replace").readline()
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
 def elenco():
     pc = []
     try:
@@ -613,6 +764,12 @@ def principale(argv):
         return sorveglia()
     if cmd == "ferma":
         return ferma()
+    if cmd == "aggiorna":   # "Aggiorna": il servizio cerca subito; poi come "stato"
+        if al_servizio("CERCA\n") is None:
+            print(T("il servizio della rete è spento (tod rete on)", "the network service is off (tod rete on)"),
+                  file=sys.stderr)
+            return 1
+        cmd = "stato"
     if cmd == "stato":
         e = elenco()
         print(T("rete: ", "network: ") + (T("acceso", "on") if e["servizio"] else T("spento", "off")))
@@ -654,7 +811,7 @@ def principale(argv):
         if c:
             dimentica_password(args[0], c["utente"])
         return 0
-    print("uso: tod-rete.py sorveglia|ferma|stato|cerca|elenco|aggiungi INDIRIZZO [NOME]|togli NOME|dimentica NOME",
+    print("uso: tod-rete.py sorveglia|ferma|stato|cerca|aggiorna|elenco|aggiungi INDIRIZZO [NOME]|togli NOME|dimentica NOME",
           file=sys.stderr)
     return 2
 

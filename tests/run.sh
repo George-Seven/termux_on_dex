@@ -2891,6 +2891,7 @@ test_rete_elenco_pc() { # i PC trovati e quelli aggiunti a mano: elenco per tod-
   out=$(TOD_SMB_BIN="$smb" _rete_py <<'EOF'
 import os, time
 os.makedirs(m.RUN, exist_ok=True)
+m.log = lambda *a: None
 s = m.Servizio()
 m.principale(["x", "aggiungi", "smb://192.168.1.9:4450/", "NAS di casa"])
 s.aggiorna(m.tutti_i_nomi([{"nome": "PC-PIETRO", "ip": "192.168.1.23", "porta": 445},
@@ -2910,6 +2911,178 @@ EOF
 )
   local r="$WORK/rete_tmp/tod-rete"
   eq "elenco e tod-smb" $'NAS di casa\t192.168.1.9\nPC-PIETRO\t192.168.1.23\nPC-PIETRO (192.168.1.24)\t192.168.1.24\n'"['', '$r nas-di-casa 192.168.1.9:4450 NAS di casa', '$r pc-pietro 192.168.1.23 PC-PIETRO', '$r pc-pietro--192.168.1.24- 192.168.1.24 PC-PIETRO (192.168.1.24)']"$'\nNAS di casa\t192.168.1.9\nPC-PIETRO (192.168.1.24)\t192.168.1.24\n'"['NAS di casa', 'PC-PIETRO (192.168.1.24)']"$'\n'"'PC-PIETRO (192.168.1.24)\\t192.168.1.24\\n' []" "$out"
+}
+
+test_rete_cambio_rete() { # 9 novembre, Pietro: "metti che cambio rete in corso d'opera". Rete nuova: i PC della vecchia
+  # spariscono subito con i loro tod-smb (niente resta appeso), quelli a mano restano con un tod-smb nuovo, e si cerca più
+  # volte; senza rete per poco non succede niente, per più di PERSA sì; una ricerca della rete di prima si butta
+  command -v python3 >/dev/null || return 0
+  local smb="$WORK/rete_cambio_smb" out
+  printf '#!/bin/sh\nexec sleep 30\n' >"$smb"
+  chmod +x "$smb"
+  out=$(TMPDIR="$WORK/rete_tmp_cambio" TOD_TERMUX_HOME="$WORK/rete_home_cambio" TOD_SMB_BIN="$smb" \
+    _stampa_py "$ROOT/share/rete/tod-rete.py" <<'EOF'
+import os, time
+os.makedirs(m.RUN, exist_ok=True)
+registro = []
+m.log = registro.append
+rete = ["192.168.178.20"]
+m.rete_attuale = lambda: rete[0]
+vol = lambda: open(m.VOLUMI).read().strip().replace("\t", " ").replace("\n", ", ")
+s = m.Servizio()
+m.principale(["x", "aggiungi", "192.168.178.90", "NAS"])
+print(s.controlla_rete(0), s.rete)
+s.aggiorna([{"nome": "DESKTOP-I78AUDA", "ip": "192.168.178.43", "porta": 445}])
+prima = dict(s.proc)
+print(vol(), "|", s.controlla_rete(1))
+rete[0] = "192.168.1.10"
+print(s.controlla_rete(2), s.raffica, vol())
+time.sleep(0.3)
+print(sorted(n for n, p in prima.items() if p.poll() is None), sorted(s.proc), s.proc["NAS"].pid != prima["NAS"].pid)
+s.aggiorna([{"nome": "MacBook Pro di Pietro", "ip": "192.168.1.9", "porta": 445}])
+rete[0] = ""
+print(s.controlla_rete(10), s.controlla_rete(15), vol())
+rete[0] = "192.168.1.10"
+print(s.controlla_rete(16), s.persa_da)
+rete[0] = ""
+print(s.controlla_rete(20), s.controlla_rete(26), s.raffica, vol())
+rete[0] = s.rete = "192.168.178.20"
+def cerca_pc(attesa=2.0, ricordati=None):
+    rete[0] = "10.20.30.40"   # il telefono passa ai dati mobili mentre si cerca
+    return [{"nome": "fritz-box", "ip": "192.168.178.1", "porta": 445, "da": "bonjour"}]
+m.cerca_pc = cerca_pc
+s.cerca()
+print(vol(), s.giri)
+m.cerca_pc = lambda attesa=2.0, ricordati=None: [{"nome": "fritz-box", "ip": "192.168.178.1", "porta": 445, "da": "bonjour"}]
+s.rete = rete[0]
+s.cerca()
+print(vol(), s.giri)
+s.chiudi()
+print("\n".join(registro))
+EOF
+)
+  eq "cambio di rete (e nel registro)" "False 192.168.178.20
+DESKTOP-I78AUDA 192.168.178.43, NAS 192.168.178.90 | False
+True [6, 14, 32] NAS 192.168.178.90
+[] ['NAS'] True
+False False MacBook Pro di Pietro 192.168.1.9, NAS 192.168.178.90
+False None
+False True [] NAS 192.168.178.90
+NAS 192.168.178.90 1
+fritz-box 192.168.178.1, NAS 192.168.178.90 2
+PC comparso: DESKTOP-I78AUDA (192.168.178.43)
+PC comparso: NAS (192.168.178.90)
+rete cambiata: 192.168.178.20 → 192.168.1.10
+PC sparito: DESKTOP-I78AUDA (192.168.178.43)
+PC comparso: MacBook Pro di Pietro (192.168.1.9)
+rete cambiata: 192.168.1.10 → nessuna
+PC sparito: MacBook Pro di Pietro (192.168.1.9)
+rete cambiata durante la ricerca: risultato scartato
+PC comparso: fritz-box (192.168.178.1)" "$out"
+}
+
+test_rete_battito() { # 9 novembre, Pietro: "per i dispositivi di rete ci vuole un controllo costante". Ogni BATTITO si bussa
+  # alla porta dei PC: chi risponde resta anche se la ricerca non l'ha visto; chi non risponde da SCADE secondi sparisce
+  # (prima dopo 10 minuti); un battito mancato da solo non basta; quelli aggiunti a mano non si toccano
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(TMPDIR="$WORK/rete_tmp_batt" TOD_TERMUX_HOME="$WORK/rete_home_batt" TOD_SMB_BIN=/nessuno \
+    _stampa_py "$ROOT/share/rete/tod-rete.py" <<'EOF'
+import os
+os.makedirs(m.RUN, exist_ok=True)
+m.log = lambda *a: None
+aperte = {"192.168.178.43"}
+bussate = []
+def porta_aperta(ip, porta, attesa=1.0):
+    bussate.append(ip)
+    return ip in aperte
+m.porta_aperta = porta_aperta
+vol = lambda: open(m.VOLUMI).read().strip().replace("\t", " ").replace("\n", ", ")
+s = m.Servizio()
+m.principale(["x", "aggiungi", "192.168.178.90", "NAS"])
+s.aggiorna([{"nome": "DESKTOP-I78AUDA", "ip": "192.168.178.43", "porta": 445},
+            {"nome": "fritz-box", "ip": "192.168.178.1", "porta": 445}])
+for n in s.pc:
+    s.pc[n]["visto"] -= m.BATTITO
+s.battito()
+print(vol(), sorted(bussate))
+for n in s.pc:
+    s.pc[n]["visto"] -= m.SCADE
+s.battito()
+print(vol(), m.BATTITO * 3 >= m.SCADE > m.BATTITO * 2)
+s.chiudi()
+EOF
+)
+  eq "battito" "DESKTOP-I78AUDA 192.168.178.43, fritz-box 192.168.178.1, NAS 192.168.178.90 ['192.168.178.1', '192.168.178.43']
+DESKTOP-I78AUDA 192.168.178.43, NAS 192.168.178.90 True" "$out"
+}
+
+test_rete_aggiorna() { # "Aggiorna" (Esplora file, Impostazioni, tod rete aggiorna): "CERCA" al servizio → una ricerca subito,
+  # la risposta quando è finita; anche dal socket vero e dalla riga di comando
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(TMPDIR="$WORK/rete_tmp_agg" TOD_TERMUX_HOME="$WORK/rete_home_agg" TOD_SMB_BIN=/nessuno LANGUAGE=it \
+    _stampa_py "$ROOT/share/rete/tod-rete.py" 2>&1 <<'EOF'
+import os, sys, threading, time
+os.makedirs(m.RUN, exist_ok=True)
+m.log = lambda *a: None
+m.rete_attuale = lambda: "192.168.1.10"
+m.porta_aperta = lambda ip, porta, attesa=1.0: True
+cercate = []
+def cerca_pc(attesa=2.0, ricordati=None):
+    cercate.append(1)
+    return [{"nome": "MacBook Pro di Pietro", "ip": "192.168.1.9", "porta": 445, "da": "bonjour"}][:len(cercate) - 1]
+m.cerca_pc = cerca_pc
+m.OGNI = m.BATTITO = 3600
+s = m.Servizio()
+threading.Thread(target=s.giro_ricerca, daemon=True).start()
+threading.Thread(target=s.giro_porta, args=(None,), daemon=True).start()
+fine = time.time() + 10
+while (s.giri < 1 or not os.path.exists(m.SOCK)) and time.time() < fine:
+    time.sleep(0.05)
+print(len(cercate), repr(s.risposta("CERCA\n", None)), len(cercate))
+print(repr(m.al_servizio("CERCA\n")), len(cercate))
+m.principale(["x", "aggiorna"])
+s.fine = True
+s.subito.set()
+s.chiudi()
+sys.stdout.flush()
+print(m.principale(["x", "aggiorna"]), file=sys.stderr)
+EOF
+)
+  eq "Aggiorna" "1 'OK\t1\n' 2
+'OK\t1\n' 3
+rete: acceso
+  MacBook Pro di Pietro (192.168.1.9)
+il servizio della rete è spento (tod rete on)
+1" "$out"
+}
+
+test_rete_ricarica() { # 9 novembre, Pietro: "un pulsante aggiorna". In Esplora file il pulsante Ricarica (come Windows, accanto
+  # all'indirizzo) che sulla Rete fa cercare subito i PC (tod-gettext.c → "CERCA"); nelle Impostazioni "Aggiorna"; tod rete
+  # aggiorna. Su un PC che non risponde tod-smb dà errore dopo 10 s, non 20
+  local g
+  g=$(sed -n '/^void \*g_file_enumerate_children(/,/^}/p' "$ROOT/share/tod-gettext.c")
+  has "Esplora file: CERCA quando elenca la Rete" 'if (p && !strcmp(p, "/media/rete")) tod_rete_cerca();' "$g"
+  has "solo in Esplora file" 'tod_file_manager()' "$g"
+  has "il messaggio per il servizio" 'send(s, "CERCA\n", 6, MSG_NOSIGNAL)' "$(sed -n '/^static void tod_rete_cerca(/,/^}/p' "$ROOT/share/tod-gettext.c")"
+  has "nuove installazioni: Ricarica prima dell'indirizzo" "open-parent:1,reload:1,location-bar:1" "$FILES_TOOLBAR"
+  has "Impostazioni: Aggiorna" 'self.rete_aggiorna(cerca)' "$(sed -n '/def rete_pc/,/def rete_cmd/p' "$ROOT/share/tod-settings.py")"
+  has "Impostazioni: tod-rete.py aggiorna" '[sys.executable, RETE, "aggiorna"]' "$(sed -n '/def rete_aggiorna/,/def rete_cmd/p' "$ROOT/share/tod-settings.py")"
+  has "tod rete aggiorna" "cerca | aggiorna | elenco" "$(sed -n '/^rete_cli()/,/^}/p' "$ROOT/lib/rete.sh")"
+  has "tod-smb: 10 s" "smbc_setTimeout(ctx, 10000);" "$(cat "$ROOT/share/rete/tod-smb.c")"
+  # le installazioni di prima: Ricarica acceso una volta sola, prima della barra dell'indirizzo
+  local x="$WORK/rete_xfconf_ric"
+  mkdir -p "$x"
+  # shellcheck disable=SC2016 # $5 e $* sono dello script finto
+  printf '#!/bin/sh\nif [ "$5" = "" ]; then echo "back:1,open-parent:1,location-bar:1,search:1,reload:0,zoom-in:0"; else echo "$*" >>"%s/set"; fi\n' "$x" >"$x/xfconf-query"
+  chmod +x "$x/xfconf-query"
+  PATH="$x:$PATH" rete_mostra_ricarica
+  PATH="$x:$PATH" rete_mostra_ricarica
+  eq "Ricarica accanto all'indirizzo, una volta" "-c thunar -p /last-toolbar-items -n -t string -s back:1,open-parent:1,reload:1,location-bar:1,search:1,zoom-in:0" "$(cat "$x/set")"
+  eq "segnato" "1" "$(conf_get RETE_RICARICA 0)"
+  command -v python3 >/dev/null || return 0
+  python3 -m py_compile "$ROOT/share/rete/tod-rete.py" "$ROOT/share/tod-settings.py"
 }
 
 test_rete_esplora() { # 8 novembre, Pietro: "su Esplora rete non c'è niente, hai messo tutto su media/rete". La Rete è la voce

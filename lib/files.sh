@@ -217,7 +217,7 @@ files_setup() { # fuori dalla sessione (installazione, tod cartelle)
 
 FILES_SESSION_VERSION=8
 
-FILES_TOOLBAR="back:1,forward:1,open-parent:1,location-bar:1,search:1,view-switcher:1,menu:1,open-home:0,undo:0,redo:0,reload:0,toggle-split-view:0,zoom-in:0,zoom-out:0,view-as-icons:0,view-as-detailed-list:0,view-as-compact-list:0"
+FILES_TOOLBAR="back:1,forward:1,open-parent:1,reload:1,location-bar:1,search:1,view-switcher:1,menu:1,open-home:0,undo:0,redo:0,toggle-split-view:0,zoom-in:0,zoom-out:0,view-as-icons:0,view-as-detailed-list:0,view-as-compact-list:0"
 
 files_session() { # dentro la sessione, una volta: Thunar pulito e icone del desktop
   if [[ $(conf_get FILES_SESSION_SET 0) == "$FILES_SESSION_VERSION" ]] || ! have xfconf-query; then return 0; fi

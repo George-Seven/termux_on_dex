@@ -420,6 +420,9 @@ int main(int argc, char **argv) {
             if (!ctx) _exit(1);
             smbc_setFunctionAuthData(ctx, credenziali);
             smbc_setOptionUseKerberos(ctx, 0);
+            /* un PC spento o fuori rete: errore dopo 10 s, non dopo i 20 di Samba (ogni operazione di Esplora file
+             * aspetterebbe tanto). Il servizio lo toglie dopo 40 s, o subito se il telefono cambia rete */
+            smbc_setTimeout(ctx, 10000);
             if (!smbc_init_context(ctx)) _exit(1);
             smbc_set_context(ctx);
             sftp_sessione(c, radice, 0);

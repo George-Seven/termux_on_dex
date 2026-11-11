@@ -68,12 +68,35 @@ rete_mostra_esplora() { # "Esplora la rete" visibile: files_session la nasconde 
   fi
 }
 
+rete_mostra_ricarica() { # il pulsante "Ricarica" nella barra di Esplora file, come Windows (accanto all'indirizzo):
+  # sulla Rete cerca subito i PC (tod-gettext.c). 9 novembre, Pietro: "un pulsante aggiorna". Una volta sola
+  # (RETE_RICARICA): se l'utente lo toglie dalla barra non torna
+  if [[ $(conf_get RETE_RICARICA 0) == 1 ]]; then return 0; fi
+  have xfconf-query || return 0
+  local v
+  v=$(xfconf-query -c thunar -p /last-toolbar-items 2>/dev/null) || v=""
+  if [[ ,$v, == *,reload:0,* ]]; then
+    if [[ ,$v, == *,location-bar:1,* ]]; then
+      v=,$v,
+      v=${v/,reload:0,/,}
+      v=${v/,location-bar:1,/,reload:1,location-bar:1,}
+      v=${v#,}
+      v=${v%,}
+    else
+      v=${v/reload:0/reload:1}
+    fi
+    xfconf-query -c thunar -p /last-toolbar-items -n -t string -s "$v" 2>/dev/null || return 0
+  fi
+  conf_set RETE_RICARICA 1
+}
+
 rete_start() { # dall'hook di sessione: il servizio della rete. In Esplora file la Rete è "Esplora la rete": la voce
   # di Thunar (network://) apre /media/rete grazie a tod-gettext.so (g_file_new_for_uri)
   rete_on || return 0
   rete_compila || true   # un tod-smb.c nuovo (aggiornamento): si ricompila
   rete_pronta || return 0
   rete_mostra_esplora
+  rete_mostra_ricarica
   (setsid python3 "$TOD_ROOT/share/rete/tod-rete.py" sorveglia </dev/null >>"$TOD_STATE_DIR/rete.log" 2>&1 &)
 }
 
@@ -83,7 +106,7 @@ rete_stop() { # fine della sessione (mai nei test: agirebbe sui processi veri)
   timeout 10 python3 "$TOD_ROOT/share/rete/tod-rete.py" ferma >>"$TOD_STATE_DIR/rete.log" 2>&1 || true
 }
 
-rete_cli() { # tod rete [stato|prepara|cerca|aggiungi INDIRIZZO [NOME]|togli NOME|dimentica NOME|riavvia|on|off]
+rete_cli() { # tod rete [stato|prepara|cerca|aggiorna|aggiungi INDIRIZZO [NOME]|togli NOME|dimentica NOME|riavvia|on|off]
   local sub=${1:-stato}
   if (($#)); then shift; fi
   case $sub in
@@ -91,8 +114,8 @@ rete_cli() { # tod rete [stato|prepara|cerca|aggiungi INDIRIZZO [NOME]|togli NOM
     on | si | sì) conf_set RETE 1; rete_start ;;
     off | no) conf_set RETE 0; rete_stop ;;
     riavvia | restart) rete_stop; sleep 1; rete_start ;;
-    stato | status | cerca | elenco | aggiungi | togli | dimentica)
+    stato | status | cerca | aggiorna | elenco | aggiungi | togli | dimentica)
       LANGUAGE=$TOD_LANG python3 "$TOD_ROOT/share/rete/tod-rete.py" "$sub" "$@" ;;
-    *) die "tod rete stato|prepara|cerca|aggiungi INDIRIZZO [NOME]|togli NOME|dimentica NOME|riavvia|on|off" ;;
+    *) die "tod rete stato|prepara|cerca|aggiorna|aggiungi INDIRIZZO [NOME]|togli NOME|dimentica NOME|riavvia|on|off" ;;
   esac
 }

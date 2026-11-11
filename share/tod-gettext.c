@@ -3124,6 +3124,42 @@ void *g_file_new_for_uri(const char *uri) {
     return real(uri);
 }
 
+/* "Ricarica" in Esplora file sulla Rete, e ogni volta che la si apre: il servizio della rete (share/rete/tod-rete.py,
+ * "CERCA") cerca subito i PC, invece che al giro del minuto. 9 novembre, Pietro: "un pulsante aggiorna". Non si aspetta
+ * la risposta: i PC trovati compaiono da soli, perché tod-fs rilegge l'elenco ogni mezzo secondo. Al più ogni 2 s:
+ * Thunar elenca la stessa cartella anche più volte di fila */
+#include <sys/socket.h>
+#include <sys/un.h>
+static void tod_rete_cerca(void) {
+    static time_t ultima;
+    time_t ora = time(NULL);
+    if (ora - ultima < 2) return;
+    ultima = ora;
+    const char *r = getenv("TOD_FS_RETE"), *t = getenv("TMPDIR");   /* la cartella del servizio, come tod-fs.c */
+    struct sockaddr_un sa = {.sun_family = AF_UNIX};
+    int n = r && *r ? snprintf(sa.sun_path, sizeof sa.sun_path, "%s/servizio.sock", r)
+                    : snprintf(sa.sun_path, sizeof sa.sun_path, "%s/tod-rete/servizio.sock", t && *t ? t : "/tmp");
+    if (n >= (int)sizeof sa.sun_path) return;
+    int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (s < 0) return;
+    if (connect(s, (struct sockaddr *)&sa, sizeof sa) == 0) send(s, "CERCA\n", 6, MSG_NOSIGNAL);
+    close(s);
+}
+
+void *g_file_enumerate_children(void *file, const char *attributes, int flags, void *cancellable, void **error) {
+    static void *(*real)(void *, const char *, int, void *, void **);
+    if (!real) real = (void *(*)(void *, const char *, int, void *, void **))tod_next("g_file_enumerate_children");
+    if (!real) return NULL;
+    if (file && tod_file_manager()) {
+        char *(*get_path)(void *) = (char *(*)(void *))dlsym(RTLD_DEFAULT, "g_file_get_path");
+        void (*gfree)(void *) = (void (*)(void *))dlsym(RTLD_DEFAULT, "g_free");
+        char *p = get_path && gfree ? get_path(file) : NULL;
+        if (p && !strcmp(p, "/media/rete")) tod_rete_cerca();
+        if (p) gfree(p);
+    }
+    return real(file, attributes, flags, cancellable, error);
+}
+
 void *g_file_query_info(void *file, const char *attributes, int flags, void *cancellable, void **error) {
     static void *(*real)(void *, const char *, int, void *, void **);
     if (!real) real = (void *(*)(void *, const char *, int, void *, void **))tod_next("g_file_query_info");
