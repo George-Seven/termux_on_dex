@@ -180,6 +180,7 @@ def xlib():
         _x.XChangeProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int,
                                        ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
         _x.XFlush.argtypes = [ctypes.c_void_p]
+        _x.XDeleteProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong]
         _x.XOpenDisplay.restype = ctypes.c_void_p
         _x.XOpenDisplay.argtypes = [ctypes.c_char_p]
     return _x
@@ -207,6 +208,18 @@ def riserva_spazio(win, altezza, larghezza_schermo, alto_schermo):
     x.XChangeProperty(dpy, xid, x.XInternAtom(dpy, b"_NET_WM_STRUT_PARTIAL", 0), cardinal, 32, 0, parziale, 12)
     x.XChangeProperty(dpy, xid, x.XInternAtom(dpy, b"_NET_WM_STRUT", 0), cardinal, 32, 0, semplice, 4)
     x.XFlush(dpy)
+
+
+def togli_spazio(win):
+    """toglie la richiesta di spazio (per farla rileggere a xfwm4: vedi Barra._verifica_area)"""
+    gw = win.get_window()
+    if gw is None or _dpy is None:
+        return
+    x = xlib()
+    xid = GdkX11.X11Window.get_xid(gw)
+    for nome in (b"_NET_WM_STRUT_PARTIAL", b"_NET_WM_STRUT"):
+        x.XDeleteProperty(_dpy, xid, x.XInternAtom(_dpy, nome, 0))
+    x.XFlush(_dpy)
 
 
 class XClientMessageEvent(ctypes.Structure):
@@ -793,6 +806,17 @@ def riga_orologio(t):
             f"<tool>{lungo}</tool><txtclick>{PANNELLO} calendario</txtclick>")
 
 
+def volume_telefono():
+    """share/tod_volume.py se il volume è quello del telefono (Termux:API), sennò None: resta quello di PulseAudio"""
+    if QUI not in sys.path:
+        sys.path.insert(1, QUI)
+    try:
+        import tod_volume
+    except ImportError:
+        return None
+    return tod_volume if tod_volume.telefono() else None
+
+
 def leggi_volume(testo):
     """(percentuale, muto) dall'uscita di pactl get-sink-volume + get-sink-mute"""
     v = re.search(r" (\d+)% ", testo)
@@ -839,7 +863,7 @@ class Vassoio(Gtk.Box):
         self.aggiorna_tutto()
         GLib.timeout_add_seconds(10, lambda: (self.aggiorna("rete"), self.aggiorna("batteria")) and True)
         GLib.timeout_add_seconds(3, lambda: self.aggiorna("notifiche") or True)
-        GLib.timeout_add_seconds(60, lambda: self.aggiorna("volume") or True)   # riserva, se l'ascolto non c'è
+        GLib.timeout_add_seconds(10, lambda: self.aggiorna("volume") or True)   # riserva, se l'ascolto non c'è
         self._minuto()
         self._ascolta_volume()
 
@@ -861,6 +885,15 @@ class Vassoio(Gtk.Box):
         elif nome == "notifiche":
             self._notifiche()
         elif nome == "volume":
+            tv = volume_telefono()
+            if tv is not None:   # il volume del telefono: dallo stato scritto da tod_volume (mai termux-volume qui: 1,5 s)
+                st = tv.stato()
+                if st is not None:
+                    self._mostra("volume", riga_volume(*st))
+                elif not getattr(self, "_vol_chiesto", False):
+                    self._vol_chiesto = True   # ancora nessuno l'ha letto: una lettura in sottofondo (avvisa lei la barra)
+                    threading.Thread(target=tv.leggi_telefono, daemon=True).start()
+                return
             try:
                 p = Gio.Subprocess.new(["sh", "-c", "pactl get-sink-volume @DEFAULT_SINK@; pactl get-sink-mute @DEFAULT_SINK@"],
                                        Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
@@ -1052,6 +1085,8 @@ class Barra(Gtk.Window):
         self.resize(g.width, h)
         self.move(g.x, g.y + g.height - h)
         riserva_spazio(self, h, g.width, g.height)
+        for ms in (400, 1500, 4000):   # xfwm4 può rifare i suoi conti dopo di noi
+            GLib.timeout_add(ms, self._verifica_area)
         # allineamento: al centro (Windows 11) o a sinistra
         fuori = self.centro.get_parent()
         if self.conf["allineamento"] == "sinistra" and fuori.get_center_widget() is self.centro:
@@ -1060,6 +1095,29 @@ class Barra(Gtk.Window):
         elif self.conf["allineamento"] != "sinistra" and fuori.get_center_widget() is not self.centro:
             self.sinistra.remove(self.centro)
             fuori.set_center_widget(self.centro)
+
+    def _verifica_area(self):
+        """Quando lo schermo cambia grandezza (dal telefono a DeX) xfwm4 rifà l'area di lavoro senza la barra e poi
+        scarta la nostra richiesta perché ha gli stessi numeri di prima: icone del desktop sotto la barra, pannelli
+        sopra. Se l'area di lavoro arriva fin sotto la barra, la richiesta si toglie e si rimette poco dopo."""
+        if not hasattr(self, "schermo"):
+            return False
+        g = self.geometria()
+        h = px(self.dim()[0])
+        p = self.schermo.p
+        wa = p.interi(p.root, "_NET_WORKAREA")
+        if (wa and len(wa) >= 4 and Gdk.Display.get_default().get_n_monitors() == 1
+                and wa[1] + wa[3] > g.y + g.height - h and not getattr(self, "_rimando", False)):
+            log("area di lavoro senza la barra:", list(wa[:4]), "→ richiesta rimandata")
+            self._rimando = True
+            togli_spazio(self)
+
+            def rimetti():
+                self._rimando = False
+                riserva_spazio(self, h, g.width, g.height)
+                return False
+            GLib.timeout_add(150, rimetti)
+        return False
 
     # modello: fissate + aperte
     def rifai(self):
