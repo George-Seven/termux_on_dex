@@ -736,6 +736,18 @@ def pactl(*args):
     subprocess.Popen(["pactl", *args], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def volume_telefono():
+    """share/tod_volume.py se il volume è quello del telefono (Termux:API), sennò None: resta quello di PulseAudio"""
+    qui = os.path.dirname(os.path.abspath(__file__))
+    if qui not in sys.path:
+        sys.path.insert(1, qui)
+    try:
+        import tod_volume
+    except ImportError:
+        return None
+    return tod_volume if tod_volume.telefono() else None
+
+
 def percento(vol):
     try:
         return int(next(iter(vol.values()))["value_percent"].rstrip("%"))
@@ -838,9 +850,14 @@ class Volume(Pannello):
         suono = self.modulo(T("suono"))
         if sink is not None:
             nome = sink["name"]
-            suono.pack_start(Capsula(icona_volume, percento(sink.get("volume", {})), bool(sink.get("mute")),
-                                     lambda v: (pactl("set-sink-mute", nome, "1" if v == 0 else "0"),
-                                                pactl("set-sink-volume", nome, f"{v}%"), self._dopo())), False, False, 0)
+            tv = volume_telefono()
+            st = tv.stato() if tv else None
+            if st is not None:   # un volume solo: quello del telefono (share/tod_volume.py), l'uscita resta al 100%
+                suono.pack_start(Capsula(icona_volume, st[0], st[1], lambda v: tv.metti(v)), False, False, 0)
+            else:
+                suono.pack_start(Capsula(icona_volume, percento(sink.get("volume", {})), bool(sink.get("mute")),
+                                         lambda v: (pactl("set-sink-mute", nome, "1" if v == 0 else "0"),
+                                                    pactl("set-sink-volume", nome, f"{v}%"), self._dopo())), False, False, 0)
             suono.pack_start(Gtk.Separator(), False, False, px(2))
             suono.pack_start(etichetta(T("uscita"), "gruppo"), False, False, 0)
             for s in uscite:

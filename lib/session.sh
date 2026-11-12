@@ -85,6 +85,11 @@ audio_ensure() { # modulo TCP per il container, un'uscita vera, niente sospensio
   m=$(audio_sinks | sed -n 1p)
   if [[ -z $m ]]; then return 1; fi
   audio_pactl set-default-sink "$m" >/dev/null 2>&1 || true
+  # un volume solo, quello del telefono (share/tod_volume.py): l'uscita di PulseAudio resta piena e non muta
+  if have termux-volume && [[ -z ${TOD_VOLUME_INTERNO:-} ]]; then
+    audio_pactl set-sink-volume "$m" 100% >/dev/null 2>&1 || true
+    audio_pactl set-sink-mute "$m" 0 >/dev/null 2>&1 || true
+  fi
   log "audio: uscita $m ($(audio_module_ids module-aaudio-sink | grep -q . && echo AAudio || echo 'OpenSL ES'))"
 }
 

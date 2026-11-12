@@ -54,7 +54,9 @@ CSS = """
 
 def leggi_imp():
     d = L.leggi_json(IMPOSTAZIONI, {})
-    return {"volume": d.get("volume", 70), "muto": d.get("muto", False), "casuale": d.get("casuale", False),
+    # volume dell'app pieno di serie: quanto si sente lo decide il volume di sistema (quello del telefono), come
+    # su un PC; col 70 di prima (curva cubica: un terzo dell'ampiezza) la musica partiva già attenuata
+    return {"volume": d.get("volume", 100), "muto": d.get("muto", False), "casuale": d.get("casuale", False),
             "ripeti": d.get("ripeti", "no"), "scheda": d.get("scheda", "brani")}
 
 

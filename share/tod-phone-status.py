@@ -156,6 +156,16 @@ def daemon():
                     show(note)
         else:
             seen = None
+        if True:   # il volume del telefono, a ogni giro: l'icona e i cursori seguono i tasti e il pannello di Android
+            try:
+                qui = os.path.dirname(os.path.abspath(__file__))
+                if qui not in sys.path:
+                    sys.path.insert(1, qui)
+                import tod_volume
+                if tod_volume.telefono():
+                    tod_volume.leggi_telefono()
+            except Exception as e:   # noqa: BLE001 - mai fermare batteria e notifiche per il volume
+                print(f"tod-phone-status: volume: {e}", file=sys.stderr)
         if n % 4 == 0:
             state["battery"] = api("termux-battery-status")
         if n % 8 == 0:   # la rete cambia meno spesso
