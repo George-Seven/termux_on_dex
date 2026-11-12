@@ -2444,7 +2444,7 @@ c = socket.socket(); c.bind(("127.0.0.1", 0)); chiusa = c.getsockname()[1]; c.cl
 print(m.porta_di("ipp://192.168.1.18/ipp/print"), m.porta_di("socket://10.0.0.9"), m.porta_di("ipps://stampante.local:8443/x"),
       m.porta_di("ipp://127.0.0.1:60001/ipp/print"), m.porta_di("usb://HP/x"))
 m.porta_di = lambda u: ("127.0.0.1", int(u)) if u.isdigit() else None
-print(sorted(m.raggiungibili([str(aperta), str(chiusa), "usb"], 0.5).items()) == [(str(aperta), True), (str(chiusa), False)])
+print(m.raggiungibili([str(aperta), str(chiusa), "usb"], 0.5) == {str(aperta): True, str(chiusa): False})
 EOF
 )
   eq "ogni stampante di rete si controlla alla sua porta; le USB no" "('192.168.1.18', 631) ('10.0.0.9', 9100) ('stampante.local', 8443) None None
