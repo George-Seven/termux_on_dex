@@ -2541,6 +2541,52 @@ everywhere ''
 True" "$out"
 }
 
+test_video_col_chip() { # 12 novembre: il Lettore decodifica col chip del telefono (MediaCodec via ffmpeg) con
+  # share/media/tod-chip.c. Si compila sul telefono solo se il sorgente è cambiato; se il chip rifiuta un file si torna
+  # al processore. Trappola trovata: senza i fili binder (ABinderProcess_startThreadPool) il chip prende 8 pacchetti e
+  # poi si ferma, dentro GStreamer (ffmpeg da solo li ha)
+  local d="$WORK/chip_$$" out
+  mkdir -p "$d/bin" "$d/casa" "$d/stato"
+  cat >"$d/bin/clang" <<'EOF'
+#!/bin/sh
+echo "clang $*" >>"$CHIP_REG"
+while [ $# -gt 0 ]; do [ "$1" = -o ] && { echo finto >"$2"; exit "${CHIP_RC:-0}"; }; shift; done
+EOF
+  printf '#!/bin/sh\necho "-I/x -lgstvideo-1.0 -lavcodec -lavutil"\n' >"$d/bin/pkg-config"
+  chmod +x "$d/bin/clang" "$d/bin/pkg-config"
+  out=$(PATH="$d/bin:$PATH" HOME="$d/casa" CHIP_REG="$d/reg" TOD_STATE_DIR="$d/stato" TOD_ROOT="$ROOT" bash -c '
+    source "$TOD_ROOT/lib/core.sh" 2>/dev/null; source "$TOD_ROOT/lib/desktop.sh"
+    have() { command -v "$1" >/dev/null; }
+    log() { echo "LOG $*"; }
+    media_chip_compila; ls "$MEDIA_CHIP_DIR"
+    media_chip_compila; wc -l <"$CHIP_REG"
+    rm -f "$MEDIA_CHIP_DIR/libgsttodchip.so"; CHIP_RC=1 media_chip_compila; ls "$MEDIA_CHIP_DIR" | wc -l' 2>&1)
+  has "compilato al primo giro" "libgsttodchip.so" "$out"
+  has "con GStreamer e libavcodec" "-lgstvideo-1.0 -lavcodec -lavutil -ldl" "$(cat "$d/reg")"
+  has "non ricompilato se il sorgente non cambia" $'libgsttodchip.so\n1' "$out"
+  has "una compilazione fallita non lascia niente" "compilazione non riuscita" "$out"
+  has "nell'installazione e negli aggiornamenti del media" "media_chip_compila || true" "$(sed -n '/^media_install()/,/^}/p' "$ROOT/lib/desktop.sh")"
+  has "a ogni avvio del desktop" "(media_chip_compila || true)" "$(cat "$ROOT/lib/session.sh")"
+  has "il modulo: i fili binder prima di aprire il chip" "ABinderProcess_startThreadPool" "$(cat "$ROOT/share/media/tod-chip.c")"
+  has "il modulo: tempi di presentazione veri al chip" "s->pkt->pts = tempo_di(f);" "$(cat "$ROOT/share/media/tod-chip.c")"
+  has "Lettore: il chip davanti (prima di Gst.init)" "chip_video()" "$(sed -n '/^def gst():/,/^def /p' "$ROOT/share/media/comune.py")"
+  has "Lettore: se il chip rifiuta, col processore dallo stesso punto" "C.chip_spento()" "$(cat "$ROOT/share/media/motore.py")"
+  # comune.chip_video (GTK: il Python di Termux)
+  local py=/data/data/com.termux/files/usr/bin/python3
+  if [[ -x $py ]] && "$py" -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null; then
+    mkdir -p "$d/casa/.local/share/tod-media" && echo x >"$d/casa/.local/share/tod-media/libgsttodchip.so"
+    out=$(env -u LD_PRELOAD -u GST_PLUGIN_PATH -u GST_PLUGIN_FEATURE_RANK TOD_TERMUX_HOME="$d/casa" "$py" -c '
+import os, sys
+sys.path.insert(0, sys.argv[1])
+import comune as C
+print(C.chip_video(), os.environ["GST_PLUGIN_PATH"].endswith("tod-media"), os.environ["GST_PLUGIN_FEATURE_RANK"])
+os.environ["TOD_VIDEO_CHIP"] = "0"
+print(C.chip_video())' "$ROOT/share/media" 2>&1)
+    eq "Lettore: cartella e rango del chip, spegnibile" "True True todchipdec:MAX
+False" "$out"
+  fi
+}
+
 test_gestione_attivita() { # 12 novembre, Pietro: Gestione attività e Cattura di XFCE "hanno l'aspetto Linux": nostre.
   # I dati (share/attivita_dati.py) su un /proc finto: nomi leggibili, processore tra due letture, processi raggruppati
   # sotto l'app della finestra, i pezzi del desktop che non si terminano

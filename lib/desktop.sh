@@ -185,9 +185,32 @@ media_mancanti() { # i pacchetti di MEDIA_PKGS non installati (vuoto = tutto a p
 media_install() { # i pacchetti che mancano (installazione, Aggiornamenti, tod media prepara)
   local manca
   manca=$(media_mancanti)
-  [[ -n $manca ]] || return 0
+  if [[ -n $manca ]]; then
+    # shellcheck disable=SC2086
+    pkg_install_avail $manca
+  fi
+  media_chip_compila || true
+}
+
+# Video col chip del telefono (12 novembre, Pietro: "ogni miglioramento è apprezzato"): share/media/tod-chip.c è un
+# decodificatore GStreamer che usa MediaCodec di Android tramite ffmpeg (h264/hevc/vp9/av1_mediacodec). 4K HEVC:
+# processore 10 s → 1,5 s ogni 8 s di video. Il Lettore lo preferisce (comune.gst); se il chip rifiuta un video si
+# torna al processore. Si compila qui, sul telefono, quando il sorgente è più nuovo; senza clang o intestazioni niente.
+MEDIA_CHIP_DIR="$HOME/.local/share/tod-media"
+media_chip_compila() {
+  local src="$TOD_ROOT/share/media/tod-chip.c" so="$MEDIA_CHIP_DIR/libgsttodchip.so" flags
+  if [[ -f $so && ! $src -nt $so ]]; then return 0; fi
+  have clang || return 0
+  flags=$(pkg-config --cflags --libs gstreamer-video-1.0 libavcodec libavutil 2>/dev/null) || return 0
+  mkdir -p "$MEDIA_CHIP_DIR" "$TOD_STATE_DIR"   # (in un'installazione nuova il registro può non esserci ancora)
   # shellcheck disable=SC2086
-  pkg_install_avail $manca
+  if clang -shared -fPIC -O2 -o "$so.tmp" "$src" $flags -ldl >>"$TOD_STATE_DIR/tod.log" 2>&1; then
+    mv -f "$so.tmp" "$so"
+    log "video col chip: modulo compilato ($so)"
+  else
+    rm -f "$so.tmp"
+    log "video col chip: compilazione non riuscita (resta la decodifica col processore)"
+  fi
 }
 
 _mime_predefinita() { # _mime_predefinita mimeapps.list tipo voce.desktop: solo se libero o di un'app che lasciamo

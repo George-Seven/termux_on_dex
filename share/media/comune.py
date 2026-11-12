@@ -606,10 +606,39 @@ def bottone_salto(secondi, avanti, suggerimento, azione):
 _GST = None
 
 
+CHIP_SO = os.path.join(CASA_TERMUX, ".local/share/tod-media/libgsttodchip.so")
+
+
+def chip_video():
+    """Il decodificatore col chip del telefono (share/media/tod-chip.c, compilato da media_chip_compila): davanti a quelli
+    col processore. Prima di Gst.init. TOD_VIDEO_CHIP=0 lo spegne."""
+    if os.environ.get("TOD_VIDEO_CHIP") == "0" or not os.path.exists(CHIP_SO):
+        return False
+    cart = os.path.dirname(CHIP_SO)
+    vecchio = os.environ.get("GST_PLUGIN_PATH", "")
+    if cart not in vecchio.split(":"):
+        os.environ["GST_PLUGIN_PATH"] = cart + (":" + vecchio if vecchio else "")
+    ranghi = os.environ.get("GST_PLUGIN_FEATURE_RANK", "")
+    if "todchipdec" not in ranghi:
+        os.environ["GST_PLUGIN_FEATURE_RANK"] = ("todchipdec:MAX," + ranghi).rstrip(",")
+    return True
+
+
+def chip_spento():
+    """Il chip ha rifiutato un video: da qui in poi (in questo processo) si decodifica col processore."""
+    Gst = gst()
+    f = Gst.ElementFactory.find("todchipdec")
+    if f is None or f.get_rank() == 0:
+        return False
+    f.set_rank(0)
+    return True
+
+
 def gst():
     """GStreamer solo quando serve (Foto lo usa per le miniature dei video della fotocamera)."""
     global _GST
     if _GST is None:
+        chip_video()
         gi.require_version("Gst", "1.0")
         from gi.repository import Gst
         Gst.init(None)

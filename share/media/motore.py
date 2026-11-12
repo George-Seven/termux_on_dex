@@ -284,6 +284,20 @@ class Motore:
         if GstVideo.is_video_overlay_prepare_window_handle_message(msg) and self.xid:
             msg.src.set_window_handle(self.xid)
 
+    def riapri(self):
+        """lo stesso file dallo stesso punto, con una catena nuova (dopo un cambio di decodificatore)"""
+        pos = self.posizione()
+        stava = self.suona_ora()
+        self.pb.set_state(Gst.State.NULL)
+        if self.uri:
+            self.pb.set_property("uri", self.uri)
+            self.pb.set_state(Gst.State.PAUSED)
+            self.pb.get_state(3 * Gst.SECOND)
+            if pos:
+                self.vai_a(pos)
+            if stava:
+                self.suona()
+
     def passa_a_cairo(self):
         """glimagesink non va (niente GL): stessa posizione, disegno con cairo."""
         pos = self.posizione()
@@ -405,6 +419,13 @@ class Motore:
             if self.video and not self.cairo and msg.src is not None and \
                     ("glimage" in (msg.src.get_name() or "") or "GL" in (err.message or "")):
                 GLib.idle_add(lambda: self.passa_a_cairo() and False)
+                return
+            # il chip video ha rifiutato questo file (formato che non sa, 10 bit…): si riprova col processore
+            if self.video and (msg.src is not None and "todchip" in (msg.src.get_name() or "")
+                               or "not-negotiated" in (dbg or "")) and C.chip_spento():
+                print(f"tod-lettore: chip video non usato per questo file ({err.message}), col processore",
+                      file=sys.stderr)
+                GLib.idle_add(lambda: self.riapri() and False)
                 return
             self.ui.errore(err.message)
         elif t == Gst.MessageType.STATE_CHANGED and msg.src == self.pb:
