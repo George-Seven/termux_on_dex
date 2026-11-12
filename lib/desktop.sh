@@ -118,7 +118,9 @@ desktop_sistema_entries() { # share/tod-cattura.py e share/tod-attivita.py nello
 }
 
 # Stamp e Ctrl+Maiusc+Esc alle app nostre, come Windows; e come macOS con il tasto Windows al posto di Command
-# (Pietro: "command shift 3 o command shift 4"): Win+Maiusc+3 tutto lo schermo, 4 una zona, 5 la barretta. XFCE
+# (Pietro: "command shift 3 o command shift 4"): Win+Maiusc+3 tutto lo schermo, 4 una zona, 5 la barretta.
+# Ctrl+Alt+Esc (e Win+Alt+Esc, come Cmd+Opzione+Esc "Uscita forzata" di macOS) alla Gestione attività: XFCE ci metteva
+# xkill, che su Termux non c'è ("non funziona, dà errore", Pietro, 12 novembre). XFCE
 # confronta il simbolo che il tasto dà con Maiusc, che cambia con la tastiera: 3 → # (americana) o £ (italiana),
 # 4 → $, 5 → %. Ci sono tutti; quelli che la tastiera non ha restano senza effetto. Una scorciatoia che l'utente ha
 # cambiato (non più quella di XFCE né la nostra) non si tocca. Dall'hook di sessione (serve xfconfd)
@@ -127,7 +129,7 @@ SISTEMA_SCORCIATOIE=("Print|tod-cattura.py" "<Shift>Print|tod-cattura.py --scher
   "<Super><Shift>3|tod-cattura.py --schermo" "<Super><Shift>numbersign|tod-cattura.py --schermo"
   "<Super><Shift>sterling|tod-cattura.py --schermo" "<Super><Shift>4|tod-cattura.py"
   "<Super><Shift>dollar|tod-cattura.py" "<Super><Shift>5|tod-cattura.py" "<Super><Shift>percent|tod-cattura.py"
-  "<Primary><Shift>Escape|tod-attivita.py")
+  "<Primary><Shift>Escape|tod-attivita.py" "<Primary><Alt>Escape|tod-attivita.py" "<Super><Alt>Escape|tod-attivita.py")
 desktop_sistema_scorciatoie() {
   have xfconf-query || return 0
   local voce k cmd ora
@@ -135,7 +137,7 @@ desktop_sistema_scorciatoie() {
     k=${voce%%|*} cmd="python3 $TOD_ROOT/share/${voce#*|}"
     ora=$(xfconf-query -c xfce4-keyboard-shortcuts -p "/commands/custom/$k" 2>/dev/null || true)
     case $ora in
-      "" | xfce4-screenshooter* | xfce4-taskmanager* | *tod-cattura.py* | *tod-attivita.py*)
+      "" | xfce4-screenshooter* | xfce4-taskmanager* | xkill* | *tod-cattura.py* | *tod-attivita.py*)
         if [[ $ora != "$cmd" ]]; then
           xfconf-query -c xfce4-keyboard-shortcuts -p "/commands/custom/$k" -n -t string -s "$cmd" || true
         fi

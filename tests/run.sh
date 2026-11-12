@@ -2608,6 +2608,7 @@ EOF
   chmod +x "$d/bin/xfconf-query"
   printf 'xfce4-screenshooter' >"$d/xf/_commands_custom_Print"
   printf 'flameshot gui' >"$d/xf/_commands_custom__Shift_Print"
+  printf 'xkill' >"$d/xf/_commands_custom__Primary__Alt_Escape"
   out=$(PATH="$d/bin:$PATH" XF="$d/xf" TOD_ROOT=/r bash -c 'source "$1/lib/core.sh" 2>/dev/null; source "$1/lib/desktop.sh"; desktop_sistema_scorciatoie
     for f in "$XF"/*; do printf "%s=%s\n" "${f##*/}" "$(cat "$f")"; done' _ "$ROOT")
   has "Stamp alla nostra" "_commands_custom_Print=python3 /r/share/tod-cattura.py" "$out"
@@ -2616,6 +2617,7 @@ EOF
   has "come macOS: Win+Maiusc+3 tutto lo schermo" "_commands_custom__Super__Shift_3=python3 /r/share/tod-cattura.py --schermo" "$out"
   has "Win+Maiusc+3 anche come lo scrive XFCE (tastiera italiana: £)" "_commands_custom__Super__Shift_sterling=python3 /r/share/tod-cattura.py --schermo" "$out"
   has "come macOS: Win+Maiusc+4 una zona" "_commands_custom__Super__Shift_4=python3 /r/share/tod-cattura.py" "$out"
+  has "Ctrl+Alt+Esc: la Gestione attività, non xkill che non c'è" "_commands_custom__Primary__Alt_Escape=python3 /r/share/tod-attivita.py" "$out"
   has "Ctrl+Maiusc+Esc: la Gestione attività" "_commands_custom__Primary__Shift_Escape=python3 /r/share/tod-attivita.py" "$out"
   has "le voci di XFCE nascoste nello Start" "xfce4-screenshooter.desktop" "$DESKTOP_USELESS"
   has "tasto destro sulla barra: la nostra Gestione attività" '"tod-attivita.py")])' "$(cat "$ROOT/share/tod-barra.py")"
