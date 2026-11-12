@@ -1321,7 +1321,8 @@ class Batteria(PannelloModuli):
         self.catalogo = Catalogo()
         Gio.AppInfoMonitor.get().connect("changed", lambda *a: setattr(self.catalogo, "voci", None))
         self.fondo.pack_start(voce_menu(TT("Gestione attività…", "Task Manager…"),
-                                        lambda: (self.nascondi(), avvia("xfce4-taskmanager"))), False, False, 0)
+                                        lambda: (self.nascondi(), avvia("python3", os.path.join(QUI, "tod-attivita.py")))),
+                              False, False, 0)
         self.fondo.pack_start(voce_menu(TT("Impostazioni Batteria…", "Battery Settings…"),
                                         lambda: (self.nascondi(), impostazioni("batteria"))), False, False, 0)
         self.batt = None

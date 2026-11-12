@@ -1321,7 +1321,7 @@ class Barra(Gtk.Window):
             return False
         m = Gtk.Menu()
         for testo, cmd in ((T("Impostazioni della barra", "Taskbar settings"), ["python3", os.path.join(QUI, "tod-settings.py"), "barra"]),
-                           (T("Gestione attività", "Task Manager"), ["xfce4-taskmanager"])):
+                           (T("Gestione attività", "Task Manager"), ["python3", os.path.join(QUI, "tod-attivita.py")])):
             it = Gtk.MenuItem(label=testo)
             it.connect("activate", lambda _i, c=cmd: subprocess.Popen(c, start_new_session=True, stdin=subprocess.DEVNULL,
                                                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))

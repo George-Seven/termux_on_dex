@@ -99,6 +99,51 @@ desktop_scanner_entry() { # "Scanner" nello Start (share/stampa/tod-scanner.py),
   printf 'StartupWMClass=tod-scanner\nComment=Scan documents and photos with your Wi-Fi or USB scanner\nComment[it]=Scansiona documenti e foto con lo scanner Wi-Fi o USB\n' >>"$f"
 }
 
+# --- Strumento di cattura e Gestione attività nostri (12 novembre, Pietro: quelle di XFCE "hanno l'aspetto Linux") --
+desktop_sistema_entries() { # share/tod-cattura.py e share/tod-attivita.py nello Start, al posto di quelle di XFCE
+  local apps="$HOME/.local/share/applications"
+  mkdir -p "$apps"
+  desktop_entry "$apps/tod-cattura.desktop" "Snipping Tool" "Strumento di cattura" \
+    "python3 $TOD_ROOT/share/tod-cattura.py" org.xfce.screenshooter false
+  sed -i 's/^Categories=.*/Categories=Utility;Graphics;/' "$apps/tod-cattura.desktop"
+  printf '%s\n' "StartupWMClass=tod-cattura" "Comment=Capture the screen, a window or an area" \
+    "Comment[it]=Cattura lo schermo, una finestra o una zona" \
+    "Keywords=screenshot;capture;snip;cattura;schermata;stamp;" >>"$apps/tod-cattura.desktop"
+  desktop_entry "$apps/tod-attivita.desktop" "Task Manager" "Gestione attività" \
+    "python3 $TOD_ROOT/share/tod-attivita.py" org.xfce.taskmanager false
+  sed -i 's/^Categories=.*/Categories=System;Monitor;/' "$apps/tod-attivita.desktop"
+  printf '%s\n' "StartupWMClass=tod-attivita" "StartupNotify=true" "Comment=See and end running apps" \
+    "Comment[it]=Guarda e termina le app aperte" "Keywords=task;process;cpu;memory;processi;memoria;termina;" \
+    >>"$apps/tod-attivita.desktop"
+}
+
+# Stamp e Ctrl+Maiusc+Esc alle app nostre, come Windows; e come macOS con il tasto Windows al posto di Command
+# (Pietro: "command shift 3 o command shift 4"): Win+Maiusc+3 tutto lo schermo, 4 una zona, 5 la barretta. XFCE
+# confronta il simbolo che il tasto dà con Maiusc, che cambia con la tastiera: 3 → # (americana) o £ (italiana),
+# 4 → $, 5 → %. Ci sono tutti; quelli che la tastiera non ha restano senza effetto. Una scorciatoia che l'utente ha
+# cambiato (non più quella di XFCE né la nostra) non si tocca. Dall'hook di sessione (serve xfconfd)
+SISTEMA_SCORCIATOIE=("Print|tod-cattura.py" "<Shift>Print|tod-cattura.py --schermo" "<Alt>Print|tod-cattura.py --finestra"
+  "<Super><Shift>s|tod-cattura.py" "<Super><Shift>S|tod-cattura.py"
+  "<Super><Shift>3|tod-cattura.py --schermo" "<Super><Shift>numbersign|tod-cattura.py --schermo"
+  "<Super><Shift>sterling|tod-cattura.py --schermo" "<Super><Shift>4|tod-cattura.py"
+  "<Super><Shift>dollar|tod-cattura.py" "<Super><Shift>5|tod-cattura.py" "<Super><Shift>percent|tod-cattura.py"
+  "<Primary><Shift>Escape|tod-attivita.py")
+desktop_sistema_scorciatoie() {
+  have xfconf-query || return 0
+  local voce k cmd ora
+  for voce in "${SISTEMA_SCORCIATOIE[@]}"; do
+    k=${voce%%|*} cmd="python3 $TOD_ROOT/share/${voce#*|}"
+    ora=$(xfconf-query -c xfce4-keyboard-shortcuts -p "/commands/custom/$k" 2>/dev/null || true)
+    case $ora in
+      "" | xfce4-screenshooter* | xfce4-taskmanager* | *tod-cattura.py* | *tod-attivita.py*)
+        if [[ $ora != "$cmd" ]]; then
+          xfconf-query -c xfce4-keyboard-shortcuts -p "/commands/custom/$k" -n -t string -s "$cmd" || true
+        fi
+        ;;
+    esac
+  done
+}
+
 desktop_store_entry() { # "Store" nello Start (share/store/tod-store-gui.py): le app di Termux, Debian e Flathub
   local f="$HOME/.local/share/applications/tod-store.desktop"
   mkdir -p "${f%/*}"
@@ -238,6 +283,7 @@ desktop_install_entries() {
   desktop_scanner_entry
   desktop_store_entry
   desktop_media_entries
+  desktop_sistema_entries
   # "Spegni": chiude desktop, audio e server X e torna ad Android. Nel menu no: c'è già il pulsante
   # di accensione dello Start
   desktop_entry "$apps/tod-stop.desktop" "Shut down" "Spegni" "$tod spegni" system-shutdown false true
@@ -312,7 +358,8 @@ DESKTOP_USELESS="org.gnome.Vte.App.Gtk3.desktop org.gnome.Vte.App.Gtk4.desktop o
   xfce4-power-manager-settings.desktop libreoffice-startcenter.desktop
   xfce-display-settings.desktop xfce-session-settings.desktop xfce-wmtweaks-settings.desktop
   xfce-workspaces-settings.desktop panel-preferences.desktop xfce4-clipman-settings.desktop
-  org.xfce.ristretto.desktop"
+  org.xfce.ristretto.desktop xfce4-screenshooter.desktop org.xfce.screenshooter.desktop xfce4-taskmanager.desktop
+  org.xfce.taskmanager.desktop"
 # Pannelli di Impostazioni tolti, perché qui non servono o rompono qualcosa: Schermo (la risoluzione
 # la decide Termux:X11, i DPI tod), Sessione e avvio (toglierebbe l'avvio di tod), Regolazioni del
 # gestore delle finestre (il compositore dà lo schermo nero), Spazi di lavoro (uno solo, nessun

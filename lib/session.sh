@@ -449,6 +449,10 @@ session_hook() { # autostart dentro il desktop: DPI per lo schermo attuale, env 
   phone_status_start || true
   dev_tools_start || true
   updates_start || true
+  if [[ $(conf_get DE xfce) == xfce ]]; then   # Strumento di cattura e Gestione attività nostri (lib/desktop.sh)
+    desktop_sistema_entries || true
+    desktop_sistema_scorciatoie || true
+  fi
   # XFCE_TUNED: versione dei ritocchi (2 = compositore acceso e ombre); cambiandola si riapplicano
   if [[ $(conf_get DE xfce) == xfce && $(conf_get XFCE_TUNED 0) != 2 ]]; then
     xfce_first_run || true

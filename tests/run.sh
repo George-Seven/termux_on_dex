@@ -2541,6 +2541,88 @@ everywhere ''
 True" "$out"
 }
 
+test_gestione_attivita() { # 12 novembre, Pietro: Gestione attività e Cattura di XFCE "hanno l'aspetto Linux": nostre.
+  # I dati (share/attivita_dati.py) su un /proc finto: nomi leggibili, processore tra due letture, processi raggruppati
+  # sotto l'app della finestra, i pezzi del desktop che non si terminano
+  command -v python3 >/dev/null || return 0
+  local d="$WORK/att_$$" out
+  mkdir -p "$d"
+  out=$(TOD_ATTIVITA_PROC="$d/proc" _stampa_py "$ROOT/share/attivita_dati.py" <<'EOF'
+import os
+P = os.environ["TOD_ATTIVITA_PROC"]
+def proc(pid, gen, tick, kb, argv, comm):
+    os.makedirs(f"{P}/{pid}", exist_ok=True)
+    open(f"{P}/{pid}/stat", "w").write(f"{pid} ({comm}) S {gen} 1 1 0 -1 0 0 0 0 0 {tick} 0 0 0 20 0 1 0")
+    open(f"{P}/{pid}/cmdline", "wb").write(b"\0".join(a.encode() for a in argv) + b"\0")
+    open(f"{P}/{pid}/smaps_rollup", "w").write(f"Rss: 9 kB\nPss: {kb} kB\n")
+os.makedirs(P, exist_ok=True)
+open(f"{P}/meminfo", "w").write("MemTotal: 12000000 kB\nMemFree: 1 kB\nMemAvailable: 4000000 kB\n")
+proc(10, 1, 100, 50000, ["/x/ld.so", "--argv0", "/usr/bin/code", "--no-sandbox"], "ld.so")
+proc(11, 10, 50, 20000, ["/x/ld.so", "--argv0", "/usr/share/code/code", "--type=zygote"], "ld.so")
+proc(12, 11, 0, 10000, ["python3", "-u", "/repo/share/media/tod-foto.py"], "python3")
+proc(20, 1, 300, 30000, ["xfwm4", "--compositor=on"], "xfwm4")
+proc(21, 1, 0, 5000, ["bash", "/repo/tod", "_hook"], "bash")
+a = m.Campione(P, ora=100.0)
+print(sorted((p.pid, p.nome, p.kb) for p in a.processi.values()), a.mem_totale, a.mem_libera)
+proc(10, 1, 100 + 400, 50000, ["/x/ld.so", "--argv0", "/usr/bin/code"], "ld.so")   # 400 tick in 2 s
+b = m.Campione(P, ora=102.0)
+u = m.cpu(a, b, tick=100, core=8)
+print({k: round(v, 1) for k, v in sorted(u.items())}, m.cpu(None, b) == {p: 0.0 for p in b.processi})
+app, resto = m.assegna(b.processi, {10: "code"})
+print({k: sorted(v) for k, v in app.items()}, sorted(resto), m.discendenti(b.processi, 10))
+print(m.protetto(b.processi[20], io=1), m.protetto(b.processi[10], io=1), m.protetto(b.processi[12], io=12),
+      m.nome_leggibile(b.processi[20]), m.nome_leggibile(b.processi[21], False))
+print(m.dimensione(512), m.dimensione(3500), m.dimensione(250000), m.dimensione(2400000), m.percento(4.56), m.percento(37.2))
+print(m.nome_processo([], "kworker"), m.nome_processo(["/usr/bin/node", "--x", "/app/main.js"]))
+EOF
+)
+  eq "nomi, memoria, processore, app con i suoi processi, protetti" "[(10, 'code', 50000), (11, 'code', 20000), (12, 'tod-foto.py', 10000), (20, 'xfwm4', 30000), (21, 'tod', 5000)] 12000000 4000000
+{10: 25.0, 11: 0.0, 12: 0.0, 20: 0.0, 21: 0.0} True
+{'code': [10, 11, 12]} [20, 21] [12, 11, 10]
+True False True Gestore delle finestre tod
+512 KB 3,4 MB 244 MB 2,3 GB 4,6% 37%
+kworker main.js" "$out"
+  # la Cattura (GTK: il Python di Termux): nome come il telefono, finestre tagliate ai bordi, cartella delle prove
+  local py=/data/data/com.termux/files/usr/bin/python3
+  if [[ -x $py ]] && "$py" -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null; then
+    out=$(env -u LD_PRELOAD TOD_CATTURA_CARTELLA="$d/foto" TOD_TERMUX_HOME="$d" "$py" -c 'import importlib.util as u, sys
+s = u.spec_from_file_location("m", sys.argv[1]); m = u.module_from_spec(s); s.loader.exec_module(m)
+exec(sys.stdin.read())' "$ROOT/share/tod-cattura.py" 2>&1 <<'EOF'
+import time
+print(m.nome_file(time.mktime((2026, 11, 12, 18, 5, 12, 0, 0, -1))), m.cartella_screenshot().endswith("/foto"))
+print(m.dentro((-20, 10, 300, 200), 1920, 1080), m.dentro((1800, 1000, 400, 300), 1920, 1080), m.dentro((2000, 0, 10, 10), 1920, 1080))
+EOF
+)
+    has "Cattura: nome e taglio" "Screenshot_20261112-180512.png True
+(0, 10, 280, 200) (1800, 1000, 120, 80) None" "$out"
+  else
+    echo "  (PyGObject di Termux assente: Cattura saltata)"
+  fi
+  # le scorciatoie: Stamp e Ctrl+Maiusc+Esc alle nostre, quella cambiata dall'utente resta
+  mkdir -p "$d/bin" "$d/xf"
+  cat >"$d/bin/xfconf-query" <<'EOF'
+#!/bin/sh
+k=$(printf '%s' "$4" | tr '/<>' '___')
+case " $* " in *" -s "*) eval "v=\${$#}"; printf '%s' "$v" >"$XF/$k" ;; *) [ -f "$XF/$k" ] && cat "$XF/$k" ;; esac
+EOF
+  chmod +x "$d/bin/xfconf-query"
+  printf 'xfce4-screenshooter' >"$d/xf/_commands_custom_Print"
+  printf 'flameshot gui' >"$d/xf/_commands_custom__Shift_Print"
+  out=$(PATH="$d/bin:$PATH" XF="$d/xf" TOD_ROOT=/r bash -c 'source "$1/lib/core.sh" 2>/dev/null; source "$1/lib/desktop.sh"; desktop_sistema_scorciatoie
+    for f in "$XF"/*; do printf "%s=%s\n" "${f##*/}" "$(cat "$f")"; done' _ "$ROOT")
+  has "Stamp alla nostra" "_commands_custom_Print=python3 /r/share/tod-cattura.py" "$out"
+  has "quella cambiata dall'utente resta" "_commands_custom__Shift_Print=flameshot gui" "$out"
+  has "Alt+Stamp: la finestra" "_commands_custom__Alt_Print=python3 /r/share/tod-cattura.py --finestra" "$out"
+  has "come macOS: Win+Maiusc+3 tutto lo schermo" "_commands_custom__Super__Shift_3=python3 /r/share/tod-cattura.py --schermo" "$out"
+  has "Win+Maiusc+3 anche come lo scrive XFCE (tastiera italiana: £)" "_commands_custom__Super__Shift_sterling=python3 /r/share/tod-cattura.py --schermo" "$out"
+  has "come macOS: Win+Maiusc+4 una zona" "_commands_custom__Super__Shift_4=python3 /r/share/tod-cattura.py" "$out"
+  has "Ctrl+Maiusc+Esc: la Gestione attività" "_commands_custom__Primary__Shift_Escape=python3 /r/share/tod-attivita.py" "$out"
+  has "le voci di XFCE nascoste nello Start" "xfce4-screenshooter.desktop" "$DESKTOP_USELESS"
+  has "tasto destro sulla barra: la nostra Gestione attività" '"tod-attivita.py")])' "$(cat "$ROOT/share/tod-barra.py")"
+  has "pannello Batteria: la nostra Gestione attività" 'avvia("python3", os.path.join(QUI, "tod-attivita.py"))' "$(cat "$ROOT/share/tod-pannelli.py")"
+  has "e le nostre al loro posto" 'desktop_sistema_entries' "$(sed -n '/^desktop_install_entries()/,/^}/p' "$ROOT/lib/desktop.sh")"
+}
+
 test_stampa_conf() { # i filtri di CUPS partono con l'ambiente del modo diretto: PassEnv sta in cups-files.conf. In
   # cupsd.conf CUPS 2.4 lo ignora, e filtri e collegamenti cadevano con il segnale 31 (6 novembre)
   command -v python3 >/dev/null || return 0
