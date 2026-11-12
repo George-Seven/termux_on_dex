@@ -76,6 +76,28 @@ def al_container(p, radice=None):
     return vero
 
 
+def rete_entra(percorso):
+    """L'utente apre un PC della Rete (/media/rete/<PC>): lo si dice al servizio (share/rete/tod-rete.py, "ENTRA"),
+    che solo così chiede la password di quel PC. Chi guarda dentro i PC da solo non fa comparire finestre."""
+    if not percorso.startswith("/media/rete/"):
+        return
+    nome = percorso[len("/media/rete/"):].split("/", 1)[0]
+    presa = os.path.join(os.environ.get("TOD_FS_RETE") or os.path.join(TMP, "tod-rete"), "servizio.sock")
+    if not nome or not os.path.exists(presa):
+        return
+    import socket
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.settimeout(1)
+        s.connect(presa)
+        s.sendall(f"ENTRA\t{nome}\n".encode())
+        s.recv(8)
+    except OSError:
+        pass
+    finally:
+        s.close()
+
+
 def filtri_zenity(testi):
     """--file-filter "Immagini | *.png *.jpg" → [["Immagini", ["*.png", "*.jpg"]]]"""
     out = []
@@ -648,6 +670,7 @@ class Pannello(Gtk.Window):
     def vai(self, percorso, storia=True):
         if percorso != ":recenti":
             percorso = os.path.normpath(percorso)   # "/home/dex/Lavori/" di zenity: senza la barra finale
+            rete_entra(percorso)
             if not os.path.isdir(percorso):
                 return
         if storia and self.qui and self.qui != percorso:
@@ -910,7 +933,17 @@ class Pannello(Gtk.Window):
 
 
 def scegli(r):
-    """Apre il pannello e aspetta (ciclo annidato: dal filo di GTK del servizio). → (codice, stampa) come zenity"""
+    """Apre il pannello e aspetta. → (codice, stampa) come zenity, con i percorsi come li vede l'app del container"""
+    percorsi = scegli_veri(r)
+    if not percorsi:
+        return 1, ""
+    sep = r.get("separatore") or "|"
+    return 0, sep.join(al_container(x) for x in percorsi) + "\n"
+
+
+def scegli_veri(r):
+    """Apre il pannello e aspetta (ciclo annidato: dal filo di GTK del servizio). → i percorsi veri scelti ([] se
+    annullato): per il portale (share/tod_portale.py), dove valgono per ogni app, con e senza proot"""
     carica_css()
     esito = {}
     ciclo = GLib.MainLoop()
@@ -921,8 +954,4 @@ def scegli(r):
     p = Pannello(r, fine)
     p.present()
     ciclo.run()
-    percorsi = esito.get("p")
-    if not percorsi:
-        return 1, ""
-    sep = r.get("separatore") or "|"
-    return 0, sep.join(al_container(x) for x in percorsi) + "\n"
+    return list(esito.get("p") or [])

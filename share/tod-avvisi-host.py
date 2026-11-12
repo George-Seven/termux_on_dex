@@ -267,6 +267,14 @@ def servizio():
 
     signal.signal(signal.SIGTERM, fine)
     threading.Thread(target=ascolta, daemon=True).start()
+    # il portale dei file: le app Electron e Chromium (Boxy SVG, VS Code…) aprono la nostra finestra
+    if QUI not in sys.path:
+        sys.path.insert(1, QUI)
+    try:
+        import tod_portale
+        portale = tod_portale.avvia(app_di)   # noqa: F841 (deve restare vivo)
+    except Exception as e:   # gli avvisi funzionano comunque
+        print(f"tod-avvisi: portale dei file non avviato: {type(e).__name__}: {e}", file=sys.stderr)
     print(f"tod-avvisi: in ascolto su {SOCK}", file=sys.stderr)
     Gtk.main()
     return 0
