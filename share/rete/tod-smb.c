@@ -423,6 +423,10 @@ int main(int argc, char **argv) {
             /* un PC spento o fuori rete: errore dopo 10 s, non dopo i 20 di Samba (ogni operazione di Esplora file
              * aspetterebbe tanto). Il servizio lo toglie dopo 40 s, o subito se il telefono cambia rete */
             smbc_setTimeout(ctx, 10000);
+            /* TOD_SMB_DEBUG=N: il registro di Samba in smb.log (3: perché un PC rifiuta utente e password, con il codice
+             * NT_STATUS_... che dà il server). 11 novembre: il Mac di Pietro rifiuta anche la password giusta */
+            const char *dbg = getenv("TOD_SMB_DEBUG");
+            if (dbg && *dbg) { smbc_setDebug(ctx, atoi(dbg)); smbc_setOptionDebugToStderr(ctx, 1); }
             if (!smbc_init_context(ctx)) _exit(1);
             smbc_set_context(ctx);
             sftp_sessione(c, radice, 0);

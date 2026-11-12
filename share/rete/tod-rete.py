@@ -46,6 +46,7 @@ SCADE = 40      # un PC che non risponde da 40 s (3 battiti di fila) sparisce. P
 PERSA = 6       # senza rete da 6 s: via i PC trovati. Un Wi-Fi che va e torna subito con lo stesso indirizzo non li tocca
 RAFFICA = (4, 12, 30)   # dopo un cambio di rete si cerca subito e di nuovo dopo 4, 12 e 30 s: appena collegato il
                         # telefono non ha ancora tutto, e i PC Windows non rispondono a ogni domanda
+INTENTO = 45   # la password si chiede solo se l'utente ha aperto quel PC da poco ("ENTRA"): vedi Servizio.risposta
 PAUSA = 15     # dopo "Annulla" quel PC non chiede la password per 15 secondi: Esplora file riprova di continuo, e l'8
                 # novembre la FRITZ!Box ha riaperto la finestra 20 volte in 20 secondi
 SCHEMA = "org.termuxondex.Rete"
@@ -116,7 +117,8 @@ def password_di(pc, utente):
         return None
     try:
         return s[0].password_lookup_sync(s[1], {"pc": pc, "utente": utente}, None)
-    except Exception:   # portachiavi chiuso o assente
+    except Exception as e:   # portachiavi chiuso o assente
+        log(f"portachiavi: {type(e).__name__}: {e}")
         return None
 
 
@@ -291,6 +293,8 @@ class Servizio:
         self.memoria = {}     # nome → {"utente", "dominio", "password"}: le credenziali di questa sessione
         self.rifiutate = set()
         self.annullate = {}   # nome → quando è stato premuto "Annulla" (PAUSA)
+        self.entrate = {}     # nome → quando l'utente ha aperto quel PC (INTENTO)
+        self.taciute = {}     # nome → ultima volta che si è scritto "non la chiedo" (una riga al minuto)
         self.lucchetti = {}   # nome → Lock: una finestra alla volta per PC
         self.m = threading.Lock()
         self.fine = False
@@ -500,6 +504,9 @@ class Servizio:
         c = riga.rstrip("\n").split("\t")
         if c[0] == "CERCA":
             return self.cerca_adesso()
+        if c[0] == "ENTRA" and len(c) >= 2:   # l'utente ha aperto questo PC (Esplora file, finestra Apri/Salva)
+            self.entrate[c[1]] = time.monotonic()
+            return "OK\n"
         if len(c) < 5 or c[0] != "AUTH":
             return "NO\n"
         nome, cartella, motivo = c[1], c[3], c[4]
@@ -529,6 +536,16 @@ class Servizio:
                 return "NO\n"   # la prima volta da ospite: le cartelle aperte a tutti non chiedono niente
             if time.monotonic() - self.annullate.get(nome, -PAUSA) < PAUSA:
                 return "NO\n"   # appena annullata: anche le richieste rimaste in coda intanto, senza finestra
+            # 11 novembre, Pietro: aprendo la Rete compariva subito la richiesta di password, per PC che non aveva
+            # scelto, ed Esplora file restava bloccato. Chi guarda dentro i PC da solo (conteggio degli elementi,
+            # miniature, altre app) non fa comparire finestre: riceve subito un rifiuto. La finestra solo per il PC
+            # che l'utente ha appena aperto.
+            ora = time.monotonic()
+            if ora - self.entrate.get(nome, -INTENTO) > INTENTO:
+                if ora - self.taciute.get(nome, -60) >= 60:
+                    self.taciute[nome] = ora
+                    log(f"{nome}/{cartella}: serve la password, ma nessuno ha aperto questo PC: non la chiedo")
+                return "NO\n"
             ultimo = carica_conf()["credenziali"].get(nome, {})
             log(f"{nome}/{cartella}: chiedo la password")
             nuove = chiedi(nome, ultimo.get("utente", ""), ultimo.get("dominio", ""), errore)
@@ -538,6 +555,7 @@ class Servizio:
                 return "NO\n"
             self.annullate.pop(nome, None)
             self.rifiutate.discard(nome)
+            self.entrate[nome] = time.monotonic()   # (se la password è sbagliata la finestra può tornare)
             self.memoria[nome] = nuove
             if nuove.pop("ricorda", False):
                 q = self.pc.get(nome, {})

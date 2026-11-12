@@ -3129,6 +3129,8 @@ void *g_file_new_for_uri(const char *uri) {
  * la risposta: i PC trovati compaiono da soli, perché tod-fs rilegge l'elenco ogni mezzo secondo. Al più ogni 2 s:
  * Thunar elenca la stessa cartella anche più volte di fila */
 #include <sys/socket.h>
+#include <sys/syscall.h>
+#include <sys/time.h>
 #include <sys/un.h>
 static void tod_rete_cerca(void) {
     static time_t ultima;
@@ -3146,6 +3148,35 @@ static void tod_rete_cerca(void) {
     close(s);
 }
 
+/* L'utente ha aperto un PC della Rete (/media/rete/<PC>[/...]): lo si dice al servizio ("ENTRA\t<PC>"), che solo così
+ * mostra la richiesta di password per quel PC. 11 novembre, Pietro: aprendo la Rete la richiesta compariva subito, per
+ * PC non scelti (qualcosa guardava dentro ognuno), ed Esplora file restava bloccato finché non si rispondeva. */
+#ifndef TOD_RETE_RADICE   /* (le prove a vista la spostano su una cartella qualunque) */
+#define TOD_RETE_RADICE "/media/rete"
+#endif
+static void tod_rete_entra(const char *percorso) {
+    const char *nome = percorso + strlen(TOD_RETE_RADICE "/");
+    size_t lung = strcspn(nome, "/");
+    char riga[300];
+    if (!lung || lung > 255) return;
+    int k = snprintf(riga, sizeof riga, "ENTRA\t%.*s\n", (int)lung, nome);
+    const char *r = getenv("TOD_FS_RETE"), *t = getenv("TMPDIR");
+    struct sockaddr_un sa = {.sun_family = AF_UNIX};
+    int n = r && *r ? snprintf(sa.sun_path, sizeof sa.sun_path, "%s/servizio.sock", r)
+                    : snprintf(sa.sun_path, sizeof sa.sun_path, "%s/tod-rete/servizio.sock", t && *t ? t : "/tmp");
+    if (n >= (int)sizeof sa.sun_path) return;
+    int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (s < 0) return;
+    struct timeval breve = {.tv_sec = 1};
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &breve, sizeof breve);
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &breve, sizeof breve);
+    if (connect(s, (struct sockaddr *)&sa, sizeof sa) == 0 && send(s, riga, k, MSG_NOSIGNAL) == k) {
+        char risposta[8];   /* si aspetta l'"OK": la richiesta di tod-smb deve arrivare dopo */
+        if (recv(s, risposta, sizeof risposta, 0) < 0) { /* servizio lento: pazienza */ }
+    }
+    close(s);
+}
+
 void *g_file_enumerate_children(void *file, const char *attributes, int flags, void *cancellable, void **error) {
     static void *(*real)(void *, const char *, int, void *, void **);
     if (!real) real = (void *(*)(void *, const char *, int, void *, void **))tod_next("g_file_enumerate_children");
@@ -3154,7 +3185,25 @@ void *g_file_enumerate_children(void *file, const char *attributes, int flags, v
         char *(*get_path)(void *) = (char *(*)(void *))dlsym(RTLD_DEFAULT, "g_file_get_path");
         void (*gfree)(void *) = (void (*)(void *))dlsym(RTLD_DEFAULT, "g_free");
         char *p = get_path && gfree ? get_path(file) : NULL;
-        if (p && !strcmp(p, "/media/rete")) tod_rete_cerca();
+        if (p && !strcmp(p, TOD_RETE_RADICE)) tod_rete_cerca();
+        else if (p && !strncmp(p, TOD_RETE_RADICE "/", strlen(TOD_RETE_RADICE "/"))) {
+            /* Thunar, mostrando una cartella, guarda dentro ogni sottocartella dal filo che disegna la finestra
+             * (misurato l'11 novembre con strace -k). Sulla Rete voleva dire entrare in ogni PC e restare fermi
+             * finché non risponde, o finché l'utente non dà la password: finestra congelata, da chiudere a forza.
+             * Lì quel controllo riceve subito "non disponibile"; l'elenco vero di una cartella gira in un altro filo. */
+            if ((long)getpid() == syscall(SYS_gettid)) {
+                void (*errore)(void **, unsigned, int, const char *) =
+                    (void (*)(void **, unsigned, int, const char *))dlsym(RTLD_DEFAULT, "g_set_error_literal");
+                unsigned (*quark)(void) = (unsigned (*)(void))dlsym(RTLD_DEFAULT, "g_io_error_quark");
+                if (errore && quark) {
+                    if (error) errore(error, quark(), 15 /* G_IO_ERROR_NOT_SUPPORTED */, "tod: rete");
+                    gfree(p);
+                    return NULL;
+                }
+            } else {
+                tod_rete_entra(p);
+            }
+        }
         if (p) gfree(p);
     }
     return real(file, attributes, flags, cancellable, error);
