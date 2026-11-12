@@ -102,8 +102,10 @@ cx_startup_watch() { # in sottofondo: spegne il cursore di attesa alla prima fin
 # PdfCraft "Aggiungi immagine") aprono la finestra dei file con il portale del desktop o, se manca, con zenity;
 # in Termux il portale non c'è, e senza zenity la finestra non si apriva affatto (31 ottobre).
 # cups-daemon e cups-filters (STAMPA_CX_PKGS): il servizio di stampa del desktop (lib/stampa.sh), anche per le
-# app di Termux.
-CX_AIUTI="zenity cups-daemon cups-filters cups-core-drivers"
+# app di Termux. cups (senza i consigliati: solo cups-driverd, cups-deviced, rastertopwg) e openprinting-ppds: senza
+# cups-driverd CUPS non elenca NESSUN driver ("lpinfo: cups-driverd failed to execute"), e ogni stampante che non sia
+# AirPrint restava senza (12 novembre, la Ricoh MP C2011 di Pietro: i suoi driver PXL/PS/PDF stanno in openprinting-ppds).
+CX_AIUTI="zenity cups-daemon cups-filters cups-core-drivers cups openprinting-ppds"
 
 cx_install() {
   local u loc

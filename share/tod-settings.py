@@ -787,19 +787,39 @@ class Settings(Gtk.Window):
         tod("display", "auto" if val == 0 else str(val))
 
     def pane_suono(self, box):
-        vol = sh(["pactl", "get-sink-volume", "@DEFAULT_SINK@"])
-        m = re.search(r"(\d+)%", vol)
-        level = int(m.group(1)) if m else 100
-        mute = sh(["pactl", "get-sink-mute", "@DEFAULT_SINK@"]).lower()
-        muted = mute.endswith(("yes", "sì", "si"))
+        tv = None   # il volume del telefono (share/tod_volume.py): uno solo, come su un PC
+        try:
+            sys.path.insert(1, os.path.dirname(os.path.abspath(__file__)))
+            import tod_volume
+            if tod_volume.telefono() and (tod_volume.stato() or tod_volume.leggi_telefono(forza=True)) is not None:
+                tv = tod_volume
+        except ImportError:
+            pass
         scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
-        scale.set_value(level)
         scale.set_size_request(260, -1)
         scale.set_draw_value(False)
-        scale.connect("value-changed", lambda s: sh(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{int(s.get_value())}%"]))
+        if tv is not None:
+            level, muted = tv.stato()
+            scale.set_value(level)
+            scale.connect("value-changed", lambda s: tv.metti(int(s.get_value())))
+
+            def silenzio(on):
+                tv.muto(on)
+                scale.set_value((tv.stato() or (0, True))[0])
+        else:
+            vol = sh(["pactl", "get-sink-volume", "@DEFAULT_SINK@"])
+            m = re.search(r"(\d+)%", vol)
+            level = int(m.group(1)) if m else 100
+            mute = sh(["pactl", "get-sink-mute", "@DEFAULT_SINK@"]).lower()
+            muted = mute.endswith(("yes", "sì", "si"))
+            scale.set_value(level)
+            scale.connect("value-changed",
+                          lambda s: sh(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{int(s.get_value())}%"]))
+
+            def silenzio(on):
+                sh(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "1" if on else "0"])
         rows = [self.row(T("Volume", "Volume"), scale),
-                self.row(T("Silenzioso", "Mute"), self.switch(muted, lambda on: sh(["pactl", "set-sink-mute", "@DEFAULT_SINK@",
-                                                                                    "1" if on else "0"])))]
+                self.row(T("Silenzioso", "Mute"), self.switch(muted, silenzio))]
         sinks = [l.split("\t") for l in sh(["pactl", "list", "sinks", "short"]).splitlines() if "\t" in l]
         if sinks:
             out = T("Altoparlanti del telefono o DeX", "Phone or DeX speakers") if re.search("opensl|sles|aaudio", sinks[0][1].lower()) else sinks[0][1]
@@ -1025,54 +1045,26 @@ class Settings(Gtk.Window):
             self.sc_box.remove(c)
         righe = []
         for s in lista:
-            h = Gtk.Box(spacing=12)
-            h.get_style_context().add_class("group-row")
-            img = Gtk.Image.new_from_icon_name("scanner", Gtk.IconSize.DND)
-            img.set_pixel_size(32)
-            h.pack_start(img, False, False, 0)
-            v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, valign=Gtk.Align.CENTER)
-            v.pack_start(Gtk.Label(label=s["nome"], xalign=0), False, False, 0)
-            dove = {"usb": "USB", "wifi": "Wi-Fi", "indirizzo": T("Aggiunto con l'indirizzo", "Added by address")}
-            sl = Gtk.Label(label=" · ".join(x for x in (dove.get(s["dove"], ""), s.get("ip", "")) if x), xalign=0)
-            sl.get_style_context().add_class("hint")
-            v.pack_start(sl, False, False, 0)
-            h.pack_start(v, True, True, 0)
+            dove = {"usb": "USB", "wifi": "Wi-Fi", "rete": "Wi-Fi", "indirizzo": T("Aggiunto con l'indirizzo", "Added by address")}
+            destra = [self.button(T("Scansiona", "Scan"), lambda k=s["chiave"]: self.apri_scanner(k))]
             if s["dove"] == "indirizzo":
                 menu = Gtk.Menu()
                 mi = Gtk.MenuItem(label=T("Rimuovi", "Remove"))
                 mi.connect("activate", lambda _w, k=s["chiave"]: self.togli_scanner(k))
                 menu.append(mi)
                 menu.show_all()
-                mb = Gtk.MenuButton(popup=menu, valign=Gtk.Align.CENTER)
+                mb = Gtk.MenuButton(popup=menu)
                 mb.add(Gtk.Image.new_from_icon_name("view-more-symbolic", Gtk.IconSize.BUTTON))
-                h.pack_end(mb, False, False, 0)
-            b = self.button(T("Scansiona", "Scan"), lambda k=s["chiave"]: self.apri_scanner(k))
-            b.set_valign(Gtk.Align.CENTER)
-            h.pack_end(b, False, False, 0)
-            righe.append(h)
+                destra.append(mb)
+            spento = s.get("raggiungibile") is False
+            destra[0].set_sensitive(not spento)
+            righe.append(self.riga_dispositivo("scanner", s["nome"], "grigio" if spento else "verde", " · ".join(
+                x for x in (dove.get(s["dove"], ""), "Offline" if spento else T("Pronto", "Ready")) if x), None, destra))
         if not righe:
-            righe.append(self.row(T("Nessuno scanner", "No scanners"),
-                                  self.button(T("Apri Scanner", "Open Scanner"), self.apri_scanner),
+            righe.append(self.row(T("Nessuno scanner", "No scanners"), None,
                                   T("Accendi la multifunzione Wi-Fi (nella stessa rete) o collega quella USB.",
                                     "Turn on your Wi-Fi multifunction printer (same network) or plug in the USB one.")))
-        voce = Gtk.Entry(placeholder_text=T("192.168.1.50", "192.168.1.50"), width_chars=24)
-        voce.connect("activate", lambda w: self.aggiungi_scanner(w.get_text()))
-        hb = Gtk.Box(spacing=6)
-        hb.pack_start(voce, False, False, 0)
-        hb.pack_start(self.button(T("Aggiungi", "Add"), lambda: self.aggiungi_scanner(voce.get_text())), False, False, 0)
-        righe.append(self.row(T("Con l'indirizzo", "By address"), hb,
-                              T("Per uno scanner di rete che non compare qui sopra.", "For a network scanner not listed above.")))
-        righe.append(self.row(T("Cerca di nuovo", "Search again"), self.button(T("Cerca", "Search"),
-                                                                                lambda: self.fill_scanner(""))))
         self.group(self.sc_box, T("Scanner", "Scanners"), righe)
-        nota = Gtk.Label(label=T("Gli scanner delle multifunzione Wi-Fi e USB (AirScan/eSCL, quasi tutte quelle degli "
-                                 "ultimi anni) si usano senza driver. Gli scanner USB più vecchi, con un driver proprio, "
-                                 "non sono supportati.",
-                                 "Scanners in Wi-Fi and USB multifunction printers (AirScan/eSCL, almost all recent ones) "
-                                 "work without drivers. Older USB scanners that need their own driver are not supported."),
-                             xalign=0, wrap=True)
-        nota.get_style_context().add_class("hint")
-        self.sc_box.pack_start(nota, False, False, 0)
         self.sc_box.show_all()
         return False
 
@@ -1115,6 +1107,55 @@ class Settings(Gtk.Window):
             GLib.idle_add(lambda: self.show_stampanti(e, trovate) and False)
         threading.Thread(target=carica, daemon=True).start()
 
+    def riga_dispositivo(self, icona, nome, punto, stato, etichetta=None, destra=()):
+        """Una stampante o uno scanner nell'elenco: icona in un riquadro, nome, pallino di stato, pulsanti a destra."""
+        st_css()
+        h = Gtk.Box(spacing=14)
+        h.get_style_context().add_class("group-row")
+        img = Gtk.Image.new_from_icon_name(icona, Gtk.IconSize.DND)
+        img.set_pixel_size(34)
+        riq = Gtk.Box(valign=Gtk.Align.CENTER)
+        riq.get_style_context().add_class("st-icona")
+        riq.pack_start(img, False, False, 0)
+        h.pack_start(riq, False, False, 0)
+        v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3, valign=Gtk.Align.CENTER)
+        su = Gtk.Box(spacing=8)
+        n = Gtk.Label(label=nome, xalign=0, ellipsize=3)
+        n.get_style_context().add_class("st-nome")
+        su.pack_start(n, False, False, 0)
+        if etichetta:
+            e = Gtk.Label(label=etichetta, valign=Gtk.Align.CENTER)
+            e.get_style_context().add_class("st-etichetta")
+            su.pack_start(e, False, False, 0)
+        v.pack_start(su, False, False, 0)
+        giu = Gtk.Box(spacing=6)
+        p = Gtk.Box(valign=Gtk.Align.CENTER)
+        p.get_style_context().add_class("st-punto")
+        p.get_style_context().add_class("p-" + punto)
+        giu.pack_start(p, False, False, 0)
+        sl = Gtk.Label(label=stato, xalign=0, ellipsize=3)
+        sl.get_style_context().add_class("hint")
+        giu.pack_start(sl, False, False, 0)
+        v.pack_start(giu, False, False, 0)
+        h.pack_start(v, True, True, 0)
+        for w in reversed(list(destra)):
+            w.set_valign(Gtk.Align.CENTER)
+            h.pack_end(w, False, False, 0)
+        return h
+
+    def stato_stampante(self, p):
+        """(pallino, frase) di una stampante dell'elenco di tod-stampa.py"""
+        n = len(p["lavori"])
+        coda = T(f" · {n} in coda", f" · {n} queued") if n else ""
+        if p["raggiungibile"] is False:   # prima di tutto: spenta o su un'altra rete non è né pronta né in pausa
+            return "grigio", (T("Non collegata", "Not connected") if p["tipo"] == "usb" else "Offline") + coda
+        if not p["attiva"]:
+            return "arancio", T("In pausa", "Paused") + coda
+        if p["stato"] == "stampa" or n:
+            return "blu", (T("Sta stampando", "Printing") if p["stato"] == "stampa" else T("In attesa", "Waiting")) + \
+                T(f" · {n} in coda" if n != 1 else " · 1 documento", f" · {n} queued")
+        return "verde", T("Pronta", "Ready")
+
     def show_stampanti(self, e, trovate):
         for c in self.st_box.get_children():
             self.st_box.remove(c)
@@ -1128,33 +1169,14 @@ class Settings(Gtk.Window):
             self.st_box.show_all()
             return False
         righe = []
+        in_coda = False
         for p in e.get("stampanti", []):
-            h = Gtk.Box(spacing=12)
-            h.get_style_context().add_class("group-row")
-            img = Gtk.Image.new_from_icon_name("printer", Gtk.IconSize.DND)
-            img.set_pixel_size(32)
-            h.pack_start(img, False, False, 0)
-            v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, valign=Gtk.Align.CENTER)
-            v.pack_start(Gtk.Label(label=p["descrizione"], xalign=0), False, False, 0)
+            punto, frase = self.stato_stampante(p)
             dove = {"usb": "USB", "rete": "Wi-Fi"}.get(p["tipo"], p["tipo"])
-            if not p["attiva"]:
-                stato = T("In pausa", "Paused")
-            elif p["raggiungibile"] is False:
-                stato = T("Non collegata", "Not connected") if p["tipo"] == "usb" else T("Non raggiungibile", "Not reachable")
-            elif p["stato"] == "stampa":
-                stato = T("Sta stampando", "Printing")
-            else:
-                stato = T("Pronta", "Ready")
-            parti = [dove, stato]
-            if p["predefinita"]:
-                parti.append(T("Predefinita", "Default"))
-            if p["lavori"]:
-                n = len(p["lavori"])
-                parti.append(T(f"{n} in coda" if n > 1 else "1 in coda", f"{n} queued"))
-            sl = Gtk.Label(label=" · ".join(parti), xalign=0)
-            sl.get_style_context().add_class("hint")
-            v.pack_start(sl, False, False, 0)
-            h.pack_start(v, True, True, 0)
+            n = len(p["lavori"])
+            in_coda = in_coda or bool(n)
+            coda = self.button(T("Coda di stampa", "Print queue") + (f" ({n})" if n else ""),
+                               lambda nome=p["nome"]: self.apri_coda(nome))
             menu = Gtk.Menu()
             voci = []
             if not p["predefinita"]:
@@ -1163,51 +1185,68 @@ class Settings(Gtk.Window):
             voci.append((T("Stampa una pagina di prova", "Print a test page"), lambda n=p["nome"]: self.stampa(
                 "prova", n, then=lambda c, t: self.fill_stampanti(
                     T("Pagina di prova inviata.", "Test page sent.") if c == 0 else t))))
-            if p["lavori"]:
-                voci.append((T("Annulla i lavori in coda", "Cancel queued jobs"), lambda n=p["nome"]: self.stampa(
-                    "annulla", n, then=lambda *_: self.fill_stampanti())))
+            if not p["attiva"]:
+                voci.insert(0, (T("Riprendi la stampa", "Resume printing"), lambda n=p["nome"]: self.stampa(
+                    "riprendi", n, then=lambda *_: self.fill_stampanti())))
             voci.append((T("Rimuovi", "Remove"), lambda q=p: self.togli_stampante(q)))
             for testo, cb in voci:
                 mi = Gtk.MenuItem(label=testo)
                 mi.connect("activate", lambda _w, f=cb: f())
                 menu.append(mi)
             menu.show_all()
-            mb = Gtk.MenuButton(popup=menu, valign=Gtk.Align.CENTER)
+            mb = Gtk.MenuButton(popup=menu)
             mb.add(Gtk.Image.new_from_icon_name("view-more-symbolic", Gtk.IconSize.BUTTON))
-            h.pack_end(mb, False, False, 0)
-            righe.append(h)
+            righe.append(self.riga_dispositivo("printer", p["descrizione"], punto, f"{dove} · {frase}",
+                                               T("Predefinita", "Default") if p["predefinita"] else None, (coda, mb)))
+            if not p["attiva"] and p.get("motivo"):
+                motivo = p["motivo"]
+                if ITALIAN and re.search(r"configuration is incorrect|no longer exists|Unable to locate|not responding", motivo):
+                    motivo = ("La stampante non risponde o non è configurata bene. Controlla che sia accesa; "
+                              "se non riparte, rimuovila e aggiungila di nuovo.")
+                righe.append(self.row(T("Stampante ferma", "Printer stopped"),
+                                      self.button(T("Riprendi", "Resume"), lambda n=p["nome"]: self.stampa(
+                                          "riprendi", n, then=lambda *_: self.fill_stampanti())), motivo))
         if not righe:
             righe.append(self.row(T("Nessuna stampante", "No printers"), None,
-                                  T("Collega una stampante USB o accendi quella Wi-Fi: si aggiunge da sola.",
-                                    "Plug in a USB printer or turn on your Wi-Fi printer: it's added automatically.")))
+                                  T("Accendi la stampante Wi-Fi o collega quella USB: di solito si aggiunge da sola.",
+                                    "Turn on your Wi-Fi printer or plug in the USB one: it's usually added automatically.")))
         self.group(self.st_box, T("Stampanti", "Printers"), righe)
-
-        installate = {p["uri"] for p in e.get("stampanti", [])}
-        ip_installati = {re.sub(r"^\w+://([^/:]+).*", r"\1", u) for u in installate}
-        nuove = [t for t in trovate if t["uri"] not in installate and t["ip"] not in ip_installati]
-        righe = []
-        for t in nuove:
-            b = self.button(T("Aggiungi", "Add"), lambda k=t["chiave"]: self.aggiungi_stampante(k))
-            righe.append(self.row(t["modello"], b, " · ".join(
-                ["Wi-Fi", t["ip"]] + ([] if t["senza_driver"] else [T("potrebbe servire un driver", "may need a driver")]))))
-        voce = Gtk.Entry(placeholder_text=T("192.168.1.50 o ipp://…", "192.168.1.50 or ipp://…"), width_chars=24)
-        voce.connect("activate", lambda w: self.aggiungi_stampante(w.get_text()))
-        hb = Gtk.Box(spacing=6)
-        hb.pack_start(voce, False, False, 0)
-        hb.pack_start(self.button(T("Aggiungi", "Add"), lambda: self.aggiungi_stampante(voce.get_text())), False, False, 0)
-        righe.append(self.row(T("Con l'indirizzo", "By address"), hb,
-                              T("Per una stampante di rete che non compare qui sopra.", "For a network printer not listed above.")))
-        righe.append(self.row(T("Cerca di nuovo in rete", "Search the network again"),
-                              self.button(T("Cerca", "Search"), self.ricerca_stampanti)))
-        self.group(self.st_box, T("Aggiungi una stampante", "Add a printer"), righe)
-        nota = Gtk.Label(label=T("Le stampanti USB e quelle Wi-Fi della tua rete si aggiungono da sole, senza driver nella "
-                                 "maggior parte dei casi. Ogni app le trova nella sua finestra di stampa.",
-                                 "USB printers and Wi-Fi printers on your network are added automatically, usually "
-                                 "without drivers. Every app finds them in its print dialog."), xalign=0, wrap=True)
-        nota.get_style_context().add_class("hint")
-        self.st_box.pack_start(nota, False, False, 0)
+        if in_coda and not getattr(self, "_st_giro", 0):   # finché c'è coda l'elenco si aggiorna da solo
+            def rifai():
+                self._st_giro = 0
+                if self.st_box.get_mapped():
+                    self.fill_stampanti()
+                return False
+            self._st_giro = GLib.timeout_add_seconds(4, rifai)
+        # stampanti viste in rete e non ancora aggiunte: lo dice il pulsante
+        ip_installati = {re.sub(r"^\w+://([^/:]+).*", r"\1", p["uri"]) for p in e.get("stampanti", [])}
+        nuove = [t for t in trovate if t["ip"] not in ip_installati]
+        b = Gtk.Button(label=T("Aggiungi stampante o scanner…", "Add printer or scanner…"))
+        b.get_style_context().add_class("suggested-action")
+        b.connect("clicked", lambda *_: self.aggiunta_guidata())
+        riga = Gtk.Box(spacing=12)
+        riga.pack_start(b, False, False, 0)
+        if nuove:
+            av = Gtk.Label(label=T(f"Trovata in rete: {nuove[0]['modello']}" if len(nuove) == 1 else
+                                   f"Trovate in rete: {len(nuove)} stampanti", f"Found on the network: {len(nuove)}"), xalign=0)
+            av.get_style_context().add_class("hint")
+            riga.pack_start(av, False, False, 0)
+        self.st_box.pack_start(riga, False, False, 4)
         self.st_box.show_all()
         return False
+
+    def apri_coda(self, nome):
+        aperte = getattr(self, "_code", None)
+        if aperte is None:
+            aperte = self._code = {}
+        w = aperte.get(nome)
+        if w is None:
+            w = aperte[nome] = Coda(self, nome)
+            w.connect("destroy", lambda *_: (aperte.pop(nome, None), self.fill_stampanti()))
+        w.present()
+
+    def aggiunta_guidata(self):
+        AggiuntaGuidata(self).present()
 
     def aggiungi_stampante(self, cosa):
         cosa = cosa.strip()
@@ -1440,6 +1479,374 @@ class Settings(Gtk.Window):
         self.group(box, T("Altro", "Other"), [
             self.row(T("Tutte le impostazioni di XFCE", "All XFCE settings"),
                      self.button(T("Apri", "Open"), lambda: spawn([os.path.join(PREFIX, "bin/xfce4-settings-manager")])))])
+
+
+# --- Stampanti e scanner: stile dell'elenco, coda di stampa, aggiunta guidata (12 novembre) ------------------------
+ST_CSS = b"""
+.st-nome { font-weight: 600; font-size: 10.5pt; }
+.st-icona { background-color: alpha(@theme_fg_color, 0.06); border-radius: 12px; padding: 9px; }
+.st-punto { border-radius: 99px; min-width: 8px; min-height: 8px; }
+.p-verde { background-color: #30b94d; } .p-arancio { background-color: #ff9f0a; } .p-blu { background-color: #0a84ff; }
+.p-grigio { background-color: alpha(@theme_fg_color, 0.3); }
+.st-etichetta { background-color: alpha(@theme_fg_color, 0.09); border-radius: 99px; padding: 1px 9px; font-size: 8pt; }
+.st-titolo { font-weight: 700; font-size: 14pt; }
+.st-vuoto { opacity: 0.55; font-size: 10.5pt; }
+.st-finestra { background-color: @theme_base_color; }
+"""
+_st_css_fatto = False
+
+
+def st_css():
+    global _st_css_fatto
+    if not _st_css_fatto:
+        _st_css_fatto = True
+        p = Gtk.CssProvider()
+        p.load_from_data(ST_CSS)
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), p, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+
+
+def st_elenco():
+    """L'elenco di tod-stampa.py (stampanti, stato, lavori); {} se non risponde."""
+    try:
+        return json.loads(subprocess.run([sys.executable, STAMPA, "elenco", "--json"], capture_output=True, text=True,
+                                         timeout=30, stdin=subprocess.DEVNULL).stdout or "{}")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return {}
+
+
+class Coda(Gtk.Window):
+    """La coda di stampa di una stampante, come su Windows e macOS (Pietro, 12 novembre: "ci vorrebbe la finestra per
+    gestire la coda di stampa"): i documenti in coda e gli ultimi stampati, Annulla per documento, pausa e ripresa."""
+
+    def __init__(self, madre, nome):
+        super().__init__(title=T("Coda di stampa", "Print queue"))
+        st_css()
+        self.madre, self.nome, self.visto, self.fermo = madre, nome, None, False
+        self.set_default_size(560, 440)
+        self.set_icon_name("printer")
+        self.get_style_context().add_class("st-finestra")
+        fuori = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.add(fuori)
+        testa = Gtk.Box(spacing=14)
+        for m in ("top", "bottom", "start", "end"):
+            getattr(testa, f"set_margin_{m}")(18)
+        img = Gtk.Image.new_from_icon_name("printer", Gtk.IconSize.DIALOG)
+        img.set_pixel_size(44)
+        testa.pack_start(img, False, False, 0)
+        v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3, valign=Gtk.Align.CENTER)
+        self.l_nome = Gtk.Label(label=nome, xalign=0, ellipsize=3)
+        self.l_nome.get_style_context().add_class("st-titolo")
+        v.pack_start(self.l_nome, False, False, 0)
+        riga = Gtk.Box(spacing=6)
+        self.punto = Gtk.Box(valign=Gtk.Align.CENTER)
+        self.punto.get_style_context().add_class("st-punto")
+        riga.pack_start(self.punto, False, False, 0)
+        self.l_stato = Gtk.Label(xalign=0)
+        self.l_stato.get_style_context().add_class("hint")
+        riga.pack_start(self.l_stato, False, False, 0)
+        v.pack_start(riga, False, False, 0)
+        testa.pack_start(v, True, True, 0)
+        self.b_pausa = Gtk.Button(label=T("Metti in pausa", "Pause"), valign=Gtk.Align.CENTER)
+        self.b_pausa.connect("clicked", lambda *_: self.comando("riprendi" if self.fermo else "pausa", self.nome))
+        testa.pack_end(self.b_pausa, False, False, 0)
+        fuori.pack_start(testa, False, False, 0)
+        fuori.pack_start(Gtk.Separator(), False, False, 0)
+        sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        self.lista = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        sw.add(self.lista)
+        fuori.pack_start(sw, True, True, 0)
+        fuori.pack_start(Gtk.Separator(), False, False, 0)
+        fondo = Gtk.Box(spacing=8)
+        for m in ("top", "bottom", "start", "end"):
+            getattr(fondo, f"set_margin_{m}")(12)
+        self.b_tutti = Gtk.Button(label=T("Annulla tutti", "Cancel all"))
+        self.b_tutti.connect("clicked", lambda *_: self.comando("annulla", self.nome))
+        fondo.pack_start(self.b_tutti, False, False, 0)
+        prova = Gtk.Button(label=T("Pagina di prova", "Test page"))
+        prova.connect("clicked", lambda *_: self.comando("prova", self.nome))
+        fondo.pack_start(prova, False, False, 0)
+        chiudi = Gtk.Button(label=T("Chiudi", "Close"))
+        chiudi.connect("clicked", lambda *_: self.destroy())
+        fondo.pack_end(chiudi, False, False, 0)
+        fuori.pack_start(fondo, False, False, 0)
+        self.giro = GLib.timeout_add_seconds(2, self.aggiorna)
+        self.connect("destroy", lambda *_: GLib.source_remove(self.giro))
+        self.aggiorna()
+        fuori.show_all()
+
+    def comando(self, *args):
+        self.madre.stampa(*args, then=lambda *_: self.aggiorna())
+
+    def aggiorna(self):
+        def carica():
+            e = st_elenco()
+            GLib.idle_add(lambda: self.mostra(e) and False)
+        threading.Thread(target=carica, daemon=True).start()
+        return True
+
+    def riga(self, titolo, sotto, pulsante=None, spento=False):
+        h = Gtk.Box(spacing=12)
+        h.get_style_context().add_class("group-row")
+        img = Gtk.Image.new_from_icon_name("x-office-document", Gtk.IconSize.DND)
+        img.set_pixel_size(28)
+        h.pack_start(img, False, False, 0)
+        v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, valign=Gtk.Align.CENTER)
+        v.pack_start(Gtk.Label(label=titolo, xalign=0, ellipsize=3), False, False, 0)
+        s = Gtk.Label(label=sotto, xalign=0)
+        s.get_style_context().add_class("hint")
+        v.pack_start(s, False, False, 0)
+        h.pack_start(v, True, True, 0)
+        if pulsante is not None:
+            pulsante.set_valign(Gtk.Align.CENTER)
+            h.pack_end(pulsante, False, False, 0)
+        if spento:
+            h.set_opacity(0.6)
+        return h
+
+    def mostra(self, e):
+        p = next((x for x in e.get("stampanti", []) if x["nome"] == self.nome), None)
+        if p is None:
+            if e.get("servizio"):   # la stampante è stata tolta
+                self.destroy()
+            return
+        impronta = json.dumps(p, sort_keys=True)
+        if impronta == self.visto:
+            return
+        self.visto = impronta
+        punto, frase = self.madre.stato_stampante(p)
+        self.l_nome.set_text(p["descrizione"])
+        self.l_stato.set_text(frase)
+        ctx = self.punto.get_style_context()
+        for c in ("p-verde", "p-arancio", "p-blu", "p-grigio"):
+            ctx.remove_class(c)
+        ctx.add_class("p-" + punto)
+        self.fermo = not p["attiva"]
+        self.b_pausa.set_label(T("Riprendi", "Resume") if self.fermo else T("Metti in pausa", "Pause"))
+        self.b_tutti.set_sensitive(bool(p["lavori"]))
+        for c in self.lista.get_children():
+            self.lista.remove(c)
+        for i, lav in enumerate(p["lavori"]):
+            numero = lav["id"].rsplit("-", 1)[1]
+            dove = (T("In stampa", "Printing") if i == 0 and p["stato"] == "stampa" and p["attiva"]
+                    else T("In pausa", "Paused") if self.fermo else T("In attesa", "Waiting"))
+            b = Gtk.Button(label=T("Annulla", "Cancel"))
+            b.connect("clicked", lambda _w, j=lav["id"]: self.comando("annulla", j))
+            self.lista.pack_start(self.riga(lav.get("titolo") or T(f"Documento {numero}", f"Document {numero}"),
+                                            f"{dove} · {max(1, lav.get('byte', 0) // 1024)} KB", b), False, False, 0)
+            self.lista.pack_start(Gtk.Separator(), False, False, 0)
+        if not p["lavori"]:
+            vuoto = Gtk.Label(label=T("Nessun documento in coda", "No documents in the queue"))
+            vuoto.get_style_context().add_class("st-vuoto")
+            vuoto.set_margin_top(28)
+            vuoto.set_margin_bottom(20)
+            self.lista.pack_start(vuoto, False, False, 0)
+        for lav in p.get("fatti", []):
+            numero = lav["id"].rsplit("-", 1)[1]
+            self.lista.pack_start(self.riga(T(f"Documento {numero}", f"Document {numero}"),
+                                            T("Inviato alla stampante", "Sent to the printer") + " · " + lav.get("quando", ""),
+                                            spento=True), False, False, 0)
+        self.lista.show_all()
+
+
+class AggiuntaGuidata(Gtk.Window):
+    """Aggiungere una stampante o uno scanner in tre passi (Pietro, 12 novembre: "un'installazione guidata"): le trovate
+    in rete (o l'indirizzo), la configurazione, la pagina di prova."""
+
+    def __init__(self, madre):
+        super().__init__(title=T("Aggiungi stampante o scanner", "Add printer or scanner"))
+        st_css()
+        self.madre = madre
+        self.set_transient_for(madre)
+        self.set_modal(True)
+        self.set_default_size(520, 460)
+        self.set_icon_name("printer")
+        self.get_style_context().add_class("st-finestra")
+        self.pile = Gtk.Stack(transition_type=Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
+        self.add(self.pile)
+        # 1. scegli
+        p1 = self.pagina()
+        p1.pack_start(self.titolo(T("Quale vuoi aggiungere?", "Which one do you want to add?"),
+                                  T("Accendila e collegala alla stessa rete Wi-Fi di questo dispositivo.",
+                                    "Turn it on and connect it to the same Wi-Fi network as this device.")), False, False, 0)
+        self.trovate = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.trovate.get_style_context().add_class("group")
+        sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        sw.add(self.trovate)
+        p1.pack_start(sw, True, True, 0)
+        riga = Gtk.Box(spacing=8)
+        self.indirizzo = Gtk.Entry(placeholder_text=T("Non c'è? Scrivi il suo indirizzo: 192.168.1.50", "Not there? Type its address: 192.168.1.50"))
+        self.indirizzo.connect("activate", lambda w: self.aggiungi(w.get_text().strip(), w.get_text().strip()))
+        riga.pack_start(self.indirizzo, True, True, 0)
+        b = Gtk.Button(label=T("Aggiungi", "Add"))
+        b.connect("clicked", lambda *_: self.aggiungi(self.indirizzo.get_text().strip(), self.indirizzo.get_text().strip()))
+        riga.pack_start(b, False, False, 0)
+        p1.pack_start(riga, False, False, 0)
+        fondo = Gtk.Box(spacing=8)
+        ancora = Gtk.Button(label=T("Cerca di nuovo", "Search again"))
+        ancora.connect("clicked", lambda *_: self.cerca())
+        fondo.pack_start(ancora, False, False, 0)
+        chiudi = Gtk.Button(label=T("Chiudi", "Close"))
+        chiudi.connect("clicked", lambda *_: self.destroy())
+        fondo.pack_end(chiudi, False, False, 0)
+        p1.pack_start(fondo, False, False, 0)
+        self.pile.add_named(p1, "scegli")
+        # 2. configurazione in corso
+        p2 = self.pagina()
+        centro = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, valign=Gtk.Align.CENTER)
+        gira = Gtk.Spinner(active=True)
+        gira.set_size_request(40, 40)
+        centro.pack_start(gira, False, False, 0)
+        self.l_lavoro = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER)
+        self.l_lavoro.get_style_context().add_class("st-nome")
+        centro.pack_start(self.l_lavoro, False, False, 0)
+        sotto = Gtk.Label(label=T("Chiedo al dispositivo cosa sa fare e scelgo il driver. Qualche secondo.",
+                                  "Asking the device what it can do and choosing the driver. A few seconds."), wrap=True,
+                          justify=Gtk.Justification.CENTER)
+        sotto.get_style_context().add_class("hint")
+        centro.pack_start(sotto, False, False, 0)
+        p2.pack_start(centro, True, True, 0)
+        self.pile.add_named(p2, "lavoro")
+        # 3. fatto, o no
+        p3 = self.pagina()
+        centro = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, valign=Gtk.Align.CENTER)
+        self.i_esito = Gtk.Image()
+        centro.pack_start(self.i_esito, False, False, 0)
+        self.l_esito = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER)
+        self.l_esito.get_style_context().add_class("st-titolo")
+        centro.pack_start(self.l_esito, False, False, 0)
+        self.l_dettaglio = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER, max_width_chars=52)
+        self.l_dettaglio.get_style_context().add_class("hint")
+        centro.pack_start(self.l_dettaglio, False, False, 0)
+        p3.pack_start(centro, True, True, 0)
+        fondo = Gtk.Box(spacing=8)
+        self.b_indietro = Gtk.Button(label=T("Indietro", "Back"))
+        self.b_indietro.connect("clicked", lambda *_: self.pile.set_visible_child_name("scegli"))
+        fondo.pack_start(self.b_indietro, False, False, 0)
+        fine = Gtk.Button(label=T("Fine", "Done"))
+        fine.get_style_context().add_class("suggested-action")
+        fine.connect("clicked", lambda *_: self.destroy())
+        fondo.pack_end(fine, False, False, 0)
+        self.b_prova = Gtk.Button(label=T("Stampa una pagina di prova", "Print a test page"))
+        self.b_prova.connect("clicked", lambda *_: self.prova())
+        fondo.pack_end(self.b_prova, False, False, 0)
+        p3.pack_start(fondo, False, False, 0)
+        self.pile.add_named(p3, "esito")
+        self.pile.show_all()
+        self.connect("destroy", lambda *_: (madre.fill_stampanti(""), madre.fill_scanner("")))
+        self.cerca()
+
+    def pagina(self):
+        b = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        for m in ("top", "bottom", "start", "end"):
+            getattr(b, f"set_margin_{m}")(22)
+        return b
+
+    def titolo(self, testo, sotto):
+        v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        t = Gtk.Label(label=testo, xalign=0)
+        t.get_style_context().add_class("st-titolo")
+        v.pack_start(t, False, False, 0)
+        s = Gtk.Label(label=sotto, xalign=0, wrap=True)
+        s.get_style_context().add_class("hint")
+        v.pack_start(s, False, False, 0)
+        return v
+
+    def riempi(self, righe):
+        for c in self.trovate.get_children():
+            self.trovate.remove(c)
+        for i, r in enumerate(righe):
+            if i:
+                self.trovate.pack_start(Gtk.Separator(), False, False, 0)
+            self.trovate.pack_start(r, False, False, 0)
+        self.trovate.show_all()
+
+    def cerca(self):
+        self.pile.set_visible_child_name("scegli")
+        self.riempi([self.madre.row(T("Cerco nella rete…", "Searching the network…"), Gtk.Spinner(active=True))])
+
+        def lavoro():
+            try:
+                t = subprocess.run([sys.executable, STAMPA, "cerca", "--json"], capture_output=True, text=True, timeout=60,
+                                   stdin=subprocess.DEVNULL).stdout
+                trovate = json.loads(t.splitlines()[-1]) if t.strip() else []
+            except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
+                trovate = []
+            e = st_elenco()
+            GLib.idle_add(lambda: self.mostra_trovate(trovate, e) and False)
+        threading.Thread(target=lavoro, daemon=True).start()
+
+    def mostra_trovate(self, trovate, e):
+        installati = {re.sub(r"^\w+://([^/:]+).*", r"\1", p["uri"]) for p in e.get("stampanti", [])}
+        righe = []
+        for t in trovate:
+            gia = t["ip"] in installati
+            b = Gtk.Button(label=T("Aggiungi", "Add"), sensitive=not gia)
+            if not gia:
+                b.get_style_context().add_class("suggested-action")
+            b.connect("clicked", lambda _w, x=t: self.aggiungi(x["chiave"], x["modello"]))
+            righe.append(self.madre.riga_dispositivo(
+                "printer", t["modello"], "verde" if not gia else "grigio",
+                (T("Già aggiunta", "Already added") if gia else "Wi-Fi") + " · " + t["ip"], None, (b,)))
+        if not righe:
+            righe.append(self.madre.row(T("Nessuna stampante nuova in rete", "No new printers on the network"), None,
+                                        T("Se è accesa e collegata, scrivi qui sotto il suo indirizzo (lo trovi nel menu "
+                                          "Rete della stampante).", "If it is on and connected, type its address below "
+                                          "(you'll find it in the printer's Network menu).")))
+        self.riempi(righe)
+
+    def aggiungi(self, cosa, nome):
+        if not cosa:
+            return
+        self.aggiunta = None
+        self.l_lavoro.set_text(T(f"Configuro {nome}…", f"Setting up {nome}…"))
+        self.pile.set_visible_child_name("lavoro")
+
+        def lavoro():
+            prima = {p["nome"] for p in st_elenco().get("stampanti", [])}
+            try:
+                r = subprocess.run([sys.executable, STAMPA, "aggiungi", cosa], capture_output=True, text=True, timeout=200,
+                                   stdin=subprocess.DEVNULL)
+                cod, testo = r.returncode, (r.stdout + r.stderr).strip()
+            except (OSError, subprocess.TimeoutExpired) as e:
+                cod, testo = 1, str(e)
+            nuova = next((p for p in st_elenco().get("stampanti", []) if p["nome"] not in prima), None)
+            scanner = None
+            if re.match(r"^[\w.\-:]+$", cosa) and "." in cosa:   # un indirizzo: può essere (anche) uno scanner
+                try:
+                    rs = subprocess.run([sys.executable, SCANNER, "aggiungi", cosa], capture_output=True, text=True,
+                                        timeout=60, stdin=subprocess.DEVNULL)
+                    scanner = rs.returncode == 0
+                except (OSError, subprocess.TimeoutExpired):
+                    scanner = False
+            GLib.idle_add(lambda: self.esito(cod, testo, nuova, scanner, nome) and False)
+        threading.Thread(target=lavoro, daemon=True).start()
+
+    def esito(self, cod, testo, nuova, scanner, nome):
+        bene = cod == 0 or scanner
+        self.aggiunta = nuova["nome"] if nuova else None
+        self.i_esito.set_from_icon_name("emblem-ok-symbolic" if bene else "dialog-warning-symbolic", Gtk.IconSize.DIALOG)
+        self.i_esito.set_pixel_size(48)
+        if cod == 0:
+            self.l_esito.set_text(T(f"{nuova['descrizione'] if nuova else nome} è pronta",
+                                    f"{nuova['descrizione'] if nuova else nome} is ready"))
+            self.l_dettaglio.set_text(T("La trovi nella finestra di stampa di ogni app.", "It's in every app's print dialog.")
+                                      + (T(" Anche il suo scanner è stato aggiunto.", " Its scanner was added too.") if scanner else ""))
+        elif scanner:
+            self.l_esito.set_text(T("Scanner aggiunto", "Scanner added"))
+            self.l_dettaglio.set_text(T("Lo trovi nell'app Scanner. Come stampante non è stato possibile: ",
+                                        "It's in the Scanner app. As a printer it could not be added: ") + testo)
+        else:
+            self.l_esito.set_text(T("Non sono riuscito ad aggiungerla", "Couldn't add it"))
+            self.l_dettaglio.set_text(testo)
+        self.b_prova.set_visible(cod == 0 and bool(self.aggiunta))
+        self.b_indietro.set_visible(not bene)
+        self.pile.set_visible_child_name("esito")
+
+    def prova(self):
+        self.b_prova.set_sensitive(False)
+        self.madre.stampa("prova", self.aggiunta, then=lambda c, t: self.l_dettaglio.set_text(
+            T("Pagina di prova inviata: tra poco esce dalla stampante.", "Test page sent: it will come out shortly.")
+            if c == 0 else t))
 
 
 def main():

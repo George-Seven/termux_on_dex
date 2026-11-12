@@ -11,6 +11,7 @@ import glob
 import http.client
 import json
 import os
+import socket
 import ssl
 import struct
 import sys
@@ -235,13 +236,16 @@ def cerca(attesa=2.0, rete=True):
     if rete:
         record, sorgenti, _ = scoperta.chiedi_bonjour(list(TIPI), attesa)
         trovati += scanner_da(record, sorgenti)
+        ip_noti = {s.get("ip") for s in trovati}
+        trovati += [s for s in scanner_delle_stampanti() if s["ip"] not in ip_noti]
     trovati += scanner_usb()
     visti = {s["url"] for s in trovati} | {s["chiave"] for s in trovati}
     for m in carica_conf()["manuali"]:
         if m.get("url") and m["url"] not in visti and m.get("chiave") not in visti:
             ip = urllib.parse.urlsplit(m["url"]).hostname or ""
+            # (aggiunto a mano: non si annuncia, quindi si guarda se risponde; sennò nell'elenco è "Offline")
             trovati.append({"chiave": m["chiave"], "nome": m.get("nome") or ip, "url": m["url"], "dove": "indirizzo",
-                            "ip": ip})
+                            "ip": ip, "raggiungibile": ha_escl(m["url"], attesa=2) if rete else None})
     return trovati
 
 
@@ -251,7 +255,52 @@ def candidati_indirizzo(testo):
         return [t] if t.lower().endswith("/escl") else [t + "/eSCL", t]
     if t.count(":") == 1 and t.rsplit(":", 1)[1].isdigit():   # la porta c'è già
         return [f"http://{t}/eSCL", f"https://{t}/eSCL"]
-    return [f"http://{t}/eSCL", f"https://{t}/eSCL", f"http://{t}:8080/eSCL"]
+    # 80 e 443 quasi tutti; 8080 e 9095 certe HP e Samsung, 631 la porta della stampa, 8443 certe Kyocera e Lexmark
+    return [f"http://{t}/eSCL", f"https://{t}/eSCL", f"http://{t}:8080/eSCL", f"http://{t}:9095/eSCL",
+            f"http://{t}:631/eSCL", f"https://{t}:8443/eSCL"]
+
+
+def risponde_qualcuno(testo):
+    """C'è un dispositivo acceso a quell'indirizzo? (per dire all'utente se è spento o se non sa fare la scansione)"""
+    host = urllib.parse.urlsplit(testo if "://" in testo else "//" + testo.strip()).hostname or ""
+    for porta in (80, 443, 631, 9100, 8080):
+        c = socket.socket()
+        c.settimeout(1.5)
+        try:
+            c.connect((host, porta))
+            return True
+        except OSError:
+            pass
+        finally:
+            c.close()
+    return False
+
+
+_provati = {}   # indirizzo → (quando, url o None): le stampanti già guardate, per non ribussare a ogni ricerca
+
+
+def scanner_delle_stampanti(prova=None, ora=None):
+    """Le multifunzione che annunciano la stampa ma non lo scanner: si prova l'eSCL agli indirizzi delle stampanti
+    trovate in rete dal servizio di stampa ($TMPDIR/tod-stampa/trovate.json). Un indirizzo già provato: dopo 10 minuti."""
+    prova = prova or (lambda url: ha_escl(url, attesa=2))
+    ora = time.time() if ora is None else ora
+    try:
+        with open(os.path.join(TMP, "tod-stampa", "trovate.json")) as f:
+            stampanti = json.load(f)
+    except (OSError, ValueError):
+        return []
+    out = []
+    for p in stampanti:
+        ip = p.get("ip")
+        if not ip:
+            continue
+        quando, url = _provati.get(ip, (0, None))
+        if ora - quando > 600:
+            url = next((u for u in (f"http://{ip}/eSCL", f"https://{ip}/eSCL") if prova(u)), None)
+            _provati[ip] = (ora, url)
+        if url:
+            out.append({"chiave": f"stampante:{ip}", "nome": p.get("modello") or ip, "url": url, "dove": "rete", "ip": ip})
+    return out
 
 
 def aggiungi_indirizzo(testo):
@@ -269,7 +318,11 @@ def aggiungi_indirizzo(testo):
         conf["manuali"] = [m for m in conf["manuali"] if m.get("url") != url] + [voce]
         salva_conf(conf)
         return dict(voce, dove="indirizzo", ip=ip)
-    raise Errore(T(f"Nessuno scanner eSCL a «{testo.strip()}»", f"No eSCL scanner at “{testo.strip()}”"))
+    if not risponde_qualcuno(testo):
+        raise Errore(T(f"Nessun dispositivo risponde a «{testo.strip()}». Controlla che sia acceso e sulla stessa rete Wi-Fi.",
+                       f"No device answers at “{testo.strip()}”. Check that it is on and on the same Wi-Fi network."))
+    raise Errore(T(f"Il dispositivo a «{testo.strip()}» risponde, ma non offre la scansione in rete (AirScan/eSCL).",
+                   f"The device at “{testo.strip()}” answers, but offers no network scanning (AirScan/eSCL)."))
 
 
 def togli(chiave):

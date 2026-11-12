@@ -2339,11 +2339,218 @@ s = u.spec_from_file_location("m", sys.argv[1]); m = u.module_from_spec(s); s.lo
 exec(sys.stdin.read())' "$1"
 }
 
+test_stampa_indirizzo_vero() { # 11 novembre, Pietro con una stampante Wi-Fi vera: non trovata da sola, e aggiunta con
+  # l'indirizzo "funziona anche con un IP a caso" ma non stampa (ipp://IP/ipp/print dato per buono, coda creata anche se
+  # lpadmin falliva). Ora si chiede alla stampante chi è (share/stampa/ipp.py), il percorso si trova da solo, un
+  # indirizzo muto dà un errore chiaro, la coda fallita si toglie, e si cerca anche indirizzo per indirizzo (solo Wi-Fi)
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(TMPDIR="$WORK/si_tmp" TOD_TERMUX_HOME="$WORK/si_home" LANGUAGE=it _stampa_py "$ROOT/share/stampa/tod-stampa.py" <<'EOF'
+import http.server, struct, threading, socket
+ipp = m.ipp
+def risposta(stato, attr):
+    b = struct.pack(">BBHI", 2, 0, stato, 1) + b"\x04"
+    for nome, tag, valori in attr:
+        for i, v in enumerate(valori):
+            n = nome.encode() if i == 0 else b""
+            b += struct.pack(">BH", tag, len(n)) + n + struct.pack(">H", len(v)) + v
+    return b + b"\x03"
+class Finta(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if self.path == "/ipp":   # una stampante vecchia: niente /ipp/print, solo PCL
+            corpo = risposta(0, [("printer-make-and-model", 0x41, [b"Marca Laser 2000"]),
+                                 ("document-format-supported", 0x49, [b"application/octet-stream", b"application/vnd.hp-PCL"]),
+                                 ("printer-uuid", 0x45, [b"urn:uuid:ABC-1"]), ("printer-state", 0x23, [struct.pack(">i", 3)])])
+        elif self.path == "/ipp/moderna":
+            corpo = risposta(0, [("printer-make-and-model", 0x41, [b"Marca Getto 5"]),
+                                 ("document-format-supported", 0x49, [b"image/urf", b"image/jpeg"])])
+        else:
+            corpo = risposta(0x0406, [])
+        self.send_response(200); self.send_header("Content-Type", "application/ipp")
+        self.send_header("Content-Length", str(len(corpo))); self.end_headers(); self.wfile.write(corpo)
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Finta)
+porta = srv.server_address[1]
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+st, mot = ipp.sonda("127.0.0.1", porte=((porta, False),))
+print(st["uri"].replace(str(porta), "P"), st["modello"], st["senza_driver"], st["uuid"], st["formati"][-1], repr(mot))
+a, _ = ipp.attributi("127.0.0.1", porta, "ipp/moderna")
+print(ipp.descrivi(a, "ipp://x/ipp/moderna", "x")["senza_driver"], ipp.attributi("127.0.0.1", porta, "niente"))
+libero = socket.socket(); libero.bind(("127.0.0.1", 0)); chiusa = libero.getsockname()[1]; libero.close()
+print(ipp.sonda("127.0.0.1", porte=((chiusa, False),), attesa=0.5)[1] in ("spenta", "non-stampante"),
+      ipp.porte_aperte(["127.0.0.1"], porta), ipp.porte_aperte(["127.0.0.1"], chiusa, 0.3))
+print(ipp.rete_di_casa("192.168.0.207"), ipp.rete_di_casa("10.229.10.240"), ipp.rete_di_casa("10.0.0.5", "10.0.0.5"),
+      ipp.rete_di_casa("192.168.0.207", "192.168.1.9"), ipp.rete_di_casa(""), len(ipp.indirizzi_vicini("192.168.0.207")),
+      "192.168.0.207" in ipp.indirizzi_vicini("192.168.0.207"))
+# l'aggiunta: lpadmin finto
+m.log = lambda *a: None
+fatte, esiste = [], set()
+class R:
+    def __init__(s, rc=0, out="", err=""): s.returncode, s.stdout, s.stderr = rc, out, err
+def cups(*a, timeout=0):
+    fatte.append(" ".join(a[:6]))
+    if a[0] == "lpstat" and a[1] == "-v":
+        return R(0, "".join(f"device for {n}: x\n" for n in sorted(esiste)))
+    if a[0] == "lpadmin" and a[1] == "-p":
+        esiste.add(a[2])   # come CUPS: la coda nasce prima del controllo del driver
+        return R(1, "", "PPD creation failed") if a[a.index("-m") + 1] == "everywhere" and "rotta" in a[a.index("-v") + 1] else R(0)
+    if a[0] == "lpadmin" and a[1] == "-x":
+        esiste.discard(a[2]); return R(0)
+    if a[0] == "lpinfo":
+        return R(0, "drv:///sample.drv/generpcl.ppd Generic PCL Laser Printer\n" if "-m" in a and "--device-id" not in a and "--make-and-model" not in a else "")
+    return R(0, "system default destination: x")
+m.cups = cups
+db = {"stampanti": {}, "tolte": [], "viste": {}}
+m.ipp.sonda = lambda h, **k: (None, "spenta")
+print(m.aggiungi_indirizzo(db, "192.168.0.222"), esiste, db["stampanti"])
+m.ipp.sonda = lambda h, **k: (None, "non-stampante")
+print(m.aggiungi_indirizzo(db, "192.168.0.1"))
+print(m.aggiungi_indirizzo(db, "non un indirizzo!"))
+m.ipp.sonda = lambda h, **k: (dict(st, uri="ipp://192.168.0.150:631/ipp", ip=h), "")
+print(repr(m.aggiungi_indirizzo(db, "192.168.0.150")), sorted(esiste), [x for x in fatte if x.startswith("lpadmin -p")][-1],
+      list(db["stampanti"]))
+m.ipp.sonda = lambda h, **k: ({"uri": "ipp://rotta/ipp/print", "tipo": "ipp", "ip": h, "modello": "Rotta", "formati": ["image/urf"],
+                                "device_id": "", "uuid": "", "senza_driver": True}, "")
+print(m.aggiungi_indirizzo(db, "192.168.0.9"), sorted(esiste))
+# 12 novembre, HP Envy di Pietro: aggiunta a mano e poi di nuovo dalla ricerca ("…_2"). Chi ha già una coda non si rifà
+m.code = lambda: {"HP_Envy": "ipp://192.168.1.17:631/ipp/print"}
+m.ipp.sonda = lambda h, **k: (dict(st, uri="ipp://192.168.1.17:631/ipp/print", ip=h, modello="HP"), "")
+print(m.aggiungi_indirizzo(db, "192.168.1.17"), list(db["stampanti"]))
+db2, prima = {"stampanti": {"uri:ipp://192.168.1.17:631/ipp/print": {"nome": "HP_Envy", "uri": "x", "tipo": "rete", "modello": "HP"}},
+              "tolte": [], "viste": {}}, len(fatte)
+r = m.aggiungi_rete(db2, {"chiave": "uuid-hp", "uri": "ipp://192.168.1.17:631/ipp/print", "modello": "HP", "ip": "192.168.1.17", "senza_driver": True})
+print(repr(r), {k: v["nome"] for k, v in db2["stampanti"].items()}, m.host_di("ipp://192.168.1.17:631/ipp/print"),
+      len([x for x in fatte[prima:] if x.startswith("lpadmin -p")]))
+srv.shutdown()
+EOF
+)
+  eq "percorso trovato, formati, errori chiari, coda fallita tolta, driver generico per PCL" "ipp://127.0.0.1:P/ipp Marca Laser 2000 False abc-1 application/vnd.hp-pcl ''
+True (None, 'no')
+True ['127.0.0.1'] []
+True False True False False 253 False
+Nessuna stampante risponde a 192.168.0.222. Controlla che sia accesa e sulla stessa rete Wi-Fi. set() {}
+A 192.168.0.1 risponde un dispositivo, ma non è una stampante di rete.
+«non un indirizzo!» non è un indirizzo valido.
+'' ['Marca_Laser_2000'] lpadmin -p Marca_Laser_2000 -E -v ipp://192.168.0.150:631/ipp ['abc-1']
+Rotta: non riesco a configurarla (PPD creation failed). ['Marca_Laser_2000']
+HP c'è già tra le stampanti. ['abc-1']
+'' {'uuid-hp': 'HP_Envy'} 192.168.1.17 0" "$out"
+  # 12 novembre, Pietro: "quando una stampante è offline deve essere offline, non deve spuntare pronta"
+  out=$(TMPDIR="$WORK/si_tmp" TOD_TERMUX_HOME="$WORK/si_home" _stampa_py "$ROOT/share/stampa/tod-stampa.py" <<'EOF'
+import socket
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(1); aperta = s.getsockname()[1]
+c = socket.socket(); c.bind(("127.0.0.1", 0)); chiusa = c.getsockname()[1]; c.close()
+print(m.porta_di("ipp://192.168.1.18/ipp/print"), m.porta_di("socket://10.0.0.9"), m.porta_di("ipps://stampante.local:8443/x"),
+      m.porta_di("ipp://127.0.0.1:60001/ipp/print"), m.porta_di("usb://HP/x"))
+m.porta_di = lambda u: ("127.0.0.1", int(u)) if u.isdigit() else None
+print(sorted(m.raggiungibili([str(aperta), str(chiusa), "usb"], 0.5).items()) == [(str(aperta), True), (str(chiusa), False)])
+EOF
+)
+  eq "ogni stampante di rete si controlla alla sua porta; le USB no" "('192.168.1.18', 631) ('10.0.0.9', 9100) ('stampante.local', 8443) None None
+True" "$out"
+  has "elenco: offline prima di pronta e di in pausa" 'if p["raggiungibile"] is False:   # prima di tutto' "$(cat "$ROOT/share/tod-settings.py")"
+  has "scanner aggiunto a mano: si guarda se risponde" '"raggiungibile": ha_escl(m["url"], attesa=2)' "$(cat "$ROOT/share/stampa/escl.py")"
+  has "la ricerca per indirizzi solo sul Wi-Fi di casa" "ipp.rete_di_casa(ip, wifi_del_telefono())" "$(cat "$ROOT/share/stampa/tod-stampa.py")"
+  # "non riesco a vedere i processi di stampa": un documento per riga con il suo Annulla, il motivo del fermo, Riprendi
+  has "coda: il nome del documento (lpq)" 'lav["titolo"] = titoli.get(' "$(cat "$ROOT/share/stampa/tod-stampa.py")"
+  has "coda: una finestra per stampante, un documento per riga con il suo Annulla" 'self.comando("annulla", j)' "$(sed -n '/^class Coda(/,/^class AggiuntaGuidata(/p' "$ROOT/share/tod-settings.py")"
+  has "coda: pausa e ripresa" 'self.comando("riprendi" if self.fermo else "pausa", self.nome)' "$(cat "$ROOT/share/tod-settings.py")"
+  has "coda: gli ultimi documenti mandati" '"fatti": sorted(fatti.get(nome, [])' "$(cat "$ROOT/share/stampa/tod-stampa.py")"
+  has "aggiunta guidata: trovate in rete, configurazione, pagina di prova" 'self.pile.add_named(p3, "esito")' "$(cat "$ROOT/share/tod-settings.py")"
+  # 12 novembre, HP Envy 6100e: "arriva alla stampante ma non stampa" (Print job canceled at printer): l'Apple Raster
+  # di Ghostscript ha l'intestazione povera; con rastertopwg di CUPS (pacchetto cups) il nostro filtro non si registra
+  has "Apple Raster: il nostro filtro solo se manca quello di CUPS" 'usr/lib/cups/filter/rastertopwg' "$(sed -n '/^def convs(/,/^def scrivi_conf(/p' "$ROOT/share/stampa/tod-stampa.py")"
+  has "stampante ferma: si può riprendere" '"riprendi", n, then=' "$(cat "$ROOT/share/tod-settings.py")"
+}
+
+test_scanner_delle_stampanti() { # 11 novembre, Pietro: la multifunzione Wi-Fi "non viene né rilevata né riesco ad aggiungerla
+  # via IP". Le multifunzione che annunciano solo la stampa: si prova la scansione agli indirizzi delle stampanti
+  # trovate; più porte nell'aggiunta per indirizzo; l'errore dice se è spenta o se non sa fare la scansione in rete
+  command -v python3 >/dev/null || return 0
+  local d="$WORK/sds_tmp" out
+  mkdir -p "$d/tod-stampa"
+  printf '[{"ip":"192.168.0.150","modello":"Marca Multi 3"},{"ip":"192.168.0.151","modello":"Solo stampa"},{"modello":"senza indirizzo"}]' \
+    >"$d/tod-stampa/trovate.json"
+  out=$(TMPDIR="$d" TOD_TERMUX_HOME="$d" LANGUAGE=it _stampa_py "$ROOT/share/stampa/escl.py" <<'EOF'
+provati = []
+def prova(url):
+    provati.append(url)
+    return url == "https://192.168.0.150/eSCL"
+r = m.scanner_delle_stampanti(prova, ora=1000)
+print([(s["nome"], s["url"], s["dove"]) for s in r], len(provati))
+m.scanner_delle_stampanti(prova, ora=1100); print(len(provati))          # già guardate: non si ribussa
+m.scanner_delle_stampanti(prova, ora=1000 + 700); print(len(provati))     # dopo 10 minuti sì
+print(m.candidati_indirizzo("192.168.0.150"))
+print(m.candidati_indirizzo("192.168.0.150:9095"), m.candidati_indirizzo("http://x/eSCL"))
+m.candidati_indirizzo = lambda t: []
+m.risponde_qualcuno = lambda t: False
+try: m.aggiungi_indirizzo("192.168.0.222")
+except m.Errore as e: print(e)
+m.risponde_qualcuno = lambda t: True
+try: m.aggiungi_indirizzo("192.168.0.150")
+except m.Errore as e: print(e)
+EOF
+)
+  eq "scanner agli indirizzi delle stampanti, porte dei vari marchi, errori chiari" "[('Marca Multi 3', 'https://192.168.0.150/eSCL', 'rete')] 4
+4
+8
+['http://192.168.0.150/eSCL', 'https://192.168.0.150/eSCL', 'http://192.168.0.150:8080/eSCL', 'http://192.168.0.150:9095/eSCL', 'http://192.168.0.150:631/eSCL', 'https://192.168.0.150:8443/eSCL']
+['http://192.168.0.150:9095/eSCL', 'https://192.168.0.150:9095/eSCL'] ['http://x/eSCL']
+Nessun dispositivo risponde a «192.168.0.222». Controlla che sia acceso e sulla stessa rete Wi-Fi.
+Il dispositivo a «192.168.0.150» risponde, ma non offre la scansione in rete (AirScan/eSCL)." "$out"
+}
+
+test_stampa_driver_ricoh() { # 12 novembre, la stampante vera di Pietro: Ricoh MP C2011 (da ufficio, non AirPrint). A CUPS
+  # mancava cups-driverd ("lpinfo: cups-driverd failed to execute"): nessun driver, nemmeno i generici. Ora cups e
+  # openprinting-ppds tra gli aiuti del container, e tra i tre driver del modello (PXL, PS, PDF) si sceglie il
+  # linguaggio che la stampante dichiara, PXL per primo (PS e PDF sono opzioni che la macchina può non avere)
+  command -v python3 >/dev/null || return 0
+  local out
+  has "cups-driverd e rastertopwg arrivano con il container" " cups " " $CX_AIUTI "
+  has "i driver delle stampanti da ufficio" "openprinting-ppds" "$CX_AIUTI"
+  has "il servizio non si porta dietro i consigliati di cups (avahi, colord, sane…)" "--no-install-recommends install \$manca" \
+    "$(sed -n '/^cx_upgrade()/,/^}/p' "$ROOT/lib/container.sh")"
+  out=$(TMPDIR="$WORK/sr_tmp" TOD_TERMUX_HOME="$WORK/sr_home" _stampa_py "$ROOT/share/stampa/tod-stampa.py" <<'EOF'
+R = ["openprinting-ppds:0/ppd/openprinting/Ricoh/PDF/Ricoh-MP_C2011_PDF.ppd Ricoh MP C2011 PDF",
+     "openprinting-ppds:0/ppd/openprinting/Ricoh/PS/Ricoh-MP_C2011_PS.ppd Ricoh MP C2011 PS",
+     "openprinting-ppds:0/ppd/openprinting/Ricoh/PXL/Ricoh-MP_C2011_PXL.ppd Ricoh MP C2011 PXL",
+     "everywhere IPP Everywhere"]
+corto = lambda n: n.rsplit("/", 1)[-1]
+print(corto(m.scegli_ppd(R)), corto(m.scegli_ppd(R, ["application/postscript"])),
+      corto(m.scegli_ppd(R, ["application/vnd.hp-pcl", "application/postscript"])),
+      corto(m.scegli_ppd(R, ["application/pdf"])), repr(m.scegli_ppd(["everywhere IPP Everywhere", "raw Raw"])),
+      m.scegli_ppd(["gutenprint.5.3://x/expert Qualcosa"]))
+chieste = []
+class Ris:
+    def __init__(s, out=""): s.returncode, s.stdout, s.stderr = 0, out, ""
+def cups(*a, timeout=0):
+    chieste.append(a[1:3])
+    return Ris("\n".join(R) if a[1] == "--make-and-model" and "C2011" in a[2] else "")
+m.cups = cups
+st = {"senza_driver": False, "device_id": "", "formati": ["application/vnd.hp-pcl"], "modello": "RICOH MP C2011", "ip": "192.168.0.150"}
+print(corto(m.modello_per(st)), chieste)
+print(m.modello_per(dict(st, senza_driver=True)), repr(m.modello_per({"senza_driver": False, "modello": "192.168.0.9", "ip": "192.168.0.9"})))
+print("printer" in m.ipp.PERCORSI)
+EOF
+)
+  eq "PXL di serie, il linguaggio dichiarato quando si sa, mai everywhere/raw; dal nome del modello senza ID" \
+"Ricoh-MP_C2011_PXL.ppd Ricoh-MP_C2011_PS.ppd Ricoh-MP_C2011_PXL.ppd Ricoh-MP_C2011_PDF.ppd '' gutenprint.5.3://x/expert
+Ricoh-MP_C2011_PXL.ppd [('--make-and-model', 'RICOH MP C2011')]
+everywhere ''
+True" "$out"
+}
+
 test_stampa_conf() { # i filtri di CUPS partono con l'ambiente del modo diretto: PassEnv sta in cups-files.conf. In
   # cupsd.conf CUPS 2.4 lo ignora, e filtri e collegamenti cadevano con il segnale 31 (6 novembre)
   command -v python3 >/dev/null || return 0
   local out
   out=$(TMPDIR="$WORK/sc_tmp" TOD_TERMUX_HOME="$WORK/sc_home" _stampa_py "$ROOT/share/stampa/tod-stampa.py" <<'EOF'
+m.ROOTFS = m.os.path.join(m.TMP, "radice-con-cups")   # con rastertopwg di CUPS il nostro filtro non si registra
+m.os.makedirs(m.os.path.join(m.ROOTFS, "usr/lib/cups/filter"), exist_ok=True)
+open(m.os.path.join(m.ROOTFS, "usr/lib/cups/filter/rastertopwg"), "w").close()
+assert "tod-pdftourf\n" not in m.convs() and m.convs().startswith("#"), m.convs()
+m.ROOTFS = m.os.path.join(m.TMP, "radice-senza")       # (il resto della prova: un container senza il pacchetto cups)
 m.scrivi_conf()
 f = open(m.os.path.join(m.CONF, "cups-files.conf")).read()
 c = open(m.os.path.join(m.CONF, "cupsd.conf")).read()
@@ -2699,7 +2906,8 @@ DELETE /eSCL/ScanJobs/2 Host=localhost" "$(grep '^DELETE' <<<"$out")"
   printf '{"id":"001","tipo":"ipp","porta":%s,"nome":"Multifunzione USB","seriale":"SN1"}' "$porta" >"$usb/001.json"
   printf '{"id":"002","tipo":"raw","porta":1,"nome":"Solo stampa"}' >"$usb/002.json"
   out=$(_sc aggiungi "127.0.0.1:1" 2>&1) && { echo "  ✗ aggiunto uno scanner che non c'è" >&2; return 1; }
-  eq "indirizzo sbagliato" "Nessuno scanner eSCL a «127.0.0.1:1»" "$out"
+  # (spento, oppure acceso ma senza scansione in rete: dipende da cosa gira su questa macchina; mai aggiunto)
+  has "indirizzo sbagliato: un errore che nomina l'indirizzo" "«127.0.0.1:1»" "$out"
   eq "con l'indirizzo" "Multifunzione finta MF-100 · http://localhost:$porta/eSCL" "$(_sc aggiungi "localhost:$porta" 2>&1)"
   out=$(_sc elenco --json | python3 -c 'import json, sys
 for s in json.load(sys.stdin):
@@ -2757,6 +2965,62 @@ _rete_py() { # _rete_py: tod-rete.py caricato come m, con case e cartelle di pro
     _stampa_py "$ROOT/share/rete/tod-rete.py"
 }
 
+test_volume_del_telefono() { # 11 novembre, Pietro: "non possiamo aumentare o diminuire il volume del telefono?". Il cursore
+  # della barra regolava solo PulseAudio: col telefono a 5 su 15 il 100% restava basso. Ora un volume solo
+  # (share/tod_volume.py → termux-volume music N), l'uscita di PulseAudio al 100%
+  command -v python3 >/dev/null || return 0
+  local d="$WORK/volume_$$" out
+  mkdir -p "$d/bin"
+  cat >"$d/bin/termux-volume" <<'EOF'
+#!/bin/sh
+# finto: il volume in un file, i comandi ricevuti in un registro
+[ -f "$TOD_FINTO" ] || echo 5 >"$TOD_FINTO"
+if [ $# -eq 0 ]; then
+  echo "[{\"stream\":\"call\",\"volume\":9,\"max_volume\":15},{\"stream\":\"music\",\"volume\":$(cat "$TOD_FINTO"),\"max_volume\":15}]"
+else
+  sleep 0.2; echo "$1 $2" >>"$TOD_FINTO.log"; echo "$2" >"$TOD_FINTO"
+fi
+EOF
+  chmod +x "$d/bin/termux-volume"
+  out=$(PATH="$d/bin:$PATH" TOD_FINTO="$d/finto" TOD_VOLUME_STATO="$d/stato.json" TMPDIR="$d" python3 - "$ROOT/share" <<'EOF'
+import os, sys
+sys.path.insert(0, sys.argv[1])
+import tod_volume as v
+v._pulse_fatto = True   # niente pactl nelle prove
+finto = os.environ["TOD_FINTO"]
+print(v.telefono(), v.stato(), v.leggi_telefono(), v.stato())
+for p in (40, 60, 80, 100):   # il cursore trascinato
+    v.metti(p)
+print(v.stato())
+v.aspetta()
+r = open(finto + ".log").read().split()
+print(len(r) // 2 <= 2, r[-2:], open(finto).read().strip())
+v.muto(True); v.aspetta(); print(v.stato(), open(finto).read().strip())
+v.muto(False); v.aspetta(); print(v.stato())
+open(finto, "w").write("3")   # i tasti del telefono, subito dopo un nostro comando: non si torna indietro...
+print(v.leggi_telefono())
+d = v._carica(); d["messo"] = 0; v._salva(d)   # ... e più tardi sì
+print(v.leggi_telefono(), v.gradini(1, 15), v.gradini(0, 15), v.gradini(100, 15))
+os.environ["TOD_VOLUME_INTERNO"] = "1"
+print(v.telefono())
+EOF
+)
+  eq "letto, messo (solo l'ultimo valore al telefono), muto e ritorno, tasti del telefono" "True None (33, False) (33, False)
+(100, False)
+True ['music', '15'] 15
+(0, True) 0
+(100, False)
+(100, False)
+(20, False) 1 0 15
+False" "$out"
+  has "barra: l'icona dallo stato del telefono" "tv.stato()" "$(sed -n '/elif nome == "volume":/,/return/p' "$ROOT/share/tod-barra.py")"
+  has "pannello: il cursore muove il telefono" "lambda v: tv.metti(v)" "$(cat "$ROOT/share/tod-pannelli.py")"
+  has "Impostazioni → Suono" "tv.metti(int(s.get_value()))" "$(cat "$ROOT/share/tod-settings.py")"
+  has "il demone rilegge il volume (tasti, pannello di Android)" "tod_volume.leggi_telefono()" "$(cat "$ROOT/share/tod-phone-status.py")"
+  has "PulseAudio pieno all'avvio" 'audio_pactl set-sink-volume "$m" 100%' "$(cat "$ROOT/lib/session.sh")"
+  has "Lettore: volume dell'app pieno di serie" 'd.get("volume", 100)' "$(cat "$ROOT/share/media/tod-lettore.py")"
+}
+
 test_rete_alias() { # il nome del socket di un PC è lo stesso in tod-rete.py, tod-fs.c e tod-usb (byte per byte)
   command -v python3 >/dev/null || return 0
   local nomi=("PC di Pietro" "NAS/Casa" "UNITÀ USB" "Mac.local") py sh="" n f
@@ -2803,6 +3067,7 @@ s = m.Servizio()
 def chiedi(nome, utente, dominio, errore):
     chieste.append((nome, utente, errore))
     return {"utente": "pietro", "password": "a\tb%c", "dominio": "", "ricorda": True}
+s.risposta("ENTRA\tPC-PIETRO\n", None)   # l'utente ha aperto il PC
 print(s.risposta("AUTH\tPC-PIETRO\t192.168.1.23\tIPC$\tprimo\n", chiedi).strip())
 print(s.risposta("AUTH\tPC-PIETRO\t192.168.1.23\tIPC$\tospite\n", chiedi).strip())
 print(chieste, salvate, m.carica_conf()["credenziali"])
@@ -2812,6 +3077,40 @@ print(s.risposta("sbagliata", chiedi).strip())
 EOF
 )
   eq "ospite, finestra, ricordata, rifiutata" $'NO\nOK\t-\tpietro\ta%09b%25c\n'"[('PC-PIETRO', '', False)] [('PC-PIETRO', 'pietro', 'a\\tb%c')] {'PC-PIETRO': {'utente': 'pietro', 'dominio': ''}}"$'\nOK\t-\tpietro\ta%09b%25c\nOK\t-\tpietro\ta%09b%25c'" ('PC-PIETRO', 'pietro', True)"$'\nNO' "$out"
+}
+
+test_rete_solo_se_aperto() { # 11 novembre, Pietro: aprendo la Rete compariva subito la richiesta di password, per PC che
+  # non aveva scelto, ed Esplora file restava bloccato (da chiudere a forza). Thunar guarda dentro ogni sottocartella
+  # dal filo della finestra: sulla Rete quel controllo riceve subito un errore; la password si chiede solo per il PC
+  # che l'utente ha aperto ("ENTRA" da Esplora file e dalla finestra Apri/Salva), e solo per un po'
+  command -v python3 >/dev/null || return 0
+  local out g
+  out=$(_rete_py <<'EOF'
+chieste, righe = [], []
+m.log = lambda *a: righe.append(a[0])
+m.password_di = lambda pc, u: None
+s = m.Servizio()
+def chiedi(nome, utente, dominio, errore):
+    chieste.append(nome)
+    return {"utente": "pietro", "password": "x", "dominio": ""}
+r = [s.risposta(f"AUTH\tPC-UNO\t192.168.0.2\tIPC$\t{x}\n", chiedi).strip() for x in ("primo", "ospite", "ospite")]
+print(r, chieste, len([x for x in righe if "non la chiedo" in x]))
+print(repr(s.risposta("ENTRA\tPC-UNO\n", None)), s.risposta("AUTH\tPC-DUE\t192.168.0.3\tIPC$\tospite\n", chiedi).strip(),
+      s.risposta("AUTH\tPC-UNO\t192.168.0.2\tIPC$\tospite\n", chiedi).strip(), chieste)
+s.memoria.clear()
+s.entrate["PC-UNO"] -= m.INTENTO + 1
+print(s.risposta("AUTH\tPC-UNO\t192.168.0.2\tIPC$\tospite\n", chiedi).strip(), chieste)
+EOF
+)
+  eq "senza apertura niente finestra (una riga sola nel registro); dopo ENTRA solo quel PC; poi scade" "['NO', 'NO', 'NO'] [] 1
+'OK\n' NO OK	-	pietro	x ['PC-UNO']
+NO ['PC-UNO']" "$out"
+  g=$(sed -n '/^void \*g_file_enumerate_children(/,/^}/p' "$ROOT/share/tod-gettext.c")
+  has "Esplora file: il controllo dal filo della finestra non tocca la Rete" 'if ((long)getpid() == syscall(SYS_gettid)) {' "$g"
+  has "… e riceve un errore vero (mai NULL senza errore)" 'G_IO_ERROR_NOT_SUPPORTED' "$g"
+  has "l'apertura vera di un PC lo dice al servizio" 'tod_rete_entra(p);' "$g"
+  has "il messaggio" 'ENTRA\t%.*s\n' "$(sed -n '/^static void tod_rete_entra(/,/^}/p' "$ROOT/share/tod-gettext.c")"
+  has "anche la finestra Apri/Salva" 'rete_entra(percorso)' "$(sed -n '/    def vai(/,/self.riempi()/p' "$ROOT/share/tod_apri_salva.py")"
 }
 
 test_rete_annulla() { # 8 novembre: "Annulla" sulla FRITZ!Box e la finestra tornava 20 volte in 20 secondi (Esplora file
@@ -2826,6 +3125,8 @@ s = m.Servizio()
 def chiedi(nome, utente, dominio, errore):
     chieste.append(nome)
     return None
+s.risposta("ENTRA\tfritz-box\n", None)
+s.risposta("ENTRA\tPC-PIETRO\n", None)
 r = [s.risposta(f"AUTH\tfritz-box\t192.168.178.1\tIPC$\t{x}\n", chiedi).strip() for x in ("ospite", "ospite", "rifiutate", "ospite")]
 r.append(s.risposta("AUTH\tPC-PIETRO\t192.168.178.43\tIPC$\tospite\n", chiedi).strip())
 s.annullate["fritz-box"] -= m.PAUSA
@@ -2871,6 +3172,7 @@ s.aggiorna([{"nome": "DESKTOP-I78AUDA", "ip": "192.168.178.44", "porta": 445, "d
             {"nome": "PC-NUOVO", "ip": "192.168.178.80", "porta": 445, "da": "wsd"}])
 print(m.carica_conf()["credenziali"]["DESKTOP-I78AUDA"]["indirizzo"], "PC-NUOVO" in m.carica_conf()["credenziali"])
 chiedi = lambda nome, u, d, e: {"utente": "pietro", "password": "x", "dominio": "", "ricorda": True}
+s.risposta("ENTRA\tPC-NUOVO\n", None)
 s.risposta("AUTH\tPC-NUOVO\t192.168.178.80\tIPC$\tospite\n", chiedi)
 print(m.carica_conf()["credenziali"]["PC-NUOVO"])
 s.chiudi()
@@ -3063,7 +3365,7 @@ test_rete_ricarica() { # 9 novembre, Pietro: "un pulsante aggiorna". In Esplora 
   # aggiorna. Su un PC che non risponde tod-smb dà errore dopo 10 s, non 20
   local g
   g=$(sed -n '/^void \*g_file_enumerate_children(/,/^}/p' "$ROOT/share/tod-gettext.c")
-  has "Esplora file: CERCA quando elenca la Rete" 'if (p && !strcmp(p, "/media/rete")) tod_rete_cerca();' "$g"
+  has "Esplora file: CERCA quando elenca la Rete" 'if (p && !strcmp(p, TOD_RETE_RADICE)) tod_rete_cerca();' "$g"
   has "solo in Esplora file" 'tod_file_manager()' "$g"
   has "il messaggio per il servizio" 'send(s, "CERCA\n", 6, MSG_NOSIGNAL)' "$(sed -n '/^static void tod_rete_cerca(/,/^}/p' "$ROOT/share/tod-gettext.c")"
   has "nuove installazioni: Ricarica prima dell'indirizzo" "open-parent:1,reload:1,location-bar:1" "$FILES_TOOLBAR"
@@ -5982,6 +6284,39 @@ PYEOF
   has "il servizio parte con la sessione, sapendo dov'è il container (percorsi di Apri/Salva)" \
     'TOD_CX_ROOTFS="$(cx_rootfs)" python3 "$TOD_ROOT/share/tod-avvisi-host.py"' \
     "$(sed -n '/^session_hook() {/,/^}/p' "$ROOT/lib/session.sh")"
+}
+
+test_portale_dei_file() { # 11 novembre: le app Electron (Boxy SVG…) mostravano i percorsi del container e non allegavano
+  local T=/data/data/com.termux/files/usr py out
+  has "il servizio del desktop offre il portale" "tod_portale.avvia(app_di)" "$(cat "$ROOT/share/tod-avvisi-host.py")"
+  has "la finestra restituisce anche i percorsi veri" "def scegli_veri(r):" "$(cat "$ROOT/share/tod_apri_salva.py")"
+  py=$T/bin/python3
+  if [[ ! -x $py ]] || ! "$py" -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null; then
+    echo "  (PyGObject di Termux assente: salto)"; return 0
+  fi
+  out=$(env -u LD_PRELOAD timeout 60 "$py" - "$ROOT/share" <<'PYEOF' 2>&1
+import sys
+sys.path.insert(0, sys.argv[1])
+import tod_portale as p
+print("richiesta", p.percorso_richiesta(":1.42", {"handle_token": "abc"}))
+print("filtri", p.filtri([("Immagini", [(0, "*.svg"), (1, "image/png")]), ("Tutti", [(0, "*")]), ("Strano", [(1, "x-tod/mai-visto")])]))
+r = p.richiesta("OpenFile", "Apri", {"multiple": True, "current_folder": list(b"/home/dex/Lavori\0")})
+print("apri", r["modo"], r["multipli"], r["cartella"], r["titolo"])
+print("cartella", p.richiesta("OpenFile", "", {"directory": True})["modo"])
+r = p.richiesta("SaveFile", "Salva", {"current_name": "disegno.svg", "current_folder": list(b"/storage/emulated/0/Documents\0")})
+print("salva", r["modo"], r["nome"], r["cartella"], r["conferma"])
+r = p.richiesta("SaveFile", "Salva", {"current_file": list(b"/home/dex/a/b.txt\0")})
+print("salva2", r["nome"], r["cartella"])
+print("versione", p.VERSIONE >= 3, p.NOME)
+PYEOF
+  )
+  has "la richiesta ha il percorso che le app si aspettano" "richiesta /org/freedesktop/portal/desktop/request/1_42/abc" "$out"
+  has "filtri: motivi e tipi MIME, '*' e tipi sconosciuti = tutto" "filtri [['Immagini', ['*.svg', '*.png']], ['Tutti', []], ['Strano', []]]" "$out"
+  has "Apri: più file e cartella di partenza" "apri apri True /home/dex/Lavori Apri" "$out"
+  has "scelta di una cartella" "cartella cartella" "$out"
+  has "Salva: nome proposto, cartella, conferma se esiste" "salva salva disegno.svg /storage/emulated/0/Documents True" "$out"
+  has "Salva su un file esistente" "salva2 b.txt /home/dex/a" "$out"
+  has "versione che Chromium ed Electron accettano (almeno 3)" "versione True org.freedesktop.portal.Desktop" "$out"
 }
 
 test_apri_salva_come_macos() { # 11 novembre: la finestra Apri/Salva delle app di Debian (zenity --file-selection) come macOS
