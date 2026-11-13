@@ -29,8 +29,44 @@ videochip_dir() { printf '%s/.local/share/tod-va' "${TOD_TERMUX_HOME:-$HOME}"; }
 videochip_pronto() { # tutti i pezzi compilati e la scheda finta
   local d
   d=$(videochip_dir)
-  [[ -f $d/tod_drv_video.so && -f $d/tod-va-shim.so && -f $d/tod-gbm.so && -x $d/tod-va-chip &&
+  [[ -f $d/tod_drv_video.so && -f $d/tod-va-shim.so && -f $d/tod-gbm.so && -x $d/tod-va-chip && -x $d/tod-va-prova &&
     -f $d/finto/sys/dev/char/226:128/device/uevent ]]
+}
+
+# --- la prova reale (share/video/tod-va-prova.c): Pietro, 13 novembre: "deve funzionare anche per gli smartphone che non
+# hanno Adreno ma hanno Mali". La metà "decodifica" (MediaCodec) c'è su tutti gli Android; la metà "grafica" (ANGLE su
+# Vulkan che importa i dma-buf) solo se nel container c'è un Vulkan hardware: su Adreno turnip, su Mali di solito no.
+# Senza, il ponte resta spento e le app partono come sempre. Si rifà quando cambia il profilo grafico del container.
+videochip_firma() { # profilo grafico del container + la prova stessa
+  local root
+  root=$(cx_rootfs) || return 0
+  cat "$root/etc/tod/gpu.env" "$(videochip_dir)/tod-va-prova" 2>/dev/null | cksum | cut -d' ' -f1
+}
+
+videochip_prova() { # → 0 se il telefono regge il ponte; il risultato (con la firma) in tod-va/prova.txt
+  local f firma
+  f="$(videochip_dir)/prova.txt"
+  firma=$(videochip_firma)
+  if [[ -f $f && $(sed -n 1p "$f") == "$firma" ]]; then
+    grep -qx 'ESITO ok' "$f"
+    return
+  fi
+  { echo "$firma"; videochip_esegui_prova 2>&1 | grep -E '^(dma_heap|vulkan|  manca|ESITO)' || true; } >"$f.nuovo"
+  mv -f "$f.nuovo" "$f"
+  log "video col chip, prova reale: $(grep -E '^(vulkan|ESITO)' "$f" | tr '\n' ' ')"
+  grep -qx 'ESITO ok' "$f"
+}
+
+videochip_esegui_prova() { # nel container, con lo stesso profilo grafico delle app (al più un minuto)
+  timeout 60 bash "$TOD_ROOT/tod" cx run -- "$(videochip_dir)/tod-va-prova"
+}
+
+videochip_motivo() { # perché il ponte non c'è (dall'ultima prova)
+  sed -n 's/^ESITO no: //p' "$(videochip_dir)/prova.txt" 2>/dev/null | sed -n 1p
+}
+
+videochip_adatto() { # ultima prova riuscita (senza rifarla)
+  grep -qx 'ESITO ok' "$(videochip_dir)/prova.txt" 2>/dev/null
 }
 
 videochip_compila() { # i quattro pezzi, rifatti solo se il sorgente è più nuovo
@@ -57,6 +93,18 @@ videochip_compila() { # i quattro pezzi, rifatti solo se il sorgente è più nuo
       return 1
     fi
   done
+  # la prova reale (un eseguibile del container: caricatore di glibc)
+  o="$d/tod-va-prova"
+  if [[ ! -x $o || $src/tod-va-prova.c -nt $o ]]; then
+    if clang --target=aarch64-linux-gnu -O1 -nostdlib -ffreestanding -fno-builtin -fuse-ld=lld \
+      -Wl,--dynamic-linker=/lib/ld-linux-aarch64.so.1 -o "$o.nuovo" "$src/tod-va-prova.c" "$libc" >>"$TOD_STATE_DIR/tod.log" 2>&1; then
+      mv -f "$o.nuovo" "$o"
+    else
+      rm -f "$o.nuovo"
+      log "video col chip: prova non compilata"
+      return 1
+    fi
+  fi
   o="$d/tod-va-chip"
   if [[ -x $o && ! $src/tod-va-chip.c -nt $o ]]; then return 0; fi
   flags=$(pkg-config --cflags --libs libavcodec libavutil 2>/dev/null) || return 1
@@ -95,7 +143,7 @@ videochip_env() { # /etc/tod/video.env del container: c'è solo col ponte pronto
   root=$(cx_rootfs) || return 0
   f="$root/etc/tod/video.env"
   d=$(videochip_dir)
-  if videochip_on && videochip_pronto; then
+  if videochip_on && videochip_pronto && videochip_adatto; then
     mkdir -p "${f%/*}"
     {
       printf '# video.env - generato da Termux On DeX (lib/videochip.sh): video col chip nelle app Chromium/Electron\n'
@@ -122,8 +170,10 @@ videochip_start() { # dall'hook di sessione: compila se serve, scrive video.env,
   fi
   videochip_compila || true
   videochip_finto || true
+  if videochip_pronto; then videochip_prova || true; fi
   videochip_env
   videochip_pronto || return 0
+  videochip_adatto || return 0   # telefono senza la grafica che serve (Mali): niente aiutante, le app come sempre
   if videochip_aiutante_vivo; then return 0; fi
   # un registro per sessione: l'aiutante scrive poche righe per video (mai un registro che cresce senza fine)
   (
@@ -145,13 +195,17 @@ videochip_install() { # installazione e aggiornamenti: libva in Termux, i pezzi 
   pkg_install $VIDEOCHIP_PKGS || return 1
   videochip_compila || return 1
   videochip_finto
+  videochip_prova || true   # un telefono che non la passa non è un errore: il ponte resta spento
   videochip_env
 }
 
 videochip_cli() { # tod videochip [stato|prepara|on|off]
   local sub=${1:-stato}
   case $sub in
-    prepara | install) videochip_install || die "$(t vc_no)"; ok "$(t vc_ok)" ;;
+    prepara | install)
+      videochip_install || die "$(t vc_no)"
+      if videochip_adatto; then ok "$(t vc_ok)"; else warn "$(t vc_non_adatto "$(videochip_motivo)")"; fi
+      ;;
     on | si | sì) conf_set VIDEO_CHIP 1; videochip_start; ok "$(t vc_acceso)" ;;
     off | no) conf_set VIDEO_CHIP 0; videochip_stop; ok "$(t vc_spento)" ;;
     stato | status)
@@ -159,6 +213,8 @@ videochip_cli() { # tod videochip [stato|prepara|on|off]
         echo "$(t vc_spento)"
       elif videochip_pronto && videochip_aiutante_vivo; then
         echo "$(t vc_attivo)"
+      elif [[ -n $(videochip_motivo) ]]; then
+        echo "$(t vc_non_adatto "$(videochip_motivo)")"
       else
         echo "$(t vc_non_pronto)"
       fi

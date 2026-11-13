@@ -2562,25 +2562,35 @@ EOF
     have() { command -v "$1" >/dev/null; }
     log() { echo "LOG $*"; }
     cx_rootfs() { echo "$VC_ROOT"; }
+    videochip_esegui_prova() { echo x >>"$VC_REG.prova"; printf "dma_heap: ok\nvulkan: Finto (integrata)\n%s\n" "${VC_ESITO:-ESITO ok}"; }
     D=$TOD_TERMUX_HOME/.local/share/tod-va
     videochip_compila && ls "$D" | tr "\n" " "; echo
     readlink "$D/include/va"
     videochip_compila; wc -l <"$VC_REG"
     videochip_finto; cat "$D/finto/sys/dev/char/226:128/device/uevent" | sed -n 3p
     videochip_pronto && echo pronto
+    videochip_env; [ -f "$VC_ROOT/etc/tod/video.env" ] || echo "senza prova: niente video.env"
+    videochip_prova && echo adatto; videochip_prova; echo "prove: $(wc -l <"$VC_REG.prova")"
     videochip_env; cat "$VC_ROOT/etc/tod/video.env"
     conf_set VIDEO_CHIP 0; videochip_env; [ -f "$VC_ROOT/etc/tod/video.env" ] || echo "spento: niente video.env"
-    conf_set VIDEO_CHIP 1; rm -f "$D/tod-gbm.so"; videochip_env; [ -f "$VC_ROOT/etc/tod/video.env" ] || echo "incompleto: niente video.env"' 2>&1)
+    conf_set VIDEO_CHIP 1; rm -f "$D/prova.txt"
+    VC_ESITO="ESITO no: nessun Vulkan hardware" videochip_prova || echo "mali: $(videochip_motivo)"
+    videochip_env; [ -f "$VC_ROOT/etc/tod/video.env" ] || echo "mali: niente video.env"
+    rm -f "$D/prova.txt"; videochip_prova >/dev/null; rm -f "$D/tod-gbm.so"; videochip_env; [ -f "$VC_ROOT/etc/tod/video.env" ] || echo "incompleto: niente video.env"' 2>&1)
   local D="$d/casa/.local/share/tod-va"
-  has "i quattro pezzi compilati" "include tod-gbm.so tod-va-chip tod-va-shim.so tod_drv_video.so" "$out"
+  has "i pezzi compilati (con la prova reale)" "include tod-gbm.so tod-va-chip tod-va-prova tod-va-shim.so tod_drv_video.so" "$out"
   has "il driver per il glibc del container, con le sole intestazioni di libva" \
     "clang --target=aarch64-linux-gnu -O2 -fPIC -shared -nostdlib -ffreestanding -fno-builtin -fuse-ld=lld -I$D/include -o $D/tod_drv_video.so.nuovo $ROOT/share/video/tod_drv_video.c $d/root/lib/aarch64-linux-gnu/libc.so.6" \
     "$(cat "$d/reg")"
   has "intestazioni: un collegamento a quelle di libva di Termux" "$d/prefix/include/va" "$out"
   has "l'aiutante con ffmpeg" "-o $D/tod-va-chip.nuovo $ROOT/share/video/tod-va-chip.c -lavcodec -lavutil" "$(cat "$d/reg")"
-  has "non ricompilati se i sorgenti non cambiano" $'\n4\n' "$out"
+  has "non ricompilati se i sorgenti non cambiano" $'\n5\n' "$out"
   has "scheda finta: un dispositivo PCI con i numeri veri (non \$VV)" "PCI_ID=5143:0840" "$out"
   has "pronto" "pronto" "$out"
+  has "senza la prova reale niente ponte" "senza prova: niente video.env" "$out"
+  has "prova passata (Adreno), e non rifatta finché il profilo grafico non cambia" $'adatto\nprove: 1' "$out"
+  has "Mali (niente Vulkan hardware nel container): il motivo" "mali: nessun Vulkan hardware" "$out"
+  has "Mali: le app partono come sempre" "mali: niente video.env" "$out"
   has "video.env: prima la GBM, poi lo shim" "VA_PRELOAD=\"$D/tod-gbm.so $D/tod-va-shim.so\"" "$out"
   has "video.env: ANGLE su Vulkan e il nodo finto" "--use-angle=vulkan --ignore-gpu-blocklist --render-node-override=/dev/dri/renderD128" "$out"
   has "video.env: il driver tod" "LIBVA_DRIVER_NAME=\"tod\"" "$out"

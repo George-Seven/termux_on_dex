@@ -17,7 +17,7 @@ PREDICATES = {
     "pkg_installed", "pkg_has", "session_running", "have", "ui_yesno", "tui_available", "lingua_active", "phantom_verify_default",
     "bv_wanted", "bv_alive", "usb_bg_running", "tui_quiet", "app_rx", "x11_glamor_da_aggiornare",
     "self_is_install", "x11_glamor_ok", "stampa_on", "stampa_pronta", "rete_on", "rete_pronta",
-    "videochip_on", "videochip_pronto", "videochip_aiutante_vivo",
+    "videochip_on", "videochip_pronto", "videochip_aiutante_vivo", "videochip_adatto", "videochip_prova",
 }
 
 func_re = re.compile(r"^([a-zA-Z_][a-zA-Z0-9_]*)\(\)\s*\{")
