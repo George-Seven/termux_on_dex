@@ -9,6 +9,7 @@ percentuale del totale dei core (come la colonna CPU di Windows).
   assegna(processi, radici)      {chiave app: [pid]} seguendo i genitori, e i pid che non sono di nessuna app
   nome_processo(argv, comm)      un nome leggibile (le app di Debian partono con ld.so --argv0 NOME)
   protetto(proc)                 vero per i pezzi del desktop che non si possono terminare
+  chip_video(), chip_stato()     il video col chip (lib/videochip.sh): video in corso, totali, acceso/spento e perché
 """
 import os
 import time
@@ -201,3 +202,81 @@ def dimensione(kb, italiano=True):
 def percento(x, italiano=True):
     t = f"{x:.1f}%" if x < 10 else f"{x:.0f}%"
     return t.replace(".", ",") if italiano else t
+
+
+# --- il chip video (13 novembre, Pietro: "ho modo di vedere come si comporta questo chip?" → "perché in gestione
+# attività no?"). Come la GPU "Video Decode" di Windows. L'aiutante (share/video/tod-va-chip.c) scrive uno stato per video
+# in $TMPDIR/tod-va-chip/stato/<pid>.json ogni secondo e una riga per video finito nello storico della sessione.
+CHIP_DIR = os.path.join(os.environ.get("TMPDIR", "/data/data/com.termux/files/usr/tmp"), "tod-va-chip")
+CODEC = {"h264": "H.264", "vp9": "VP9", "hevc": "HEVC", "av1": "AV1"}
+
+
+def chip_video(cartella=CHIP_DIR, ora=None):
+    """([video in corso], (video della sessione, fotogrammi della sessione)). Un video in corso:
+    {pid (processo dell'app), codec, w, h, fotogrammi, inizio, agg}; quelli fermi da più di 5 s non contano."""
+    import json
+    ora = time.time() if ora is None else ora
+    attivi = []
+    try:
+        nomi = sorted(os.listdir(os.path.join(cartella, "stato")))
+    except OSError:
+        nomi = []
+    for n in nomi:
+        if not n.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(cartella, "stato", n)) as f:
+                v = json.load(f)
+            if ora - float(v.get("agg", 0)) <= 5:
+                v["id"] = n[:-5]
+                attivi.append(v)
+        except (OSError, ValueError):
+            pass
+    video, fotogrammi = len(attivi), sum(int(v.get("fotogrammi", 0)) for v in attivi)
+    try:
+        with open(os.path.join(cartella, "storico")) as f:
+            for riga in f:
+                p = riga.split()
+                if len(p) >= 2 and p[1].isdigit():
+                    video += 1
+                    fotogrammi += int(p[1])
+    except OSError:
+        pass
+    return attivi, (video, fotogrammi)
+
+
+def chip_al_secondo(prima, dopo, secondi):
+    """{id: fotogrammi al secondo} tra due letture di chip_video"""
+    vecchi = {v["id"]: int(v.get("fotogrammi", 0)) for v in prima or []}
+    out = {}
+    for v in dopo:
+        n = int(v.get("fotogrammi", 0)) - vecchi.get(v["id"], int(v.get("fotogrammi", 0)))
+        out[v["id"]] = max(0.0, n / secondi) if secondi > 0 else 0.0
+    return out
+
+
+def chip_stato(casa=None, tmp=None):
+    """("attivo" | "spento" | "non_disponibile" | "in_preparazione", motivo)"""
+    casa = casa or os.environ.get("TOD_TERMUX_HOME") or os.environ.get("HOME", "")
+    tmp = tmp or os.environ.get("TMPDIR", "/data/data/com.termux/files/usr/tmp")
+    try:
+        for riga in open(os.path.join(casa, ".config/tod/tod.conf")):
+            if riga.startswith("VIDEO_CHIP=") and riga.split("=", 1)[1].strip().strip('"') == "0":
+                return "spento", ""
+    except OSError:
+        pass
+    try:
+        prova = open(os.path.join(casa, ".local/share/tod-va/prova.txt")).read()
+    except OSError:
+        prova = ""
+    for riga in prova.splitlines():
+        if riga.startswith("ESITO no: "):
+            return "non_disponibile", riga[len("ESITO no: "):]
+    try:
+        pid = int(open(os.path.join(tmp, "tod-va-chip.pid")).read().strip())
+        if b"tod-va-chip" in open(f"/proc/{pid}/cmdline", "rb").read() and "ESITO ok" in prova:
+            return "attivo", ""
+    except (OSError, ValueError):
+        pass
+    return "in_preparazione", ""
+

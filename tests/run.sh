@@ -2810,6 +2810,37 @@ EOF
 True False True Gestore delle finestre tod
 512 KB 3,4 MB 244 MB 2,3 GB 4,6% 37%
 kworker main.js" "$out"
+  # il chip video (13 novembre, Pietro: "perché in gestione attività no?"): video in corso dai file dell'aiutante (quelli
+  # fermi da più di 5 s no), totali della sessione, fotogrammi al secondo, acceso/spento/non disponibile e perché
+  mkdir -p "$d/tmp"
+  out=$(TMPDIR="$d/tmp" _stampa_py "$ROOT/share/attivita_dati.py" <<'EOF'
+import os, json
+C = os.path.join(os.environ["TMPDIR"], "chip"); os.makedirs(C + "/stato")
+json.dump({"pid": 42, "codec": "h264", "w": 1280, "h": 720, "fotogrammi": 300, "inizio": 0, "agg": 100}, open(C + "/stato/7.json", "w"))
+json.dump({"pid": 43, "codec": "vp9", "w": 1920, "h": 1080, "fotogrammi": 50, "inizio": 0, "agg": 80}, open(C + "/stato/8.json", "w"))
+open(C + "/storico", "w").write("h264 1661 55\nvp9 740 25\n")
+a, tot = m.chip_video(C, ora=102)
+print([(v["id"], v["codec"], v["pid"]) for v in a], tot)
+b = [dict(a[0], fotogrammi=360)]
+print(m.chip_al_secondo(a, b, 2.0), m.chip_al_secondo(None, b, 2.0), m.CODEC["vp9"])
+casa = os.path.join(os.environ["TMPDIR"], "casa"); os.makedirs(casa + "/.config/tod"); os.makedirs(casa + "/.local/share/tod-va")
+print(m.chip_stato(casa, C))
+open(casa + "/.local/share/tod-va/prova.txt", "w").write("1\ndma_heap: ok\nESITO no: /dev/dma_heap/system non si apre\n")
+print(m.chip_stato(casa, C))
+open(casa + "/.config/tod/tod.conf", "w").write('VIDEO_CHIP="0"\n')
+print(m.chip_stato(casa, C))
+EOF
+)
+  eq "chip video: in corso, totali, al secondo, stati" "[('7', 'h264', 42)] (3, 2701)
+{'7': 30.0} {'7': 0.0} VP9
+('in_preparazione', '')
+('non_disponibile', '/dev/dma_heap/system non si apre')
+('spento', '')" "$out"
+  has "Prestazioni: la scheda del chip video" 'self.scheda(v, T("Chip video", "Video chip"))' "$(cat "$ROOT/share/tod-attivita.py")"
+  has "Processi: accanto all'app che lo usa" 'T("  ·  chip video", "  ·  video chip")' "$(cat "$ROOT/share/tod-attivita.py")"
+  s=$(cat "$ROOT/share/video/tod-va-chip.c")
+  has "aiutante: chi si è collegato (il processo dell'app)" "SO_PEERCRED" "$s"
+  has "aiutante: lo stato di ogni video per la Gestione attività" '"%s/stato/%d.json"' "$s"
   # la Cattura (GTK: il Python di Termux): nome come il telefono, finestre tagliate ai bordi, cartella delle prove
   local py=/data/data/com.termux/files/usr/bin/python3
   if [[ -x $py ]] && "$py" -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null; then

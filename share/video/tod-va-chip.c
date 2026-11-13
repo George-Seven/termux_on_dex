@@ -29,6 +29,9 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <dirent.h>
 #include <unistd.h>
 
 enum { APRI = 1, PACCHETTO = 2, SVUOTA = 3, CHIUDI = 4, FATTO = 10, SCARTATO = 11 };
@@ -43,6 +46,36 @@ static AVPacket *pkt;
 static AVFrame *fr;
 static int sock;
 static unsigned consegnati;
+
+/* --- lo stato per la Gestione attività (13 novembre, Pietro: "ho modo di vedere come si comporta il chip?"):
+ * ogni video che il chip sta decodificando = $TMPDIR/tod-va-chip/stato/<pid>.json (app = processo collegato, formato,
+ * misure, fotogrammi), rifatto ogni secondo; a fine video una riga nello storico della sessione (formato fotogrammi
+ * secondi). share/attivita_dati.py li legge. */
+static char dir_stato[200];
+static int app_pid;
+static char codec[24];
+static unsigned larg, alt;
+static time_t inizio, scritto;
+static void scrivi_stato(int fine) {
+    if (!dir_stato[0] || !inizio) return;
+    char f[260], t[270];
+    snprintf(f, sizeof f, "%s/stato/%d.json", dir_stato, getpid());
+    if (fine) {
+        unlink(f);
+        snprintf(t, sizeof t, "%s/storico", dir_stato);
+        FILE *s = fopen(t, "a");
+        if (s) fprintf(s, "%s %u %ld\n", codec, consegnati, (long)(time(NULL) - inizio)), fclose(s);
+        return;
+    }
+    snprintf(t, sizeof t, "%s.nuovo", f);
+    FILE *o = fopen(t, "w");
+    if (!o) return;
+    fprintf(o, "{\"pid\": %d, \"codec\": \"%s\", \"w\": %u, \"h\": %u, \"fotogrammi\": %u, \"inizio\": %ld, \"agg\": %ld}\n",
+            app_pid, codec, larg, alt, consegnati, (long)inizio, (long)time(NULL));
+    fclose(o);
+    rename(t, f);
+    scritto = time(NULL);
+}
 
 // al massimo RIGHE righe per processo (ogni video è un processo figlio): mai un registro che cresce senza fine
 #define RIGHE 300
@@ -148,6 +181,12 @@ static void apri(const struct msg *h, uint8_t *dati) {
     L("apertura di %s %ux%u, extradata %zu byte: %d", nome, h->w, h->h, ne, r);
     if (r < 0) avcodec_free_context(&ctx);
     rispondi(r < 0 ? SCARTATO : FATTO, 0);   // il driver aspetta questa risposta: un chip che rifiuta = processore
+    if (r == 0) {
+        snprintf(codec, sizeof codec, "%.*s", (int)strcspn(nome, "_"), nome);   // h264_mediacodec → h264
+        larg = h->w, alt = h->h;
+        if (!inizio) inizio = time(NULL);
+        scrivi_stato(0);
+    }
 }
 
 static void pacchetto(const struct msg *h, uint8_t *dati, int fd) {
@@ -191,6 +230,9 @@ static void svuota(void) {
 
 static void servi(int s) {
     sock = s;
+    struct ucred u;   /* chi si è collegato: il processo dell'app (nel container, stesso spazio dei processi) */
+    socklen_t ul = sizeof u;
+    if (getsockopt(s, SOL_SOCKET, SO_PEERCRED, &u, &ul) == 0) app_pid = u.pid;
     fili_binder();
     pkt = av_packet_alloc();
     fr = av_frame_alloc();
@@ -204,6 +246,7 @@ static void servi(int s) {
     signal(SIGALRM, SIG_DFL);
     for (;;) {
         alarm(20);
+        if (ctx && time(NULL) - scritto >= 1) scrivi_stato(0);
         int in_volo = 0;
         for (int i = 0; i < MAXA; i++) in_volo += att[i].usato;
         struct pollfd p = {s, POLLIN, 0};
@@ -235,6 +278,7 @@ static void servi(int s) {
     }
 fine:
     L("fine della connessione (%u fotogrammi)", consegnati);
+    scrivi_stato(1);
     if (ctx) avcodec_free_context(&ctx);
     _exit(0);
 }
@@ -242,6 +286,14 @@ fine:
 int main(int argc, char **argv) {
     signal(SIGCHLD, SIG_IGN);   /* i figli si raccolgono da soli */
     av_log_set_callback(registro_ffmpeg);
+    const char *tmp = getenv("TMPDIR");
+    if (tmp && strlen(tmp) < 150) {   /* lo stato dei video per la Gestione attività: storico nuovo a ogni sessione */
+        snprintf(dir_stato, sizeof dir_stato, "%s/tod-va-chip", tmp);
+        char d[260];
+        mkdir(dir_stato, 0700);
+        snprintf(d, sizeof d, "%s/stato", dir_stato);
+        mkdir(d, 0700);
+    }
     int l = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     struct sockaddr_un a = {.sun_family = AF_UNIX};
     const char nome[] = "tod-va-chip";
@@ -252,6 +304,21 @@ int main(int argc, char **argv) {
         return 1;
     }
     L("in ascolto su @%s", nome);
+    if (dir_stato[0]) {   /* nuova sessione: niente stati e storico di prima */
+        char d[260];
+        snprintf(d, sizeof d, "%s/storico", dir_stato);
+        unlink(d);
+        snprintf(d, sizeof d, "%s/stato", dir_stato);
+        DIR *x = opendir(d);
+        struct dirent *e;
+        while (x && (e = readdir(x))) {
+            char f[540];
+            if (e->d_name[0] == '.') continue;
+            snprintf(f, sizeof f, "%s/%s", d, e->d_name);
+            unlink(f);
+        }
+        if (x) closedir(x);
+    }
     /* il numero di processo lo scrive l'aiutante, e solo ora: chi trova il socket occupato non tocca quello buono */
     if (argc == 3 && !strcmp(argv[1], "--pid")) {
         FILE *p = fopen(argv[2], "w");

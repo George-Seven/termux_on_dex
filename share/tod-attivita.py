@@ -5,7 +5,9 @@ Pietro: Cattura schermo e Gestione attività di XFCE "hanno l'aspetto Linux": le
 (Foto, Lettore: share/media/comune.py, colori e accento del sistema). Due pagine:
   Processi     le app con una finestra (i loro processi dentro, aprendo la riga) e i processi in background, con
                processore e memoria; "Termina attività" (Canc). I pezzi che tengono in piedi il desktop non si terminano.
-  Prestazioni  processore e memoria negli ultimi due minuti.
+  Prestazioni  processore e memoria negli ultimi due minuti, e il chip video (13 novembre: come "Video Decode" della GPU
+               in Windows): chi lo usa, formato, fotogrammi al secondo, totali della sessione; nei Processi l'app che lo
+               sta usando ha accanto "chip video".
 I dati: share/attivita_dati.py (senza grafica). Android mostra solo i processi del desktop, non le app del telefono.
 """
 import os
@@ -117,7 +119,8 @@ class Finestra(Gtk.ApplicationWindow):
         self.ordine, self.discendente = "kb", True
         self.aperte, self.scelta = set(), None
         self.filtro = ""
-        self.storia_cpu, self.storia_mem = [], []
+        self.storia_cpu, self.storia_mem, self.storia_chip = [], [], []
+        self.chip_prima, self.chip_ora, self.chip_app = None, 0.0, set()
         self._in_lettura = False
         radice = Gtk.Box()
         self.add(radice)
@@ -142,6 +145,7 @@ class Finestra(Gtk.ApplicationWindow):
         self.colori = C.colori()
         self.g_cpu.queue_draw()
         self.g_mem.queue_draw()
+        self.g_chip.queue_draw()
 
     def scegli(self, k):
         self.nav.segna(k)
@@ -240,17 +244,19 @@ class Finestra(Gtk.ApplicationWindow):
         self._in_lettura = True
 
         def lavoro():
+            chip = ([], (0, 0)), ("in_preparazione", "")
             try:
                 camp = D.Campione()
                 fin = self.P.finestre_aperte()
+                chip = D.chip_video(), D.chip_stato()
             except Exception as e:   # noqa: BLE001 - un giro andato storto non chiude la finestra
                 print(f"tod-attivita: {type(e).__name__}: {e}", file=sys.stderr)
                 camp, fin = None, []
-            GLib.idle_add(lambda: self.letto(camp, fin) and False)
+            GLib.idle_add(lambda: self.letto(camp, fin, chip) and False)
         threading.Thread(target=lavoro, daemon=True).start()
         return True
 
-    def letto(self, camp, fin):
+    def letto(self, camp, fin, chip=(([], (0, 0)), ("in_preparazione", ""))):
         self._in_lettura = False
         if camp is None:
             return
@@ -271,6 +277,7 @@ class Finestra(Gtk.ApplicationWindow):
         for k, a in app.items():
             a["pid"] = per_app.get(k, [])
         self.ultimo = (camp, uso, app, resto)
+        self.chip_letto(camp, app, chip)
         self.riempi()
         tot_cpu = sum(uso.values())
         self.storia_cpu = (self.storia_cpu + [tot_cpu])[-STORIA:]
@@ -293,7 +300,8 @@ class Finestra(Gtk.ApplicationWindow):
         for k, a in app.items():
             figli = [{"nome": D.nome_leggibile(camp.processi[p], IT), "pid": p, "cpu": uso.get(p, 0.0),
                       "kb": camp.processi[p].kb} for p in a["pid"] if p in camp.processi]
-            voce = {"nome": a["nome"], "icona": a["icona"], "chiave": "app:" + k, "pid": 0, "figli": figli,
+            nome = a["nome"] + (T("  ·  chip video", "  ·  video chip") if k in self.chip_app else "")
+            voce = {"nome": nome, "icona": a["icona"], "chiave": "app:" + k, "pid": 0, "figli": figli,
                     "cpu": sum(x["cpu"] for x in figli), "kb": sum(x["kb"] for x in figli)}
             if not f or f in voce["nome"].lower() or any(f in x["nome"].lower() for x in figli):
                 voci_app.append(voce)
@@ -431,6 +439,7 @@ class Finestra(Gtk.ApplicationWindow):
         v.pack_start(C.etichetta(T("Prestazioni", "Performance"), "titolo"), False, False, 0)
         self.g_cpu, self.n_cpu, self.s_cpu = self.scheda(v, T("Processore", "CPU"))
         self.g_mem, self.n_mem, self.s_mem = self.scheda(v, T("Memoria", "Memory"))
+        self.g_chip, self.n_chip, self.s_chip = self.scheda(v, T("Chip video", "Video chip"))
         sw.add(v)
         return sw
 
@@ -462,6 +471,48 @@ class Finestra(Gtk.ApplicationWindow):
                                   f"In use on the phone ({D.percento(usata * 100 / camp.mem_totale, IT)}) · "
                                   f"desktop and apps: {D.dimensione(nostra, IT)}"))
         self.g_mem.metti(self.storia_mem)
+
+    # --- il chip video -----------------------------------------------------------------------------------------------
+    def chip_letto(self, camp, app, chip):
+        (attivi, (video, fotogrammi)), (stato, motivo) = chip
+        ora = camp.ora if hasattr(camp, "ora") else 0.0
+        fps = D.chip_al_secondo(self.chip_prima, attivi, ora - self.chip_ora) if self.chip_prima is not None else {}
+        self.chip_prima, self.chip_ora = attivi, ora
+        di_app = {p: k for k, a in app.items() for p in a.get("pid", [])}
+        self.chip_app = set()
+        righe = []
+        for v in attivi:
+            k = di_app.get(int(v.get("pid", 0)))
+            if k:
+                self.chip_app.add(k)
+                chi = app[k]["nome"]
+            else:
+                p = camp.processi.get(int(v.get("pid", 0)))
+                chi = D.nome_leggibile(p, IT) if p else T("un'app", "an app")
+            al_s = fps.get(v["id"], 0.0)
+            righe.append(f"{chi} · {D.CODEC.get(v.get('codec'), v.get('codec', '?'))} {v.get('w')}×{v.get('h')} · "
+                         + T(f"{al_s:.0f} fotogrammi/s", f"{al_s:.0f} frames/s"))
+        tot = sum(fps.values())
+        self.storia_chip = (self.storia_chip + [min(100.0, tot * 100 / 60)])[-STORIA:]   # 60 fotogrammi/s = pieno
+        if stato == "spento":
+            self.n_chip.set_text(T("Spento", "Off"))
+            sotto = T("Le app decodificano i video col processore. Si accende con «tod videochip on».",
+                      "Apps decode video with the processor. Turn it on with “tod videochip on”.")
+        elif stato == "non_disponibile":
+            self.n_chip.set_text(T("Non disponibile", "Not available"))
+            sotto = T(f"Su questo telefono le app usano il processore: {motivo}.", f"On this phone apps use the processor: {motivo}.")
+        elif stato == "in_preparazione":
+            self.n_chip.set_text(T("In preparazione", "Getting ready"))
+            sotto = T("Sarà pronto al prossimo avvio del desktop.", "It will be ready at the next desktop start.")
+        else:
+            self.n_chip.set_text(T(f"{tot:.0f} fotogrammi/s", f"{tot:.0f} frames/s") if attivi else T("Inattivo", "Idle"))
+            sotto = "\n".join(righe) if righe else T("Nessun video in questo momento.", "No video right now.")
+            n = f"{fotogrammi:,}".replace(",", ".") if IT else f"{fotogrammi:,}"   # 12.345 in italiano
+            sotto += "\n" + T(f"In questa sessione: {video} video, {n} fotogrammi decodificati dal chip invece che dal "
+                               "processore.", f"This session: {video} videos, {n} frames decoded by the chip instead of "
+                               "the processor.")
+        self.s_chip.set_text(sotto)
+        self.g_chip.metti(self.storia_chip)
 
     # --- tastiera ---------------------------------------------------------------------------------------------------
     def tasto(self, _w, ev):
