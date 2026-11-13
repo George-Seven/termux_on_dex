@@ -2555,6 +2555,26 @@ True None
   has "stile del puntatore nel Mouse" 'T("Stile del puntatore", "Pointer style")' "$s"
   hasnt "niente più setxkbmap (non c'è in Termux)" "setxkbmap" "$s"
   has "il layout a ogni avvio della sessione" "x11_tastiera_applica" "$(cat "$ROOT/lib/session.sh")"
+  # 13 novembre, Pietro: scorrendo con la rotellina un cursore sotto il puntatore cambiava ("non so più com'era") →
+  # la rotellina sopra cursori e tendine scorre la pagina (ogni pagina, anche le parti ridisegnate), e un Ripristina
+  # predefiniti in Tastiera e Mouse con i valori di partenza di XFCE, gli stessi che le pagine mostrano se manca tutto
+  has "rotellina: ogni pagina appena fatta" "getattr(self, \"pane_\" + key)(box)
+        senza_rotella(box)" "$s"
+  has "rotellina: la Tastiera ridisegnata" "senza_rotella(self.kb_box)" "$s"
+  has "rotellina: passa alla pagina" "sw.event(ev)" "$s"
+  has "Ripristina nella Tastiera" "self.kb_predefiniti), False, False, 0)" "$s"
+  has "Ripristina nel Mouse" "lambda: self.ms_predefiniti(dispositivi)), False, False, 0)" "$s"
+  out=$(python3 - "$ROOT/share/tod-settings.py" <<'PYEOF2'
+import re, sys
+src = open(sys.argv[1]).read()
+exec(re.search(r"^TASTIERA_PREDEFINITI = .*?(?=^def senza_rotella)", src, re.S | re.M).group(0))
+diversi = [(c, p, v) for c, p, v in TASTIERA_PREDEFINITI if f'xf_valore("{c}", "{p}", {v!r})' not in src]
+diversi += [p for p, v in MOUSE_PREDEFINITI if f'/{{d0}}/{p}", {v!r})' not in src]
+diversi += [] if f'"/Net/DoubleClickTime", {DOPPIO_CLIC_PREDEFINITO})' in src else ["DoubleClickTime"]
+print(diversi, TASTIERA_PREDEFINITI[1][2], TASTIERA_PREDEFINITI[2][2], DOPPIO_CLIC_PREDEFINITO)
+PYEOF2
+)
+  eq "predefiniti uguali a quelli mostrati dalle pagine" "[] 20 500 400" "$out"
   has "tod tastiera" "tastiera | keyboard) x11_tastiera_cli" "$(cat "$ROOT/tod")"
 }
 

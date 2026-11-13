@@ -125,6 +125,31 @@ def xq(channel, prop, *set_args):
     return sh(["xfconf-query", "-c", channel, "-p", prop])
 
 
+# i valori di partenza di XFCE (quelli che xfsettingsd usa se non c'è niente): Ripristina predefiniti li riscrive
+TASTIERA_PREDEFINITI = [("keyboards", "/Default/KeyRepeat", True), ("keyboards", "/Default/KeyRepeat/Rate", 20),
+                        ("keyboards", "/Default/KeyRepeat/Delay", 500), ("keyboards", "/Default/Numlock", False),
+                        ("xsettings", "/Net/CursorBlink", True)]
+MOUSE_PREDEFINITI = [("RightHanded", True), ("ReverseScrolling", False)]
+DOPPIO_CLIC_PREDEFINITO = 400
+
+
+def senza_rotella(w):
+    """13 novembre, Pietro: scorrendo la pagina con la rotellina, se il puntatore passava sopra un cursore lo
+    cambiava ("e non so più com'era"); lo stesso le tendine. Come su macOS la rotellina sopra di loro scorre la
+    pagina: il loro scroll-event si ferma qui (prima del gestore di GTK) e passa alla pagina. Si chiama su ogni pagina
+    appena fatta e sulle parti ridisegnate dopo (Tastiera); una volta sola per controllo."""
+    def passa(widget, ev):
+        sw = widget.get_ancestor(Gtk.ScrolledWindow)
+        if sw is not None:
+            sw.event(ev)
+        return True
+    if isinstance(w, (Gtk.Scale, Gtk.ComboBox, Gtk.SpinButton)) and not getattr(w, "_senza_rotella", False):
+        w._senza_rotella = True
+        w.connect("scroll-event", passa)
+    if isinstance(w, Gtk.Container):
+        w.forall(senza_rotella)
+
+
 def xf_valore(canale, prop, predefinito):
     """un valore di xfconf con il suo tipo (bool, int o testo); se non c'è, il predefinito di XFCE"""
     v = xq(canale, prop)
@@ -287,6 +312,37 @@ class Settings(Gtk.Window):
         self.show_all()
         self.sidebar.select_row(self.rows.get(first) or self.rows["aspetto"])
 
+    def ricostruisci(self, key):
+        """ridisegna una pagina già aperta (dopo Ripristina predefiniti)"""
+        old = self.stack.get_child_by_name(key)
+        if old:
+            self.stack.remove(old)
+        page = self.page(key)
+        self.stack.add_named(page, key)
+        page.show_all()
+        self.built[key] = True
+        self.stack.set_visible_child_name(key)
+
+    def ripristina(self, titolo, testo, fatto):
+        """il pulsante in fondo alla pagina, come macOS; chiede conferma (non si torna indietro)"""
+        b = Gtk.Button(label=T("Ripristina predefiniti…", "Restore Defaults…"), halign=Gtk.Align.END)
+
+        def chiedi(*_):
+            d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
+                                  buttons=Gtk.ButtonsType.NONE, text=titolo)
+            d.format_secondary_text(testo)
+            d.add_button(T("Annulla", "Cancel"), Gtk.ResponseType.CANCEL)
+            d.add_button(T("Ripristina", "Restore"), Gtk.ResponseType.OK)
+            d.set_default_response(Gtk.ResponseType.OK)
+            tod_avviso.come_macos(d)
+            r = d.run()
+            d.destroy()
+            if r == Gtk.ResponseType.OK:
+                fatto()
+        b.connect("clicked", chiedi)
+        b.set_margin_top(6)
+        return b
+
     def open_pane(self, key):
         if key in self.rows:
             self.search.set_text("")
@@ -324,6 +380,7 @@ class Settings(Gtk.Window):
         lab.get_style_context().add_class("pane-title")
         box.pack_start(lab, False, False, 4)
         getattr(self, "pane_" + key)(box)
+        senza_rotella(box)
         sw.add(box)
         return sw
 
@@ -937,6 +994,7 @@ class Settings(Gtk.Window):
             self.kb_pagina_scorciatoie()
         else:
             self.kb_pagina_tastiera()
+        senza_rotella(self.kb_box)
         self.kb_box.show_all()
         sw = self.kb_box.get_ancestor(Gtk.ScrolledWindow)
         if sw is not None:
@@ -985,6 +1043,18 @@ class Settings(Gtk.Window):
                      self.button(T("Modifica…", "Edit…"), lambda: (setattr(self, "kb_scorciatoie", True), self.kb_mostra())),
                      T("Le combinazioni di tasti per lo Start, le schermate, le app e le finestre.",
                        "Key combinations for Start, screenshots, apps and windows."))])
+        b.pack_start(self.ripristina(
+            T("Ripristinare la tastiera?", "Restore keyboard defaults?"),
+            T("Ripetizione dei tasti, velocità, ritardo, Bloc Num e cursore lampeggiante tornano come all'inizio. "
+              "Lingue, layout e scorciatoie restano come sono.",
+              "Key repeat, rate, delay, Num Lock and the blinking cursor go back to how they were at the start. "
+              "Languages, layouts and shortcuts stay as they are."),
+            self.kb_predefiniti), False, False, 0)
+
+    def kb_predefiniti(self):
+        for canale, prop, valore in TASTIERA_PREDEFINITI:
+            xf_scrivi(canale, prop, valore)
+        self.kb_mostra()
 
     def kb_layout_voci(self):
         import tastiera_dati as K
@@ -1330,6 +1400,24 @@ class Settings(Gtk.Window):
                        "in Samsung DeX → Mouse e trackpad.",
                        "In DeX the phone moves the pointer: change its speed in the phone's settings, "
                        "under Samsung DeX → Mouse and trackpad."))])
+        box.pack_start(self.ripristina(
+            T("Ripristinare il mouse?", "Restore mouse defaults?"),
+            T("Tasto principale, scorrimento, velocità del doppio clic, stile e dimensione del puntatore tornano come "
+              "all'inizio.",
+              "Primary button, scrolling, double-click speed, pointer style and size go back to how they were at the "
+              "start."),
+            lambda: self.ms_predefiniti(dispositivi)), False, False, 0)
+
+    def ms_predefiniti(self, dispositivi):
+        for d in dispositivi:
+            for prop, valore in MOUSE_PREDEFINITI:
+                xf_scrivi("pointers", f"/{d}/{prop}", valore)
+        xf_scrivi("xsettings", "/Net/DoubleClickTime", DOPPIO_CLIC_PREDEFINITO)
+        # puntatore: prima la dimensione, poi lo stile (solo se cambiato), poi si ridisegna la pagina
+        fine = lambda: self.ricostruisci("mouse")   # noqa: E731
+        stile = (lambda: tod("aspetto", "puntatore", "scuro", then=fine)) if conf_get("PUNTATORE", "scuro") != "scuro" \
+            else fine
+        tod("aspetto", "puntatore", "dimensione", "100", then=stile)
 
     # --- app installate: tutte quelle dello Start (Termux, Debian, telefono), con Disinstalla ---
     PROTECTED = re.compile(r"^(thunar|xfce4-.*|xfwm4|xfdesktop|xfce4|termux-.*|python.*|tod-.*|libxfce.*|exo)$")
