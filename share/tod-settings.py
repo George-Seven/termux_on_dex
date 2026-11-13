@@ -66,9 +66,6 @@ ACCENTS = [("blu", "#0067c0", T("Blu", "Blue")), ("viola", "#8a5cf5", T("Viola",
            ("arancione", "#ca5010", T("Arancione", "Orange")), ("giallo", "#b58900", T("Giallo", "Yellow")),
            ("verde", "#107c10", T("Verde", "Green")), ("acqua", "#038387", T("Verde acqua", "Teal")),
            ("grafite", "#68768a", T("Grafite", "Graphite"))]
-LAYOUTS = [("it", "Italiano"), ("us", T("Inglese (USA)", "English (US)")), ("gb", T("Inglese (Regno Unito)", "English (UK)")),
-           ("de", T("Tedesco", "German")), ("fr", T("Francese", "French")), ("es", T("Spagnolo", "Spanish")),
-           ("ch", T("Svizzero", "Swiss")), ("pt", T("Portoghese", "Portuguese"))]
 
 
 # --- piccoli aiuti ------------------------------------------------------------------------
@@ -200,6 +197,8 @@ CSS = b"""
 .arch-voce:last-child { border-bottom-left-radius: 10px; border-bottom-right-radius: 10px; }
 .arch-misura { opacity: 0.7; font-feature-settings: "tnum"; }
 .arch-indietro { color: @theme_selected_bg_color; padding: 2px 6px 2px 0; }
+.kb-sigla { font-size: 8pt; font-weight: bold; padding: 1px 5px; border-radius: 4px;
+            border: 1px solid alpha(@theme_fg_color, 0.45); color: alpha(@theme_fg_color, 0.8); }
 """
 
 
@@ -945,14 +944,8 @@ class Settings(Gtk.Window):
 
     def kb_pagina_tastiera(self):
         b = self.kb_box
-        cur = xq("keyboard-layout", "/Default/XkbLayout") or "it"
-        combo = Gtk.ComboBoxText()
-        for code, name in LAYOUTS:
-            combo.append(code, name)
-        if not combo.set_active_id(cur.split(",")[0]):
-            combo.append(cur, cur)
-            combo.set_active_id(cur)
-        combo.connect("changed", lambda c: self.set_layout(c.get_active_id()))
+        telefono = conf_get("TASTIERA_DA", "telefono") != "desktop"
+        self.kb_lingue(b, telefono)
         rip = xf_valore("keyboards", "/Default/KeyRepeat", True)
         vel = self.cursore("rate", xf_valore("keyboards", "/Default/KeyRepeat/Rate", 20), 2, 60,
                            T("Lenta", "Slow"), T("Veloce", "Fast"),
@@ -969,10 +962,14 @@ class Settings(Gtk.Window):
         rit.set_sensitive(rip)
         prova = Gtk.Entry(placeholder_text=T("Tieni premuto un tasto per provare", "Hold a key down to try it"))
         prova.set_size_request(260, -1)
-        self.group(b, None, [
-            self.row(T("Lingua della tastiera", "Keyboard layout"), combo),
+        self.group(b, T("Ripetizione", "Repeat"), [
             self.row(T("Ripetizione dei tasti", "Key repeat"), self.switch(rip, ripeti),
-                     T("Tenendo premuto un tasto, il carattere si ripete.", "Holding a key down repeats the character.")),
+                     T("Tenendo premuto un tasto, il carattere si ripete.", "Holding a key down repeats the character.")
+                     if not telefono else
+                     T("Con il layout del telefono lettere e numeri si ripetono alla velocità del telefono; "
+                       "qui si regolano frecce, Canc e combinazioni.",
+                       "With the phone's layout, letters and numbers repeat at the phone's speed; "
+                       "here you set arrows, Delete and combinations.")),
             self.row(T("Velocità di ripetizione", "Key repeat rate"), vel),
             self.row(T("Ritardo prima della ripetizione", "Delay until repeat"), rit),
             self.row(T("Prova", "Try it"), prova)])
@@ -988,6 +985,126 @@ class Settings(Gtk.Window):
                      self.button(T("Modifica…", "Edit…"), lambda: (setattr(self, "kb_scorciatoie", True), self.kb_mostra())),
                      T("Le combinazioni di tasti per lo Start, le schermate, le app e le finestre.",
                        "Key combinations for Start, screenshots, apps and windows."))])
+
+    def kb_layout_voci(self):
+        import tastiera_dati as K
+        if not hasattr(self, "_kb_layout"):
+            self._kb_layout = K.carica()
+        return self._kb_layout
+
+    def kb_sorgenti(self):
+        """i layout scelti [(codice, variante)]: quelli salvati, sennò quello della lingua del desktop"""
+        import tastiera_dati as K
+        lista = K.scomponi(conf_get("TASTIERA_LAYOUT"), conf_get("TASTIERA_VARIANTI"))
+        return lista or [(K.predefinito(conf_get("LINGUA", "it")), "")]
+
+    def kb_lingue(self, b, telefono):
+        """come Sorgenti di input di macOS. Con il layout del telefono le lettere arrivano già fatte da Android
+        (Termux:X11): qui solo il rimando; spento, si scelgono qui fino a 4 layout (lib/x11.sh: tod tastiera)."""
+        import tastiera_dati as K
+        righe = [self.row(T("Usa il layout del telefono", "Use the phone's layout"), self.switch(telefono, self.kb_da_telefono),
+                          T("Acceso: le lettere seguono la tastiera scelta in Android. Spento: scegli qui lingue e layout, "
+                            "anche più di uno.",
+                            "On: letters follow the keyboard chosen in Android. Off: choose languages and layouts here, "
+                            "even more than one."))]
+        if telefono:
+            righe.append(self.row(T("Layout della tastiera fisica", "Physical keyboard layout"),
+                                  self.button(T("Impostazioni del telefono", "Phone settings"),
+                                              lambda: am("android.settings.HARD_KEYBOARD_SETTINGS")),
+                                  T("Su Samsung: Gestione generale → Tastiera fisica.",
+                                    "On Samsung: General management → Physical keyboard.")))
+        else:
+            voci = self.kb_layout_voci()
+            lista = self.kb_sorgenti()
+            for i, (c, v) in enumerate(lista):
+                w = Gtk.Box(spacing=10)
+                sig = Gtk.Label(label=K.sigla(c))
+                sig.get_style_context().add_class("kb-sigla")
+                w.pack_start(sig, False, False, 0)
+                if len(lista) > 1:
+                    w.pack_start(self.button(T("Rimuovi", "Remove"), lambda i=i: self.kb_salva(
+                        [x for j, x in enumerate(self.kb_sorgenti()) if j != i])), False, False, 0)
+                righe.append(self.row(K.nome_di(c, v, voci, ITALIAN), w,
+                                      T("All'avvio", "At startup") if i == 0 and len(lista) > 1 else None))
+            if len(lista) < K.MASSIMO:
+                righe.append(self.row(T("Altre lingue e layout", "More languages and layouts"),
+                                      self.button(T("Aggiungi…", "Add…"), self.kb_aggiungi)))
+            if len(lista) > 1:
+                cambio = Gtk.ComboBoxText()
+                for opz, it, en in K.CAMBI:
+                    cambio.append(opz, it if ITALIAN else en)
+                if not cambio.set_active_id(conf_get("TASTIERA_CAMBIO", K.CAMBIO_PREDEFINITO)):
+                    cambio.set_active_id(K.CAMBIO_PREDEFINITO)
+                cambio.connect("changed", lambda c: self.kb_salva(self.kb_sorgenti(), c.get_active_id()))
+                righe.append(self.row(T("Passa al layout successivo", "Switch to the next layout"), cambio,
+                                      T("La lingua attiva si vede nella barra, accanto all'ora.",
+                                        "The active language shows in the taskbar, next to the clock.")))
+        self.group(b, T("Lingue e layout", "Languages and layouts"), righe)
+
+    def kb_da_telefono(self, acceso):
+        if acceso:
+            tod("tastiera", "telefono", then=self.kb_mostra)
+        else:
+            self.kb_salva(self.kb_sorgenti())
+
+    def kb_salva(self, lista, cambio=None):
+        import tastiera_dati as K
+        lay, var = K.componi(lista)
+        if not lay:
+            return
+        tod("tastiera", "desktop", lay, var, cambio or conf_get("TASTIERA_CAMBIO", K.CAMBIO_PREDEFINITO),
+            then=self.kb_mostra)
+
+    def kb_aggiungi(self):
+        """la finestrella per aggiungere una lingua o un layout: cerca, scegli, Aggiungi"""
+        import tastiera_dati as K
+        voci = self.kb_layout_voci()
+        scelti = set(self.kb_sorgenti())
+        d = Gtk.Dialog(transient_for=self, modal=True, title=T("Aggiungi una lingua", "Add a language"))
+        d.add_button(T("Annulla", "Cancel"), Gtk.ResponseType.CANCEL)
+        ok = d.add_button(T("Aggiungi", "Add"), Gtk.ResponseType.OK)
+        ok.set_sensitive(False)
+        d.set_default_response(Gtk.ResponseType.OK)
+        area = d.get_content_area()
+        area.set_spacing(10)
+        area.pack_start(tod_avviso.testa("input-keyboard", T("Aggiungi una lingua o un layout", "Add a language or layout"),
+                                         T("Cerca per lingua o paese, per esempio «inglese» o «svizzera».",
+                                           "Search by language or country, for example “english” or “swiss”."),
+                                         larghezza=380), False, False, 0)
+        cerca = Gtk.SearchEntry(placeholder_text=T("Cerca", "Search"))
+        area.pack_start(cerca, False, False, 0)
+        sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        sw.set_size_request(380, 300)
+        elenco = Gtk.ListBox(activate_on_single_click=False)
+        sw.add(elenco)
+        area.pack_start(sw, True, True, 0)
+
+        def riempi(*_):
+            for r in elenco.get_children():
+                elenco.remove(r)
+            for v in K.cerca(cerca.get_text(), voci, ITALIAN)[:200]:
+                if v.chiave() in scelti:
+                    continue
+                r = Gtk.ListBoxRow()
+                r.voce = v
+                lab = Gtk.Label(label=K.nome(v, ITALIAN), xalign=0, margin=6, ellipsize=3)
+                if v.variante:
+                    lab.set_margin_start(22)
+                r.add(lab)
+                elenco.add(r)
+            elenco.show_all()
+            ok.set_sensitive(False)
+        cerca.connect("search-changed", riempi)
+        elenco.connect("row-selected", lambda _l, r: ok.set_sensitive(r is not None))
+        elenco.connect("row-activated", lambda *_: d.response(Gtk.ResponseType.OK))
+        riempi()
+        tod_avviso.come_macos(d, libero=True)
+        d.show_all()
+        r = d.run()
+        riga = elenco.get_selected_row()
+        d.destroy()
+        if r == Gtk.ResponseType.OK and riga is not None:
+            self.kb_salva(self.kb_sorgenti() + [riga.voce.chiave()])
 
     def kb_voci(self):
         import scorciatoie_dati as SD
@@ -1113,6 +1230,63 @@ class Settings(Gtk.Window):
                 "-s", valore])
         self.kb_mostra()
 
+    def ms_anteprima(self, tema, misura):
+        """le forme del puntatore (freccia, mano, testo, attesa) lette dai file Xcursor veri"""
+        import puntatore_dati as P
+        riga = Gtk.Box(spacing=12, halign=Gtk.Align.CENTER)
+        riga.set_size_request(150, 56)
+        for forma in P.FORME:
+            p = P.file_forma(tema, forma)
+            img = None
+            try:
+                with open(p, "rb") as fh:
+                    img = P.leggi(fh.read(), misura) if p else None
+            except (OSError, TypeError):
+                img = None
+            if img:
+                w, h, _x, _y, rgba = img
+                pb = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(rgba), GdkPixbuf.Colorspace.RGB, True, 8, w, h, 4 * w)
+                riga.pack_start(Gtk.Image.new_from_pixbuf(pb), False, False, 0)
+        return riga
+
+    def ms_stile(self, box):
+        import puntatore_dati as P
+        stili = P.stili(conf_get("DEXOS_NAMES"))
+        dpi = xf_valore("xsettings", "/Xft/DPI", 96)
+        if stili:
+            cur = conf_get("PUNTATORE", "scuro")
+            scelte = Gtk.Box(spacing=14, margin=14, halign=Gtk.Align.START)
+            self.ms_btns = {}
+            for chiave, tema in stili:
+                btn = Gtk.Button(relief=Gtk.ReliefStyle.NONE)
+                btn.get_style_context().add_class("choice")
+                v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+                v.pack_start(self.ms_anteprima(tema, P.misura_px(100, dpi)), False, False, 0)
+                v.pack_start(Gtk.Label(label=T("Scuro", "Dark") if chiave == "scuro" else T("Chiaro", "Light")),
+                             False, False, 0)
+                btn.add(v)
+                btn.connect("clicked", lambda _b, k=chiave: self.ms_scegli(k))
+                scelte.pack_start(btn, False, False, 0)
+                self.ms_btns[chiave] = btn
+            self.ms_segna(cur)
+            g = self.group(box, T("Stile del puntatore", "Pointer style"), [scelte])
+            g.set_halign(Gtk.Align.FILL)
+        dim = self.cursore("puntatore", int(conf_get("PUNTATORE_DIM", "100") or 100), P.DIMENSIONI[0], P.DIMENSIONI[1],
+                           T("Normale", "Normal"), T("Grande", "Large"),
+                           lambda v: tod("aspetto", "puntatore", "dimensione", str(v)))
+        self.group(box, None, [
+            self.row(T("Dimensione del puntatore", "Pointer size"), dim,
+                     T("Il colore segue quello d'accento scelto in Aspetto.",
+                       "The color follows the accent chosen in Appearance."))])
+
+    def ms_segna(self, chiave):
+        for k, b in self.ms_btns.items():
+            (b.get_style_context().add_class if k == chiave else b.get_style_context().remove_class)("selected")
+
+    def ms_scegli(self, chiave):
+        self.ms_segna(chiave)
+        tod("aspetto", "puntatore", chiave)
+
     def pane_mouse(self, box):
         elenco = sh(["xfconf-query", "-c", "pointers", "-l"])
         dispositivi = sorted({l.split("/")[1] for l in elenco.splitlines() if l.count("/") >= 2}) or ["Lorie_mouse"]
@@ -1148,21 +1322,14 @@ class Settings(Gtk.Window):
                        "Content follows your fingers, like on the phone.")),
             self.row(T("Velocità del doppio clic", "Double-click speed"), dc),
             self.row(T("Prova", "Try it"), prova)])
-        self.group(box, T("Puntatore", "Pointer"), [
+        self.ms_stile(box)
+        self.group(box, None, [
             self.row(T("Velocità del puntatore", "Pointer speed"),
                      self.button(T("Impostazioni del telefono", "Phone settings"), lambda: am("android.settings.SETTINGS")),
                      T("In DeX il puntatore lo muove il telefono: la velocità si cambia nelle impostazioni del telefono, "
                        "in Samsung DeX → Mouse e trackpad.",
                        "In DeX the phone moves the pointer: change its speed in the phone's settings, "
                        "under Samsung DeX → Mouse and trackpad."))])
-
-    def set_layout(self, code):
-        if not code:
-            return
-        xq("keyboard-layout", "/Default/XkbDisable", "-t", "bool", "-s", "false")
-        xq("keyboard-layout", "/Default/XkbLayout", "-t", "string", "-s", code)
-        xq("keyboard-layout", "/Default/XkbVariant", "-t", "string", "-s", "")
-        spawn(["setxkbmap", code])
 
     # --- app installate: tutte quelle dello Start (Termux, Debian, telefono), con Disinstalla ---
     PROTECTED = re.compile(r"^(thunar|xfce4-.*|xfwm4|xfdesktop|xfce4|termux-.*|python.*|tod-.*|libxfce.*|exo)$")

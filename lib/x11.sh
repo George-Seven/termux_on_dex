@@ -320,6 +320,85 @@ x11_apply_prefs() {
 }
 
 # ----------------------------------------------------------------------------
+#  Lingue e layout della tastiera (Impostazioni → Tastiera, share/tastiera_dati.py)
+# ----------------------------------------------------------------------------
+# In DeX Termux:X11 manda a X le lettere già fatte dal layout del telefono (InputEventSender.java: sendTextEvent
+# senza Ctrl/Alt/Win): il layout di X conta solo per le combinazioni. Con TASTIERA_DA=desktop manda i tasti veri
+# (preferScancodes) e le lettere le decide X, con i layout scelti nelle Impostazioni (TASTIERA_LAYOUT, fino a 4,
+# TASTIERA_VARIANTI, e TASTIERA_CAMBIO per passare dall'uno all'altro). Niente setxkbmap (non c'è): xkbcli + xkbcomp.
+x11_tastiera_keymap() { # x11_tastiera_keymap LAYOUT VARIANTI OPZIONI: carica il layout nel server X
+  local f rc=0
+  have xkbcli && have xkbcomp && [[ -n ${DISPLAY:-} ]] || return 1
+  f=$(mktemp "${TMPDIR:-/tmp}/tod-xkb.XXXXXX") || return 1
+  if ! xkbcli compile-keymap --layout "$1" --variant "$2" --options "$3" >"$f" 2>/dev/null || [[ ! -s $f ]]; then
+    rm -f "$f"
+    return 1
+  fi
+  timeout 10 xkbcomp -w 0 "$f" "$DISPLAY" >/dev/null 2>&1 || rc=1
+  rm -f "$f"
+  return "$rc"
+}
+
+x11_tastiera_tasti() { # x11_tastiera_tasti true|false: Termux:X11 manda i tasti veri (true) o le lettere (false)
+  have termux-x11-preference || return 1
+  timeout 10 termux-x11-preference "preferScancodes:$1" >/dev/null 2>&1 || return 1
+  conf_set X11_SCANCODES "$([[ $1 == true ]] && echo 1 || echo 0)"
+}
+
+x11_tastiera_applica() { # all'avvio della sessione e dalle Impostazioni
+  if [[ $(conf_get TASTIERA_DA telefono) == desktop ]]; then
+    local lay
+    lay=$(conf_get TASTIERA_LAYOUT)
+    if [[ -z $lay ]]; then
+      lay=$(conf_get LINGUA it)
+      if [[ $lay == en ]]; then lay=us; fi
+    fi
+    # prima il layout, poi i tasti veri: se il layout non si carica, le lettere restano quelle del telefono (sennò
+    # con una tastiera italiana e il layout americano di X si scriverebbe sbagliato)
+    if ! x11_tastiera_keymap "$lay" "$(conf_get TASTIERA_VARIANTI)" "$(conf_get TASTIERA_CAMBIO grp:alt_shift_toggle)"; then
+      log "tastiera: layout $lay non caricato, restano le lettere del telefono"
+      x11_tastiera_tasti false || true
+      return 1
+    fi
+    if ! x11_tastiera_tasti true; then
+      log "tastiera: Termux:X11 non risponde (preferScancodes), restano le lettere del telefono"
+      return 1
+    fi
+    log "tastiera: layout $lay ($(conf_get TASTIERA_VARIANTI)) scelto nelle Impostazioni"
+  elif [[ $(conf_get X11_SCANCODES 0) == 1 ]]; then   # si torna al telefono: solo se l'avevamo cambiato noi
+    x11_tastiera_tasti false || return 1
+    x11_tastiera_keymap us "" "" || true
+    log "tastiera: di nuovo il layout del telefono"
+  fi
+  return 0
+}
+
+x11_tastiera_cli() { # tod tastiera [stato|applica|telefono|desktop [LAYOUT [VARIANTI [CAMBIO]]]]
+  case ${1:-stato} in
+    stato | status)
+      info "$(conf_get TASTIERA_DA telefono) $(conf_get TASTIERA_LAYOUT) $(conf_get TASTIERA_VARIANTI) $(conf_get TASTIERA_CAMBIO)"
+      ;;
+    applica | apply) x11_tastiera_applica ;;
+    telefono | phone)
+      conf_set TASTIERA_DA telefono
+      x11_tastiera_applica
+      ;;
+    desktop)
+      if [[ -n ${2:-} ]]; then
+        [[ $2 =~ ^[a-z0-9_]+(,[a-z0-9_]+){0,3}$ && ${3:-} =~ ^[A-Za-z0-9_,-]*$ && ${4:-grp:x} =~ ^grp:[a-z_]+$ ]] ||
+          die "tod tastiera desktop it,us [,intl] [grp:alt_shift_toggle]"
+        conf_set TASTIERA_LAYOUT "$2"
+        conf_set TASTIERA_VARIANTI "${3:-}"
+        if [[ -n ${4:-} ]]; then conf_set TASTIERA_CAMBIO "$4"; fi
+      fi
+      conf_set TASTIERA_DA desktop
+      x11_tastiera_applica
+      ;;
+    *) die "tod tastiera [stato|applica|telefono|desktop LAYOUT [VARIANTI] [CAMBIO]]" ;;
+  esac
+}
+
+# ----------------------------------------------------------------------------
 #  DPI e scala adattivi: lo stesso desktop va bene sul telefono, a 1080p e in 4K
 # ----------------------------------------------------------------------------
 # display_classify L A → "dpi scala tipo"   (pura, testabile)

@@ -796,6 +796,63 @@ def riga_notifiche(dnd, nuove):
     return f"<icon>{i}</icon><tool>{t}</tool><iconclick>{PANNELLO} notifiche</iconclick>"
 
 
+def tastiera_scelta(testo):
+    """dal tod.conf: [(codice, variante)] dei layout scelti nelle Impostazioni e la combinazione per cambiare;
+    nessuno se le lettere le decide il telefono (lib/x11.sh: x11_tastiera_applica)"""
+    c = {}
+    for riga in testo.splitlines():
+        k, _, v = riga.partition("=")
+        c[k.strip()] = v.strip().strip('"')
+    if c.get("TASTIERA_DA") != "desktop":
+        return [], ""
+    lay = [x for x in c.get("TASTIERA_LAYOUT", "").split(",")]
+    var = c.get("TASTIERA_VARIANTI", "").split(",")
+    out = [(x, var[i] if i < len(var) else "") for i, x in enumerate(lay) if x][:4]
+    return out, c.get("TASTIERA_CAMBIO", "grp:alt_shift_toggle")
+
+
+CAMBI_NOMI = {"grp:alt_shift_toggle": "Alt + Maiusc", "grp:win_space_toggle": "Win + Spazio",
+              "grp:ctrl_space_toggle": "Ctrl + Spazio", "grp:shift_caps_toggle": "Maiusc + Bloc Maiusc",
+              "grp:caps_toggle": "Bloc Maiusc"}
+
+
+def riga_lingua(scelti, gruppo, nomi, cambio):
+    """la sigla della lingua attiva della tastiera, come su macOS (solo con più di un layout); il clic apre
+    Impostazioni → Tastiera"""
+    if len(scelti) < 2:
+        return ""
+    g = gruppo if 0 <= gruppo < len(scelti) else 0
+    nome = nomi[g] if g < len(nomi) else scelti[g][0]
+    tasti = CAMBI_NOMI.get(cambio, cambio)
+    tool = f"{nome} — {tasti} per cambiare" if ITALIAN else f"{nome} — {tasti} to switch"
+    return (f"<txt><span weight='bold' size='small'>{scelti[g][0][:3].upper()}</span></txt><tool>{tool}</tool>"
+            f"<txtclick>python3 '{QUI}/tod-settings.py' tastiera</txtclick>")
+
+
+class _StatoXkb(ctypes.Structure):   # XkbStateRec: il gruppo (il layout attivo) è il primo campo
+    _fields_ = [("group", ctypes.c_ubyte), ("locked_group", ctypes.c_ubyte), ("base_group", ctypes.c_ushort),
+                ("latched_group", ctypes.c_short), ("resto", ctypes.c_ubyte * 16)]
+
+
+_dpy_kb = [None]
+
+
+def gruppo_xkb():
+    """il layout attivo (0..3) chiesto al server X, o 0"""
+    x = xlib()
+    if _dpy_kb[0] is None:
+        _dpy_kb[0] = x.XOpenDisplay(None) or False
+        if _dpy_kb[0]:
+            _gestisci_errori(x, _dpy_kb[0])
+            x.XkbGetState.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p]
+    if not _dpy_kb[0]:
+        return 0
+    st = _StatoXkb()
+    if x.XkbGetState(_dpy_kb[0], 0x100, ctypes.byref(st)) != 0:   # XkbUseCoreKbd
+        return 0
+    return st.group
+
+
 def riga_orologio(t):
     """ora sopra, data sotto (come l'orologio di XFCE); il clic apre il nostro calendario"""
     if ITALIAN:   # Termux non ha le lingue di sistema: nomi di giorni e mesi scritti qui
@@ -837,7 +894,7 @@ class Vassoio(Gtk.Box):
     """le nostre icone di stato, calcolate qui senza avviare programmi (prima ~60 processi ogni 30 s, 8% di
     un core): orologio allo scoccare del minuto, batteria e rete dal file del demone del telefono, notifiche
     via D-Bus, volume solo quando cambia (un pactl subscribe sempre aperto)"""
-    VOCI = ["rete", "volume", "batteria", "notifiche", "orologio"]
+    VOCI = ["rete", "volume", "batteria", "notifiche", "lingua", "orologio"]
 
     def __init__(self, barra):
         super().__init__(spacing=0)
@@ -864,6 +921,7 @@ class Vassoio(Gtk.Box):
         GLib.timeout_add_seconds(10, lambda: (self.aggiorna("rete"), self.aggiorna("batteria")) and True)
         GLib.timeout_add_seconds(3, lambda: self.aggiorna("notifiche") or True)
         GLib.timeout_add_seconds(10, lambda: self.aggiorna("volume") or True)   # riserva, se l'ascolto non c'è
+        GLib.timeout_add(1000, lambda: self.aggiorna("lingua") or True)   # il layout attivo (Alt + Maiusc lo cambia)
         self._minuto()
         self._ascolta_volume()
 
@@ -874,6 +932,8 @@ class Vassoio(Gtk.Box):
     def aggiorna(self, nome):
         if nome == "orologio":
             self._mostra(nome, riga_orologio(time.localtime()))
+        elif nome == "lingua":
+            self._lingua()
         elif nome in ("rete", "batteria"):
             try:
                 if self.telefono is None:
@@ -900,6 +960,34 @@ class Vassoio(Gtk.Box):
             except GLib.Error:
                 return
             p.communicate_utf8_async(None, None, self._letto_volume)
+
+    def _lingua(self):
+        """il tod.conf si rilegge solo quando cambia; il server X si interroga solo con più di un layout"""
+        p = os.path.join(CONF, "tod.conf")
+        try:
+            quando = os.stat(p).st_mtime
+        except OSError:
+            quando = 0
+        if quando != getattr(self, "_conf_kb", None):
+            self._conf_kb = quando
+            try:
+                with open(p) as fh:
+                    self._kb, self._kb_cambio = tastiera_scelta(fh.read())
+            except OSError:
+                self._kb, self._kb_cambio = [], ""
+            self._kb_nomi = []
+            if len(self._kb) > 1:
+                try:
+                    if QUI not in sys.path:
+                        sys.path.insert(1, QUI)
+                    import tastiera_dati
+                    voci = tastiera_dati.carica()
+                    self._kb_nomi = [tastiera_dati.nome_di(c, v, voci, ITALIAN) for c, v in self._kb]
+                except Exception as e:   # noqa: BLE001 - senza nomi resta la sigla
+                    print(f"tod-barra: lingue: {e}", file=sys.stderr)
+        if len(self._kb) < 2:
+            return self._mostra("lingua", "")
+        self._mostra("lingua", riga_lingua(self._kb, gruppo_xkb(), self._kb_nomi, self._kb_cambio))
 
     def _letto_volume(self, pr, res):
         try:

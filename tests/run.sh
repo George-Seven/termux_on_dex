@@ -2432,6 +2432,132 @@ True True" "$out"
   done
 }
 
+test_tastiera_lingue() { # 13 novembre, Pietro: "e se voglio usare una lingua diversa o un layout diverso della tastiera?".
+  # In DeX le lettere arrivano a X già fatte dal layout di Android: con "Usa il layout del telefono" spento Termux:X11
+  # manda i tasti veri e X usa i layout scelti nelle Impostazioni (share/tastiera_dati.py, lib/x11.sh)
+  command -v python3 >/dev/null || return 0
+  local d="$WORK/kb_$$" out
+  mkdir -p "$d"
+  printf '%s\n' '<xkbConfigRegistry><layoutList>' \
+    '<layout><configItem><name>it</name><shortDescription>it</shortDescription><description>Italian</description><languageList><iso639Id>ita</iso639Id></languageList></configItem>' \
+    '<variantList><variant><configItem><name>mac</name><description>Italian (Macintosh)</description></configItem></variant></variantList></layout>' \
+    '<layout><configItem><name>us</name><shortDescription>en</shortDescription><description>English (US)</description></configItem>' \
+    '<variantList><variant><configItem><name>intl</name><description>English (US, intl., with dead keys)</description></configItem></variant></variantList></layout>' \
+    '<layout><configItem><name>ch</name><description>German (Switzerland)</description></configItem></layout>' \
+    '<layout><configItem><name>custom</name><description>A user-defined custom Layout</description></configItem></layout>' \
+    '</layoutList></xkbConfigRegistry>' >"$d/evdev.xml"
+  out=$(KB_XML="$d/evdev.xml" _stampa_py "$ROOT/share/tastiera_dati.py" <<'EOF'
+import os
+v = m.carica(os.environ["KB_XML"])
+print(len(v), [x.chiave() for x in v], m.carica("/non/esiste"))
+print([m.nome(x) for x in v], m.nome(v[3], False))
+print([m.nome(x) for x in m.cerca("ital", v)], [m.nome(x) for x in m.cerca("inglese usa", v)], len(m.cerca("", v)))
+print(m.nome_di("us", "intl", v), "|", m.nome_di("xx", "y", v), "|", m.sigla("us"), m.sigla("latam"))
+print(m.componi([("it", ""), ("us", "intl"), ("it", ""), ("de", ""), ("fr", ""), ("es", "")]), m.componi([]))
+print(m.scomponi("it,us", ",intl"), m.scomponi("it", ""), m.scomponi("", ""), m.scomponi("a,b,c,d,e", ""))
+print(m.predefinito("it"), m.predefinito("en"), m.predefinito(""), m.CAMBIO_PREDEFINITO)
+EOF
+)
+  eq "layout: elenco, nomi in italiano, ricerca, al massimo 4" "5 [('it', ''), ('it', 'mac'), ('us', ''), ('us', 'intl'), ('ch', '')] []
+['Italiano', 'Italiano (Macintosh)', 'Inglese (USA)', 'Inglese (USA, internazionale, con tasti morti)', 'Tedesco (Svizzera)'] English (US, intl., with dead keys)
+['Italiano', 'Italiano (Macintosh)'] ['Inglese (USA)', 'Inglese (USA, internazionale, con tasti morti)'] 5
+Inglese (USA, internazionale, con tasti morti) | xx (y) | US LAT
+('it,us,de,fr', ',intl,,') ('', '')
+[('it', ''), ('us', 'intl')] [('it', '')] [] [('a', ''), ('b', ''), ('c', ''), ('d', '')]
+it us us grp:alt_shift_toggle" "$out"
+
+  # tod tastiera: prima il layout, poi i tasti veri; se il layout non si carica restano le lettere del telefono
+  local b="$d/bin"
+  mkdir -p "$b"
+  printf '#!/bin/sh\necho "xkbcli $*" >>"$HOME/kb_log"; echo "xkb_keymap {}"\n' >"$b/xkbcli"
+  printf '#!/bin/sh\necho "xkbcomp $*" >>"$HOME/kb_log"; [ -z "$XKB_ROTTO" ]\n' >"$b/xkbcomp"
+  printf '#!/bin/sh\necho "pref $*" >>"$HOME/kb_log"\n' >"$b/termux-x11-preference"
+  chmod +x "$b"/*
+  (
+    PATH="$b:$PATH"
+    export DISPLAY=:9
+    rm -f "$HOME/kb_log"
+    x11_tastiera_applica
+    eq "col telefono e mai cambiato: niente da fare" "" "$(cat "$HOME/kb_log" 2>/dev/null)"
+    x11_tastiera_cli desktop it,us ,intl grp:win_space_toggle
+    eq "layout caricato, poi i tasti veri" "xkbcli compile-keymap --layout it,us --variant ,intl --options grp:win_space_toggle
+xkbcomp -w 0 FILE :9
+pref preferScancodes:true" "$(sed 's#/[^ ]*tod-xkb\.[A-Za-z0-9]*#FILE#' "$HOME/kb_log")"
+    eq "scelte salvate" "desktop it,us ,intl grp:win_space_toggle 1" "$(conf_get TASTIERA_DA) $(conf_get TASTIERA_LAYOUT) $(conf_get TASTIERA_VARIANTI) $(conf_get TASTIERA_CAMBIO) $(conf_get X11_SCANCODES)"
+    rm -f "$HOME/kb_log"
+    XKB_ROTTO=1 x11_tastiera_applica && echo "doveva fallire"
+    has "layout non caricato: di nuovo le lettere del telefono" "pref preferScancodes:false" "$(cat "$HOME/kb_log")"
+    conf_set X11_SCANCODES 1
+    rm -f "$HOME/kb_log"
+    x11_tastiera_cli telefono
+    eq "si torna al telefono: lettere da Android e layout americano di X" "pref preferScancodes:false
+xkbcli compile-keymap --layout us --variant  --options
+xkbcomp -w 0 FILE :9" "$(sed -e 's#/[^ ]*tod-xkb\.[A-Za-z0-9]*#FILE#' -e 's/ *$//' "$HOME/kb_log")"
+    eq "segnato" "0" "$(conf_get X11_SCANCODES)"
+  )
+  local rc=0
+  (x11_tastiera_cli desktop 'it;rm' >/dev/null 2>&1) || rc=$?
+  eq "layout strano rifiutato" "1" "$rc"
+
+  # la sigla nella barra (solo con più di un layout) e il gruppo attivo
+  out=$(python3 - "$ROOT/share/tod-barra.py" <<'PYEOF'
+import re, sys
+src = open(sys.argv[1]).read()
+ITALIAN, QUI = True, "/q"
+exec(re.search(r"^CAMBI_NOMI = .*?(?=^def riga_lingua)", src, re.S | re.M).group(0))
+for nome in ("tastiera_scelta", "riga_lingua"):
+    exec(re.search(rf"^def {nome}\(.*?(?=^\S)", src, re.S | re.M).group(0))
+print(tastiera_scelta('TASTIERA_DA="desktop"\nTASTIERA_LAYOUT="it,us"\nTASTIERA_VARIANTI=",intl"\n'))
+print(tastiera_scelta('TASTIERA_LAYOUT="it,us"\n'), tastiera_scelta('TASTIERA_DA="desktop"\nTASTIERA_LAYOUT="it"\n'))
+s = [("it", ""), ("us", "intl")]
+print(riga_lingua(s, 1, ["Italiano", "Inglese (USA)"], "grp:win_space_toggle"))
+print(repr(riga_lingua(s[:1], 0, [], "")), riga_lingua(s, 7, [], "x")[:53])
+PYEOF
+)
+  eq "barra: la lingua attiva" "([('it', ''), ('us', 'intl')], 'grp:alt_shift_toggle')
+([], '') ([('it', '')], 'grp:alt_shift_toggle')
+<txt><span weight='bold' size='small'>US</span></txt><tool>Inglese (USA) — Win + Spazio per cambiare</tool><txtclick>python3 '/q/tod-settings.py' tastiera</txtclick>
+'' <txt><span weight='bold' size='small'>IT</span></txt>" "$out"
+
+  # il puntatore: anteprime dai file Xcursor veri (ARGB premoltiplicato), stili DeX OS, dimensione
+  mkdir -p "$d/casa/.local/share/icons/Scuro-v2/cursors" "$d/casa/.local/share/icons/Chiaro-v2"
+  printf '[Icon Theme]\n' >"$d/casa/.local/share/icons/Scuro-v2/index.theme"
+  printf 'x' >"$d/casa/.local/share/icons/Scuro-v2/cursors/hand2"
+  out=$(TOD_TERMUX_HOME="$d/casa" _stampa_py "$ROOT/share/puntatore_dati.py" <<'EOF'
+import struct
+def immagine(n, colore):
+    return struct.pack("<9I", 36, m.IMMAGINE, n, 1, 2, 1, 0, 0, 0) + struct.pack("<2I", *colore)
+a, b = immagine(24, (0x80400000, 0xff00ff00)), immagine(48, (0, 0))
+dati = b"Xcur" + struct.pack("<III", 16, 1, 2) + struct.pack("<3I", m.IMMAGINE, 24, 40) + \
+    struct.pack("<3I", m.IMMAGINE, 48, 40 + len(a)) + a + b
+print(m.leggi(dati, 30)[:4], list(m.leggi(dati, 30)[4]), m.leggi(dati, 44)[:2], m.leggi(b"nulla", 24), m.leggi(dati[:60], 24))
+print(m.stili("a b c d e Scuro-v2 Chiaro-v2"), m.stili(""))
+print(m.file_forma("Scuro-v2", "pointer").endswith("cursors/hand2"), m.file_forma("Scuro-v2", "xterm"))
+print(m.misura_px(100, 96), m.misura_px(100, 128), m.misura_px(200, 128), m.misura_px(900, 96), m.misura_px(10, 96))
+EOF
+)
+  eq "puntatore: anteprime, stili, misure" "(2, 1, 0, 0) [127, 0, 0, 128, 0, 255, 0, 255] (2, 1) None None
+[('scuro', 'Scuro-v2')] []
+True None
+24 32 64 72 24" "$out"
+  conf_set PUNTATORE_DIM 5000
+  eq "dimensione fuori misura riportata a 300" "300" "$(look_puntatore_dim)"
+  conf_set PUNTATORE_DIM abc
+  eq "dimensione strana: normale" "100" "$(look_puntatore_dim)"
+  have() { return 1; }   # niente xfconf-query qui
+  look_cursor_cli dimensione 150
+  eq "tod aspetto puntatore dimensione" "150" "$(conf_get PUNTATORE_DIM)"
+
+  local s
+  s=$(cat "$ROOT/share/tod-settings.py")
+  has "interruttore del layout del telefono" 'T("Usa il layout del telefono"' "$s"
+  has "finestrella per aggiungere una lingua" "def kb_aggiungi(self):" "$s"
+  has "stile del puntatore nel Mouse" 'T("Stile del puntatore", "Pointer style")' "$s"
+  hasnt "niente più setxkbmap (non c'è in Termux)" "setxkbmap" "$s"
+  has "il layout a ogni avvio della sessione" "x11_tastiera_applica" "$(cat "$ROOT/lib/session.sh")"
+  has "tod tastiera" "tastiera | keyboard) x11_tastiera_cli" "$(cat "$ROOT/tod")"
+}
+
 _stampa_py() { # _stampa_py FILE: python con FILE caricato come modulo m; il codice della prova arriva da stdin
   python3 -c 'import importlib.util as u, sys
 s = u.spec_from_file_location("m", sys.argv[1]); m = u.module_from_spec(s); s.loader.exec_module(m)

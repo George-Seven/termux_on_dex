@@ -457,6 +457,8 @@ session_hook() { # autostart dentro il desktop: DPI per lo schermo attuale, env 
   (media_chip_compila || true) </dev/null >/dev/null 2>&1 &
   # e per le app Chromium/Electron del container (lib/videochip.sh): pezzi, video.env, aiutante del chip
   (videochip_start || true) </dev/null >/dev/null 2>&1 &
+  # lingue e layout della tastiera scelti nelle Impostazioni (lib/x11.sh): il server X riparte col layout americano
+  (x11_tastiera_applica || true) </dev/null >/dev/null 2>&1 &
   # XFCE_TUNED: versione dei ritocchi (2 = compositore acceso e ombre); cambiandola si riapplicano
   if [[ $(conf_get DE xfce) == xfce && $(conf_get XFCE_TUNED 0) != 2 ]]; then
     xfce_first_run || true

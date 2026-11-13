@@ -74,6 +74,7 @@ tod_main() {
     audio) audio_cli "$@" ;;
     lingua | language) lingua_cli "$@" ;;
     x11) x11_cli "$@" ;;
+    tastiera | keyboard) x11_tastiera_cli "$@" ;;
     cx | container) cx_cli "$@" ;;
     tweak) tod_tweak "$@" ;;
     prestazioni | performance) LANGUAGE=$TOD_LANG python3 "$TOD_ROOT/share/tod-prestazioni.py" "$@" ;;

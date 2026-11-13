@@ -200,7 +200,8 @@ look_scale_apply() { # tutto in proporzione allo schermo: un solo valore (DPI) p
   # il testo segue già i DPI (Xft/DPI, anche le app del container e Electron); qui ciò che è in pixel
   $q -c xfce4-desktop -p /desktop-icons/icon-size -n -t uint -s "$(look_px 48 "$dpi")" || true
   $q -c xfce4-desktop -p /desktop-icons/use-custom-font-size -n -t bool -s false || true
-  $q -c xsettings -p /Gtk/CursorThemeSize -n -t int -s "$(look_px 24 "$dpi")" || true
+  # puntatore: 24 pixel a 96 DPI, per la dimensione scelta in Impostazioni → Mouse (PUNTATORE_DIM, per cento)
+  $q -c xsettings -p /Gtk/CursorThemeSize -n -t int -s "$(look_px $((24 * $(look_puntatore_dim) / 100)) "$dpi")" || true
   $q -c thunar -p /last-icon-view-zoom-level -n -t string -s THUNAR_ZOOM_LEVEL_100_PERCENT || true
   $q -c thunar -p /shortcuts-icon-size -n -t string -s THUNAR_ICON_SIZE_24 || true
   # la cornice DeX OS è disegnata ai DPI dello schermo: cambiati i DPI si ridisegna
@@ -388,11 +389,29 @@ look_dexos_cursor() { # tema del puntatore DeX OS (PUNTATORE=scuro|chiaro), se c
   if ((${#n[@]} > i)) && [[ -f $HOME/.local/share/icons/${n[$i]}/index.theme ]]; then printf '%s' "${n[$i]}"; fi
 }
 
-look_cursor_cli() { # tod aspetto puntatore scuro|chiaro
+look_puntatore_dim() { # la dimensione del puntatore scelta, per cento (100 = normale, fino a 300)
+  local d
+  d=$(num "$(conf_get PUNTATORE_DIM 100)")
+  if ((d < 100)); then d=100; elif ((d > 300)); then d=300; fi
+  printf '%s' "$d"
+}
+
+look_cursor_cli() { # tod aspetto puntatore scuro|chiaro|dimensione N
   case ${1:-} in
     scuro | dark) conf_set PUNTATORE scuro ;;
     chiaro | light) conf_set PUNTATORE chiaro ;;
-    *) die "tod aspetto puntatore scuro|chiaro" ;;
+    dimensione | size)
+      [[ ${2:-} =~ ^[0-9]+$ ]] || die "tod aspetto puntatore dimensione 100-300"
+      conf_set PUNTATORE_DIM "$2"
+      if have xfconf-query; then
+        local dpi
+        dpi=$(xfconf-query -c xsettings -p /Xft/DPI 2>/dev/null) || dpi=96
+        xfconf-query -c xsettings -p /Gtk/CursorThemeSize -n -t int \
+          -s "$(look_px $((24 * $(look_puntatore_dim) / 100)) "$(num "$dpi")")" || true
+      fi
+      return 0
+      ;;
+    *) die "tod aspetto puntatore scuro|chiaro|dimensione N" ;;
   esac
   local c
   c=$(look_dexos_cursor)
@@ -499,7 +518,7 @@ look_cli() { # tod aspetto [tema|accento|puntatore] ...: senza argomenti riappli
   case $v in
     tema | theme) look_theme_cli "${2:-}"; return 0 ;;
     accento | accent) look_accent_cli "${2:-}"; return 0 ;;
-    puntatore | cursor) look_cursor_cli "${2:-}"; return 0 ;;
+    puntatore | cursor) look_cursor_cli "${2:-}" "${3:-}"; return 0 ;;
     pulizia | clean) conf_set LOOK_PULIZIA 0; look_pulizia; return 0 ;;
     sfondo | wallpaper) look_sfondo_cli "${2:-}"; return 0 ;;
     "" | dexos | windows11 | win11 | windows) ;;
