@@ -3,8 +3,11 @@
 #  Video col chip nelle app Chromium/Electron del container (12-13 novembre;
 #  Pietro: "deve essere generale per tutti: installo una nuova app e ha già
 #  questa miglioria"). VS Code, il Chromium di Debian e ogni app che
-#  verrà installata decodificano l'H.264 con il chip del telefono (MediaCodec)
-#  invece che col processore. Pezzi in share/video:
+#  verrà installata decodificano H.264 e VP9 con il chip del telefono
+#  (MediaCodec) invece che col processore. HEVC no: VA non passa al driver gli
+#  insiemi di riferimento della SPS, che il chip vorrebbe. Prima di accenderlo,
+#  una prova reale (tod-va-prova): su un telefono Mali senza Vulkan hardware nel
+#  container resta spento e le app partono come sempre. Pezzi in share/video:
 #    tod_drv_video.c  driver VA-API "tod" (glibc, nel processo GPU di Chromium)
 #    tod-va-shim.c    nodo DRM finto, /sys finto, risposta a DRI3 Open
 #    tod-gbm.c        libgbm con memoria /dev/dma_heap/system

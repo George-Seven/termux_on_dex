@@ -139,14 +139,22 @@ static void apri(const struct msg *h, uint8_t *dati) {
 }
 
 static void pacchetto(const struct msg *h, uint8_t *dati, int fd) {
+    // superfici rimaste in attesa troppo a lungo (un fotogramma che il chip non ha restituito): si liberano, sennò
+    // dopo 64 tutto verrebbe scartato
+    for (int i = 0; i < MAXA; i++)
+        if (att[i].usato && h->token > att[i].token + 48) rispondi(SCARTATO, att[i].token), libera(&att[i]);
     struct attesa *a = NULL;
-    for (int i = 0; i < MAXA; i++) if (!att[i].usato) { a = &att[i]; break; }
-    if (!ctx || !a || fd < 0) {
+    if (fd >= 0) {
+        for (int i = 0; i < MAXA; i++) if (!att[i].usato) { a = &att[i]; break; }
+        if (!a) { close(fd); fd = -1; }
+    }
+    if (!ctx) {
         if (fd >= 0) close(fd);
         rispondi(SCARTATO, h->token);
         return;
     }
-    *a = (struct attesa){1, fd, h->token, h->w, h->h, h->p0, h->p1, h->off1, h->dim};
+    // senza superficie (VP9: fotogramma nascosto, solo riferimento) si decodifica e basta
+    if (a) *a = (struct attesa){1, fd, h->token, h->w, h->h, h->p0, h->p1, h->off1, h->dim};
     av_packet_unref(pkt);
     if (av_new_packet(pkt, (int)h->len) < 0) return;
     memcpy(pkt->data, dati, h->len);
@@ -154,7 +162,10 @@ static void pacchetto(const struct msg *h, uint8_t *dati, int fd) {
     for (int giri = 0; giri < 500; giri++) {
         int r = avcodec_send_packet(ctx, pkt);
         if (r == AVERROR(EAGAIN)) { ricevi(); usleep(1000); continue; }
-        if (r < 0) { L("pacchetto %u rifiutato: %d", h->token, r); libera(a); rispondi(SCARTATO, h->token); }
+        if (r < 0) {
+            L("pacchetto %u rifiutato: %d", h->token, r);
+            if (a) libera(a), rispondi(SCARTATO, h->token);
+        }
         break;
     }
     ricevi();

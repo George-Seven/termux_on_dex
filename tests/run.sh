@@ -2615,6 +2615,14 @@ EOF
   has "driver: avvio per ogni versione di libva (Debian 2.22, Termux 2.24)" "AVVIO(22) AVVIO(23) AVVIO(24)" "$s"
   has "driver: niente motivo di prova se il chip non decodifica" "return VA_STATUS_ERROR_DECODING_ERROR;" "$s"
   has "shim: resta nei processi dell'app, si toglie dagli altri" 'getenv("TOD_VA_PROG")' "$(cat "$ROOT/share/video/tod-va-shim.c")"
+  # VP9 (YouTube): il fotogramma intero al chip; i nascosti (alt-ref) senza superficie da aspettare. HEVC no: VA non passa
+  # gli insiemi di riferimento della SPS, e il chip decodificherebbe con riferimenti sbagliati
+  has "driver: VP9 Profile 0" "VAProfileVP9Profile0};" "$s"
+  has "driver: fotogrammi VP9 nascosti senza attesa" "if (manda(x->sock, &h, d, mostra ? v->fd : -1) < 0) {" "$s"
+  hasnt "driver: niente HEVC finché non passa dal chip" "VAProfileHEVCMain," "$(sed -n '/^static const VAProfile PROFILI/,/;/p' "$ROOT/share/video/tod_drv_video.c")"
+  s=$(cat "$ROOT/share/video/tod-va-chip.c")
+  has "aiutante: pacchetti senza superficie" "senza superficie (VP9: fotogramma nascosto, solo riferimento) si decodifica e basta" "$s"
+  has "aiutante: attese troppo vecchie liberate (mai tutto scartato)" "h->token > att[i].token + 48" "$s"
 }
 
 test_video_col_chip() { # 12 novembre: il Lettore decodifica col chip del telefono (MediaCodec via ffmpeg) con

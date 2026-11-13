@@ -113,7 +113,8 @@ static void libera(Surf *s) {
     *s = (Surf){0};
 }
 
-static const VAProfile PROFILI[] = {VAProfileNone, VAProfileH264ConstrainedBaseline, VAProfileH264Main, VAProfileH264High};   // HEVC e VP9: non ancora col chip (il driver li dipingerebbe soltanto)
+static const VAProfile PROFILI[] = {VAProfileNone, VAProfileH264ConstrainedBaseline, VAProfileH264Main, VAProfileH264High,
+                                    VAProfileVP9Profile0};   // HEVC no: VA non passa gli insiemi di riferimento della SPS   // HEVC e VP9: non ancora col chip (il driver li dipingerebbe soltanto)
 
 static VAStatus t_Terminate(VADriverContextP c) { L("Terminate"); return VA_STATUS_SUCCESS; }
 static VAStatus t_QueryConfigProfiles(VADriverContextP c, VAProfile *l, int *n) {
@@ -446,6 +447,42 @@ static int pps_h264(uint8_t *o, const VAPictureParameterBufferH264 *p, const VAI
     return nal(o, 0x68, &w);
 }
 static int e_h264(VAProfile p) { return p == VAProfileH264ConstrainedBaseline || p == VAProfileH264Main || p == VAProfileH264High; }
+static int e_vp9(VAProfile p) { return p == VAProfileVP9Profile0; }
+
+// VP9: Chromium passa il fotogramma compresso intero (intestazioni comprese), che al chip va così com'è. I fotogrammi
+// nascosti (show_frame = 0, gli "alt-ref" di libvpx) il chip li decodifica come riferimento ma non li restituisce:
+// per quelli niente superficie da aspettare (sennò ognuno costerebbe l'attesa intera in vaSyncSurface)
+static int ponte_vp9(VAContextID cid, Ctx *x, Surf *v) {
+    if (x->rotto || !x->pp || !x->nsd || !x->nsp) return -1;
+    const VADecPictureParameterBufferVP9 *pp = bufs[x->pp].dati;
+    if (x->sock < 0) {
+        x->sock = collega();
+        if (x->sock < 0) { L("ponte: aiutante tod-va-chip non raggiungibile"); x->rotto = 1; return -1; }
+    }
+    if (!x->aperto) {
+        struct msg h = {APRI, 15, 0, pp->frame_width, pp->frame_height, 0, 0, 0, 0};   // nome + '\0', niente extradata
+        if (manda(x->sock, &h, "vp9_mediacodec", -1) < 0) { x->rotto = 1; return -1; }
+        x->aperto = 1;
+        L("ponte: aperto vp9 %ux%u", pp->frame_width, pp->frame_height);
+    }
+    const VASliceParameterBufferVP9 *sl = bufs[x->sp[0]].dati;
+    const uint8_t *d = (const uint8_t *)bufs[x->sd[0]].dati + sl->slice_data_offset;
+    unsigned n = sl->slice_data_size;
+    int mostra = pp->pic_fields.bits.show_frame;
+    static int mostrati;
+    if (mostrati < 3) { mostrati++; L("ponte: vp9 %u byte, inizio %02x, mostra %d, intestazione %u byte", n, d[0], mostra, pp->frame_header_length_in_bytes); }
+    struct msg h = {PACCHETTO, n, ++x->gettone, v->w, v->h, v->pitch[0], v->pitch[1], v->offset[1], mostra ? v->dim : 0};
+    if (mostra) v->attesa = 1, v->gettone = h.token, v->ctx = cid;
+    if (manda(x->sock, &h, d, mostra ? v->fd : -1) < 0) {
+        L("ponte: invio fallito");
+        v->attesa = 0;
+        close(x->sock);
+        x->sock = -1, x->rotto = 1;
+        return -1;
+    }
+    risposte(x, cid, 0);
+    return 0;
+}
 
 // un'immagine H.264 decodificata da Chromium → un fotogramma Annex-B per il chip. 0 = inviato, -1 = niente ponte
 static int ponte_h264(VAContextID cid, Ctx *x, Surf *v) {
@@ -556,7 +593,9 @@ static VAStatus t_EndPicture(VADriverContextP c, VAContextID ctx) {
               p ? (char *)&surfs[p->surface].fourcc : "????", (char *)&surfs[t].fourcc, conversioni);
         return VA_STATUS_SUCCESS;
     }
-    if (!(e_h264(confs[x->conf].prof) && ponte_h264(ctx, x, &surfs[t]) == 0)) {
+    VAProfile prof = confs[x->conf].prof;
+    int fatto = e_h264(prof) ? ponte_h264(ctx, x, &surfs[t]) == 0 : e_vp9(prof) ? ponte_vp9(ctx, x, &surfs[t]) == 0 : 0;
+    if (!fatto) {
         if (!getenv("TOD_VA_DIPINGI")) return VA_STATUS_ERROR_DECODING_ERROR;   // mai un video finto
         dipingi(&surfs[t], fotogrammi);
     }
