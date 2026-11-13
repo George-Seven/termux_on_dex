@@ -1289,6 +1289,7 @@ test_media_pacchetti() { # GStreamer e i caricatori di immagini: con l'installaz
   : >"$WORK/mpk_$$"
   usb_on() { return 1; }
   rete_on() { return 1; }
+  videochip_on() { return 1; }   # niente compilazioni vere del video col chip
   x11_glamor_da_aggiornare() { return 1; }
   self_after >/dev/null
   has "Aggiornamenti (tod _self_after): i mancanti" "avail gst-libav webp-pixbuf-loader" "$(cat "$WORK/mpk_$$")"
@@ -4616,6 +4617,7 @@ test_x11_glamor_nuova_versione() { # la Termux:X11 nuova si propone solo da tod 
   x11_glamor_da_aggiornare || { echo "  ✘ versione 2 uscita: da aggiornare"; return 1; }
   usb_on() { return 1; }
   rete_on() { return 1; }   # niente apt veri dai test (samba)
+  videochip_on() { return 1; }   # né libva e compilazioni del video col chip
   media_mancanti() { :; }   # né GStreamer
   desktop_install_entries() { :; }
   eq "dopo il codice nuovo: avviso per la finestra" "x11=nuova" "$(self_after)"
