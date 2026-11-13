@@ -176,7 +176,7 @@ diretto_run() { # diretto_run comando [argomenti] → esce come l'app; 97 = senz
   local va_pre="" va_flags=""
   local -a va_amb=()
   # (solo con l'aiutante del chip acceso: senza, l'app parte come sempre, grafica compresa)
-  if ((chromium)) && [[ -f $root/etc/tod/video.env ]] && videochip_aiutante_vivo; then
+  if ((chromium)) && [[ -f $root/etc/tod/video.env ]] && videochip_aiutante_vivo && ! videochip_escluso "${real#"$root"}"; then
     local vl vv
     while IFS= read -r vl; do
       vv=${vl#*=}
@@ -257,6 +257,14 @@ diretto_run() { # diretto_run comando [argomenti] → esce come l'app; 97 = senz
   # un comando che non trova un altro comando (sh -c ...)
   case $rc in
     132 | 133 | 134 | 135 | 139 | 159)
+      # caduta col video col chip: la colpa può essere del ponte, non della modalità senza proot. Si segna l'app per il
+      # solo ponte e si riapre subito senza (un'app che non parte mai più per colpa nostra è il guasto da evitare)
+      if [[ -n $va_pre ]] && ((SECONDS - t0 < DIRETTO_ENTRO)); then
+        videochip_segna "${real#"$root"}" "uscita $rc"
+        diretto_chiudi_resti "$d/ld.so" "$real"
+        diretto_run "$@"
+        return
+      fi
       if ((SECONDS - t0 < DIRETTO_ENTRO)); then
         diretto_segna "$c" "uscita $rc"
         diretto_chiudi_resti "$d/ld.so" "$real"

@@ -526,6 +526,7 @@ session_stop() {
   fi
   stampa_stop   # il CUPS del container gira senza proot: il pkill di proot qui sotto non lo prende
   rete_stop
+  videochip_ferma   # l'aiutante del chip (lib/videochip.sh): alla prossima sessione ne parte uno nuovo
   # le app di Debian (proot) prima del desktop, con qualche secondo per chiudersi bene
   pkill -TERM -f '(^|/)proot( |$)' 2>/dev/null || true
   local i

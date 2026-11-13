@@ -13,6 +13,9 @@
  */
 #include <libavcodec/avcodec.h>
 #include <libavutil/pixfmt.h>
+#include <libavutil/log.h>
+#include <stdarg.h>
+#include <fcntl.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <poll.h>
@@ -41,7 +44,15 @@ static AVFrame *fr;
 static int sock;
 static unsigned consegnati;
 
-#define L(...) do { fprintf(stderr, "tod-va-chip[%d]: ", getpid()); fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } while (0)
+// al massimo RIGHE righe per processo (ogni video è un processo figlio): mai un registro che cresce senza fine
+#define RIGHE 300
+static int righe;
+#define L(...) do { if (righe++ < RIGHE) { fprintf(stderr, "tod-va-chip[%d]: ", getpid()); fprintf(stderr, __VA_ARGS__); \
+                                          fputc('\n', stderr); } } while (0)
+static void registro_ffmpeg(void *p, int livello, const char *f, va_list a) {   // ffmpeg: solo errori, e con lo stesso limite
+    if (livello > AV_LOG_WARNING || righe++ >= RIGHE) return;
+    vfprintf(stderr, f, a);
+}
 
 static void fili_binder(void) {
     void *b = dlopen("libbinder_ndk.so", RTLD_NOW | RTLD_GLOBAL);
@@ -122,7 +133,7 @@ static void apri(const struct msg *h, uint8_t *dati) {
     const char *nome = (const char *)dati;
     size_t nl = strnlen(nome, h->len);
     const AVCodec *c = avcodec_find_decoder_by_name(nome);
-    if (!c) { L("decodificatore %s assente", nome); return; }
+    if (!c) { L("decodificatore %s assente", nome); rispondi(SCARTATO, 0); return; }
     if (ctx) avcodec_free_context(&ctx);
     ctx = avcodec_alloc_context3(c);
     ctx->width = (int)h->w, ctx->height = (int)h->h;
@@ -136,6 +147,7 @@ static void apri(const struct msg *h, uint8_t *dati) {
     int r = avcodec_open2(ctx, c, NULL);
     L("apertura di %s %ux%u, extradata %zu byte: %d", nome, h->w, h->h, ne, r);
     if (r < 0) avcodec_free_context(&ctx);
+    rispondi(r < 0 ? SCARTATO : FATTO, 0);   // il driver aspetta questa risposta: un chip che rifiuta = processore
 }
 
 static void pacchetto(const struct msg *h, uint8_t *dati, int fd) {
@@ -183,7 +195,15 @@ static void servi(int s) {
     pkt = av_packet_alloc();
     fr = av_frame_alloc();
     for (int i = 0; i < MAXA; i++) att[i].fd = -1;
+    // cane da guardia: se un giro (MediaCodec incantato in send/receive) dura più di 20 s, questo figlio muore invece di
+    // restare appeso per sempre; il driver se ne accorge (socket chiuso) e il video torna al processore
+    sigset_t m;
+    sigemptyset(&m);
+    sigaddset(&m, SIGALRM);
+    sigprocmask(SIG_UNBLOCK, &m, NULL);
+    signal(SIGALRM, SIG_DFL);
     for (;;) {
+        alarm(20);
         int in_volo = 0;
         for (int i = 0; i < MAXA; i++) in_volo += att[i].usato;
         struct pollfd p = {s, POLLIN, 0};
@@ -219,8 +239,9 @@ fine:
     _exit(0);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     signal(SIGCHLD, SIG_IGN);   /* i figli si raccolgono da soli */
+    av_log_set_callback(registro_ffmpeg);
     int l = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     struct sockaddr_un a = {.sun_family = AF_UNIX};
     const char nome[] = "tod-va-chip";
@@ -231,6 +252,11 @@ int main(void) {
         return 1;
     }
     L("in ascolto su @%s", nome);
+    /* il numero di processo lo scrive l'aiutante, e solo ora: chi trova il socket occupato non tocca quello buono */
+    if (argc == 3 && !strcmp(argv[1], "--pid")) {
+        FILE *p = fopen(argv[2], "w");
+        if (p) fprintf(p, "%d\n", getpid()), fclose(p);
+    }
     for (;;) {
         int c = accept(l, NULL, NULL);
         if (c < 0) { if (errno == EINTR) continue; break; }

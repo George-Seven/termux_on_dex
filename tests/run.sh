@@ -69,7 +69,7 @@ getprop() {
 }
 
 TOD_ROOT=$ROOT
-for m in core i18n detect pkgs x11 api usb stampa rete gpu desktop session container diretto apt apps disinstalla games phantom shizuku lingua look files maint menu tui benvenuto installer; do
+for m in core i18n detect pkgs x11 api usb stampa rete videochip gpu desktop session container diretto apt apps disinstalla games phantom shizuku lingua look files maint menu tui benvenuto installer; do
   # shellcheck source=/dev/null
   . "$ROOT/lib/$m.sh"
 done
@@ -812,7 +812,9 @@ test_diretto_run() { # app di Debian senza proot: programma, script, Electron, r
   {
     echo "#!$(command -v bash)"
     echo "if [[ \$1 == --list ]]; then [[ -f '$WORK/dr_manca_$$' ]] && echo 'libx.so => not found'; exit 0; fi"
-    echo "{ echo \"argomenti: \$*\"; echo \"DISPLAY=\$DISPLAY\"; echo \"TZ=\$TZ\"; echo \"GPU=\$GALLIUM_DRIVER\"; echo \"LIB=\$LD_LIBRARY_PATH\"; echo \"HOME=\$HOME\"; echo \"BUS=\${DBUS_SESSION_BUS_ADDRESS:-nessuno}\"; echo \"DE=\${XDG_CURRENT_DESKTOP:-nessuno}\"; } >>'$o'"
+    echo "{ echo \"argomenti: \$*\"; echo \"DISPLAY=\$DISPLAY\"; echo \"TZ=\$TZ\"; echo \"GPU=\$GALLIUM_DRIVER\"; echo \"LIB=\$LD_LIBRARY_PATH\"; echo \"HOME=\$HOME\"; echo \"BUS=\${DBUS_SESSION_BUS_ADDRESS:-nessuno}\"; echo \"DE=\${XDG_CURRENT_DESKTOP:-nessuno}\"; echo \"PRE=\$LD_PRELOAD\"; echo \"LIBVA=\${LIBVA_DRIVER_NAME:-nessuno} VAPROG=\${TOD_VA_PROG:-nessuno}\"; } >>'$o'"
+    # (un'app che cade solo col video col chip)
+    echo "if [[ -n \${LIBVA_DRIVER_NAME:-} && -f '$WORK/dr_rcva_$$' ]]; then exit \$(cat '$WORK/dr_rcva_$$'); fi"
     echo "exit \$(cat '$WORK/dr_rc_$$' 2>/dev/null || echo 0)"
   } >"$d/ld.so"
   chmod +x "$d/ld.so"
@@ -867,6 +869,33 @@ test_diretto_run() { # app di Debian senza proot: programma, script, Electron, r
   rm -f "$WORK/dr_rc_$$"; : >"$WORK/dr_manca_$$"; rc=0; diretto_run app || rc=$?; rm -f "$WORK/dr_manca_$$"
   eq "librerie mancanti: in proot" 97 "$rc"
   rm -f "$TOD_STATE_DIR/diretto-no"
+  # video col chip (lib/videochip.sh, 13 novembre): ogni app Chromium/Electron, solo con l'aiutante acceso; un'app che
+  # cade col ponte si riapre subito senza e non finisce tra quelle "da proot" (Pietro: "come abbiamo la certezza che sui
+  # dispositivi diversi le app non si bloccano?")
+  printf 'VA_PRELOAD="/v/gbm.so /v/shim.so"\nVA_FLAGS="--use-angle=vulkan --x"\nLIBVA_DRIVER_NAME="tod"\n' >"$r/etc/tod/video.env"
+  videochip_aiutante_vivo() { [[ -n ${VA_VIVO:-} ]]; }
+  : >"$o"; diretto_run editor --no-sandbox
+  out=$(cat "$o"); : >"$o"
+  has "aiutante spento: l'app come sempre" "$r/usr/lib/editor/editor --disable-dev-shm-usage --no-sandbox" "$out"
+  has "aiutante spento: niente driver" "LIBVA=nessuno" "$out"
+  VA_VIVO=1 diretto_run editor --no-sandbox
+  out=$(cat "$o"); : >"$o"
+  has "app Electron: i flag del ponte" "$r/usr/lib/editor/editor --use-angle=vulkan --x --disable-dev-shm-usage --no-sandbox" "$out"
+  has "app Electron: GBM e shim davanti" "PRE=/v/gbm.so /v/shim.so $d/tod-diretto.so" "$out"
+  has "app Electron: driver tod e il suo percorso per lo shim" "LIBVA=tod VAPROG=/usr/lib/editor/editor" "$out"
+  VA_VIVO=1 diretto_run app
+  has "app qualunque: niente ponte" "LIBVA=nessuno" "$(cat "$o")"; : >"$o"
+  echo 139 >"$WORK/dr_rcva_$$"; rc=0; VA_VIVO=1 diretto_run editor || rc=$?; rm -f "$WORK/dr_rcva_$$"
+  out=$(cat "$o"); : >"$o"
+  eq "caduta col ponte: riaperta subito senza (non 97)" 0 "$rc"
+  has "prima col ponte" "LIBVA=tod" "$out"
+  has "poi senza" "LIBVA=nessuno" "$out"
+  has "segnata per il solo ponte" "/usr/lib/editor/editor" "$(cat "$r/etc/tod/video-no")"
+  eq "e non tra quelle da proot" "" "$(cat "$TOD_STATE_DIR/diretto-no" 2>/dev/null)"
+  VA_VIVO=1 diretto_run editor
+  has "segnata: d'ora in poi senza ponte" "LIBVA=nessuno" "$(cat "$o")"; : >"$o"
+  rm -f "$r/etc/tod/video.env" "$r/etc/tod/video-no"
+  . "$ROOT/lib/videochip.sh"   # la funzione vera, per i test che seguono
   echo 139 >"$WORK/dr_rc_$$"; rc=0; diretto_run app || rc=$?; rm -f "$WORK/dr_rc_$$"
   eq "crash appena partito: in proot" 97 "$rc"
   has "e segnato" "/usr/bin/app" "$(cat "$TOD_STATE_DIR/diretto-no")"
@@ -2599,8 +2628,20 @@ EOF
   # gli agganci: ogni app Chromium/Electron (anche nuova), solo con l'aiutante acceso; installazione, sessione, comando
   local s
   s=$(cat "$ROOT/lib/diretto.sh")
-  has "diretto_run: video.env per le app Chromium/Electron, solo con l'aiutante acceso" \
-    'if ((chromium)) && [[ -f $root/etc/tod/video.env ]] && videochip_aiutante_vivo; then' "$s"
+  has "diretto_run: video.env per le app Chromium/Electron, solo con l'aiutante acceso e se l'app non è caduta col ponte" \
+    'videochip_aiutante_vivo && ! videochip_escluso "${real#"$root"}"; then' "$s"
+  has "tod-run (proot): anche lì le app cadute col ponte partono senza" '! grep -qxF "$p" "$E/video-no"' "$(cat "$ROOT/lib/container.sh")"
+  has "a fine sessione l'aiutante si ferma" "videochip_ferma" "$(sed -n '/^session_stop()/,/^}/p' "$ROOT/lib/session.sh")"
+  s=$(cat "$ROOT/share/video/tod-va-chip.c")
+  has "aiutante: cane da guardia (un giro bloccato oltre 20 s chiude quel video, non tutto)" "alarm(20);" "$s"
+  has "aiutante: registro limitato" "#define RIGHE 300" "$s"
+  has "aiutante: conferma l'apertura del chip" "rispondi(r < 0 ? SCARTATO : FATTO, 0);" "$s"
+  has "aiutante: il pid lo scrive lui dopo l'ascolto" '!strcmp(argv[1], "--pid")' "$s"
+  s=$(cat "$ROOT/share/video/tod_drv_video.c")
+  has "driver: invii con limite di tempo (aiutante incantato)" "21 /* SO_SNDTIMEO */" "$s"
+  has "driver: aspetta la conferma d'apertura al più 3 s" "poll(&p, 1, 3000) <= 0" "$s"
+  has "driver: aiutante caduto a metà video → si ricollega (al più 3 volte), il fotogramma si salta" "if (++x->cadute > 3) x->rotto = 1;" "$s"
+  s=$(cat "$ROOT/lib/diretto.sh")
   has "diretto_run: le nostre librerie davanti" 'LD_PRELOAD="${va_pre:+$va_pre }$pre"' "$s"
   has "diretto_run: lo shim riconosce i processi dell'app" 'TOD_VA_PROG="${real#"$root"}"' "$s"
   s=$(cat "$ROOT/lib/container.sh")

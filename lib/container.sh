@@ -192,7 +192,8 @@ if [ -f "$E/video.env" ] && [ -n "$vp" ] && grep -q tod-va-chip "/proc/$vp/cmdli
   p=$(command -v "$1" 2>/dev/null || true)
   p=$(readlink -f "$p" 2>/dev/null || true)
   d=${p%/*}
-  if [ -n "$p" ] && { [ -e "$d/chrome-sandbox" ] || [ -e "$d/resources/app.asar" ] || [ -e "$d/resources.pak" ]; }; then
+  if [ -n "$p" ] && { [ -e "$d/chrome-sandbox" ] || [ -e "$d/resources/app.asar" ] || [ -e "$d/resources.pak" ]; } &&
+    ! grep -qxF "$p" "$E/video-no" 2>/dev/null; then
     set -a; . "$E/video.env"; set +a
     export TOD_VA_PROG="$p" LD_PRELOAD="$VA_PRELOAD${LD_PRELOAD:+ $LD_PRELOAD}"
     prog=$1

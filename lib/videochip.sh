@@ -160,6 +160,21 @@ videochip_env() { # /etc/tod/video.env del container: c'è solo col ponte pronto
   fi
 }
 
+# --- app che cadono col ponte (Pietro, 13 novembre: "come abbiamo la certezza che sui dispositivi diversi le app non si
+# bloccano?"): un'app Chromium/Electron caduta entro 15 s col ponte si riapre subito senza, e da lì parte sempre senza.
+# L'elenco sta nel container (/etc/tod/video-no, percorsi del container), così lo leggono diretto_run e tod-run
+videochip_no_file() { printf '%s/etc/tod/video-no' "$(cx_rootfs 2>/dev/null)"; }
+
+videochip_escluso() { # videochip_escluso /percorso/nel/container → vero se quell'app è caduta col ponte
+  [[ -f $(videochip_no_file) ]] && grep -qxF "$1" "$(videochip_no_file)"
+}
+
+videochip_segna() { # videochip_segna /percorso/nel/container motivo
+  mkdir -p "$(dirname "$(videochip_no_file)")"
+  printf '%s\n' "$1" >>"$(videochip_no_file)"
+  log "video col chip: $1 caduta col ponte ($2): d'ora in poi parte senza (tod videochip riprova per riprovare)"
+}
+
 videochip_aiutante_vivo() { # l'aiutante di questa sessione è acceso (pid nel file, ed è proprio lui)
   local p
   p=$(cat "$TMPDIR/tod-va-chip.pid" 2>/dev/null || true)
@@ -177,19 +192,34 @@ videochip_start() { # dall'hook di sessione: compila se serve, scrive video.env,
   videochip_env
   videochip_pronto || return 0
   videochip_adatto || return 0   # telefono senza la grafica che serve (Mali): niente aiutante, le app come sempre
-  if videochip_aiutante_vivo; then return 0; fi
-  # un registro per sessione: l'aiutante scrive poche righe per video (mai un registro che cresce senza fine)
-  (
-    setsid "$(videochip_dir)/tod-va-chip" </dev/null >"$TOD_STATE_DIR/video-chip.log" 2>&1 &
-    echo $! >"$TMPDIR/tod-va-chip.pid"
-  )
+  local bin pid
+  bin="$(videochip_dir)/tod-va-chip"
+  if videochip_aiutante_vivo; then
+    # dopo un aggiornamento: quello acceso è più vecchio del programma, e parlerebbe col driver nuovo
+    if [[ ! $bin -nt $TMPDIR/tod-va-chip.pid ]]; then return 0; fi
+    videochip_ferma
+    sleep 0.5
+  fi
+  # un registro per sessione (l'aiutante scrive al massimo poche centinaia di righe per video); il numero di processo lo
+  # scrive lui, solo dopo essersi messo in ascolto
+  (setsid "$bin" --pid "$TMPDIR/tod-va-chip.pid" </dev/null >"$TOD_STATE_DIR/video-chip.log" 2>&1 &)
+  for pid in 1 2 3 4 5 6 7 8 9 10; do
+    if videochip_aiutante_vivo; then return 0; fi
+    sleep 0.2
+  done
+  log "video col chip: l'aiutante non è partito (vedi video-chip.log)"
+}
+
+videochip_ferma() { # l'aiutante si chiude (fine della sessione, spento, aggiornato)
+  [[ -z ${TOD_TEST_RUN:-} ]] || return 0
+  if videochip_aiutante_vivo; then kill "$(cat "$TMPDIR/tod-va-chip.pid")" 2>/dev/null || true; fi
+  rm -f "$TMPDIR/tod-va-chip.pid"
 }
 
 videochip_stop() { # spento dall'utente: niente più ambiente per le app nuove, e l'aiutante si chiude
   [[ -z ${TOD_TEST_RUN:-} ]] || return 0
   videochip_env
-  if videochip_aiutante_vivo; then kill "$(cat "$TMPDIR/tod-va-chip.pid")" 2>/dev/null || true; fi
-  rm -f "$TMPDIR/tod-va-chip.pid"
+  videochip_ferma
 }
 
 videochip_install() { # installazione e aggiornamenti: libva in Termux, i pezzi compilati, la scheda finta
@@ -202,7 +232,7 @@ videochip_install() { # installazione e aggiornamenti: libva in Termux, i pezzi 
   videochip_env
 }
 
-videochip_cli() { # tod videochip [stato|prepara|on|off]
+videochip_cli() { # tod videochip [stato|prepara|on|off|riprova]
   local sub=${1:-stato}
   case $sub in
     prepara | install)
@@ -211,6 +241,7 @@ videochip_cli() { # tod videochip [stato|prepara|on|off]
       ;;
     on | si | sì) conf_set VIDEO_CHIP 1; videochip_start; ok "$(t vc_acceso)" ;;
     off | no) conf_set VIDEO_CHIP 0; videochip_stop; ok "$(t vc_spento)" ;;
+    riprova) rm -f "$(videochip_no_file)"; ok "$(t vc_riprova)" ;;   # le app cadute col ponte lo riprovano
     stato | status)
       if ! videochip_on; then
         echo "$(t vc_spento)"
@@ -222,6 +253,6 @@ videochip_cli() { # tod videochip [stato|prepara|on|off]
         echo "$(t vc_non_pronto)"
       fi
       ;;
-    *) die "tod videochip stato|prepara|on|off" ;;
+    *) die "tod videochip stato|prepara|on|off|riprova" ;;
   esac
 }

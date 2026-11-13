@@ -76,7 +76,7 @@ typedef struct {
     int usato; VAConfigID conf; VASurfaceID bersaglio; VABufferID pipeline;
     VABufferID pp, iq, sp[128], sd[128];
     int nsp, nsd;
-    int sock, aperto, rotto;   // la connessione con l'aiutante tod-va-chip (Termux)
+    int sock, aperto, rotto, cadute;   // la connessione con l'aiutante tod-va-chip (Termux)
     unsigned gettone;
     uint8_t sps[96], pps[640];
     int nsps, npps, l0, l1;
@@ -307,6 +307,7 @@ static void converti(Surf *a, Surf *b) {
 // ===================== ponte verso il chip (aiutante tod-va-chip in Termux, socket astratto) =====================
 int socket(int, int, int);
 int connect(int, const void *, unsigned);
+int setsockopt(int, int, int, const void *, unsigned);
 long sendmsg(int, const void *, int);
 long send(int, const void *, unsigned long, int);
 long read(int, void *, unsigned long);
@@ -321,6 +322,9 @@ static int collega(void) {
     struct { uint16_t fam; char p[108]; } a = {1, {0}};
     memcpy(a.p + 1, "tod-va-chip", 11);
     if (connect(s, &a, 2 + 1 + 11) < 0) { close(s); return -1; }
+    // un aiutante incantato non deve fermare Chromium: un invio che non passa in 2 s = ponte rotto per questo video
+    struct { long sec, usec; } limite = {2, 0};
+    setsockopt(s, 1 /* SOL_SOCKET */, 21 /* SO_SNDTIMEO */, &limite, sizeof limite);
     return s;
 }
 static int manda(int s, const struct msg *h, const void *dati, int fd) {
@@ -338,13 +342,39 @@ static int manda(int s, const struct msg *h, const void *dati, int fd) {
     }
     return 0;
 }
+// apertura del decodificatore nell'aiutante, aspettando la sua risposta (al più 3 s): un chip che rifiuta (troppi video
+// insieme, formato non suo) = ponte rotto per questo video, e Chromium avrà un errore invece di fotogrammi vuoti
+static int apri_chip(Ctx *x, const void *dati, unsigned n, unsigned w, unsigned h) {
+    struct msg m = {APRI, n, 0, w, h, 0, 0, 0, 0};
+    if (manda(x->sock, &m, dati, -1) < 0) return -1;
+    struct pollfd p = {x->sock, 1, 0};
+    uint32_t r[2];
+    if (poll(&p, 1, 3000) <= 0 || read(x->sock, r, 8) != 8 || r[0] != FATTO || r[1] != 0) {
+        L("ponte: il chip non apre il decodificatore");
+        return -1;
+    }
+    return 0;
+}
+
+// l'aiutante è caduto a metà video (il processo del chip è morto): ci si ricollega e si riapre il chip, al più 3 volte
+// per video; il fotogramma in corso si salta (qualche fotogramma sporco fino al prossimo completo, ma il video continua).
+// Alla quarta il ponte si arrende e Chromium ha un errore (13 novembre: prima il video si fermava alla prima caduta)
+static void perso(Ctx *x, unsigned cid, const char *perche) {
+    if (x->sock >= 0) close(x->sock);
+    x->sock = -1, x->aperto = 0, x->nsps = x->npps = 0;
+    if (++x->cadute > 3) x->rotto = 1;
+    for (unsigned i = 1; i < MAXO; i++)   // le superfici in attesa non avranno mai risposta
+        if (surfs[i].usato && surfs[i].attesa && surfs[i].ctx == cid) surfs[i].attesa = 0;
+    L("ponte: %s (caduta %d, %s)", perche, x->cadute, x->rotto ? "il ponte si arrende" : "si ricollega");
+}
+
 // legge le risposte dell'aiutante (FATTO/SCARTATO + gettone) e libera le superfici; attesa in ms (0 = non aspetta)
 static void risposte(Ctx *x, unsigned cid, int ms) {
     if (x->sock < 0) return;
     struct pollfd p = {x->sock, 1 /* POLLIN */, 0};
     while (poll(&p, 1, ms) > 0) {
         uint32_t r[2];
-        if (read(x->sock, r, 8) != 8) { L("ponte: l'aiutante ha chiuso"); close(x->sock); x->sock = -1, x->rotto = 1; return; }
+        if (read(x->sock, r, 8) != 8) { perso(x, cid, "l'aiutante ha chiuso"); return; }
         for (unsigned i = 1; i < MAXO; i++)
             if (surfs[i].usato && surfs[i].attesa && surfs[i].ctx == cid && surfs[i].gettone == r[1]) { surfs[i].attesa = 0; break; }
         ms = 0;
@@ -460,8 +490,8 @@ static int ponte_vp9(VAContextID cid, Ctx *x, Surf *v) {
         if (x->sock < 0) { L("ponte: aiutante tod-va-chip non raggiungibile"); x->rotto = 1; return -1; }
     }
     if (!x->aperto) {
-        struct msg h = {APRI, 15, 0, pp->frame_width, pp->frame_height, 0, 0, 0, 0};   // nome + '\0', niente extradata
-        if (manda(x->sock, &h, "vp9_mediacodec", -1) < 0) { x->rotto = 1; return -1; }
+        // nome + '\0', niente extradata
+        if (apri_chip(x, "vp9_mediacodec", 15, pp->frame_width, pp->frame_height) < 0) { x->rotto = 1; return -1; }
         x->aperto = 1;
         L("ponte: aperto vp9 %ux%u", pp->frame_width, pp->frame_height);
     }
@@ -474,11 +504,8 @@ static int ponte_vp9(VAContextID cid, Ctx *x, Surf *v) {
     struct msg h = {PACCHETTO, n, ++x->gettone, v->w, v->h, v->pitch[0], v->pitch[1], v->offset[1], mostra ? v->dim : 0};
     if (mostra) v->attesa = 1, v->gettone = h.token, v->ctx = cid;
     if (manda(x->sock, &h, d, mostra ? v->fd : -1) < 0) {
-        L("ponte: invio fallito");
-        v->attesa = 0;
-        close(x->sock);
-        x->sock = -1, x->rotto = 1;
-        return -1;
+        perso(x, cid, "invio fallito");
+        return x->rotto ? -1 : 0;   // il fotogramma si salta
     }
     risposte(x, cid, 0);
     return 0;
@@ -510,8 +537,7 @@ static int ponte_h264(VAContextID cid, Ctx *x, Surf *v) {
         memcpy(ap, nome, k);
         memcpy(ap + k, sps, (unsigned long)ns), k += (unsigned)ns;
         memcpy(ap + k, pps, (unsigned long)np), k += (unsigned)np;
-        struct msg h = {APRI, k, 0, v->w, v->h, 0, 0, 0, 0};
-        if (manda(x->sock, &h, ap, -1) < 0) { x->rotto = 1; return -1; }
+        if (apri_chip(x, ap, k, v->w, v->h) < 0) { x->rotto = 1; return -1; }
         x->aperto = 1;
         L("ponte: aperto h264 %ux%u profilo %d, SPS %d byte, PPS %d byte", v->w, v->h, prof, ns, np);
     }
@@ -542,7 +568,10 @@ static int ponte_h264(VAContextID cid, Ctx *x, Surf *v) {
     v->attesa = 1, v->gettone = h.token, v->ctx = cid;
     int r = manda(x->sock, &h, au, v->fd);
     free(au);
-    if (r < 0) { L("ponte: invio fallito"); v->attesa = 0; close(x->sock); x->sock = -1, x->rotto = 1; return -1; }
+    if (r < 0) {
+        perso(x, cid, "invio fallito");
+        return x->rotto ? -1 : 0;   // il fotogramma si salta
+    }
     risposte(x, cid, 0);
     return 0;
 }
