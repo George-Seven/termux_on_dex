@@ -5,8 +5,10 @@
 
 desktop_packages() { # il primo pacchetto è obbligatorio, gli altri facoltativi
   case $1 in
-    # niente ristretto: immagini, video e musica le aprono le app nostre (share/media, MEDIA_PKGS)
-    xfce) echo "xfce4 xfce4-terminal xfce4-taskmanager xfce4-notifyd xfce4-screenshooter mousepad thunar-archive-plugin xarchiver" ;;
+    # niente ristretto: immagini, video e musica le aprono le app nostre (share/media, MEDIA_PKGS); niente Gestione
+    # attività e Cattura di XFCE: ci sono le nostre (share/tod-attivita.py, share/tod-cattura.py). Gli archivi
+    # ("Estrai qui" di Esplora file) li apre File Roller (13 novembre, Pietro: "la roba linux la vorrei eliminare")
+    xfce) echo "xfce4 xfce4-terminal xfce4-notifyd mousepad thunar-archive-plugin file-roller" ;;
     *) return 1 ;;
   esac
 }
@@ -414,7 +416,12 @@ desktop_hide_useless() { # copia con NoDisplay=true: restano usabili (es. per ap
   fi
   for id in $DESKTOP_USELESS; do
     src="$PREFIX/share/applications/$id" dst="$apps/$id"
-    [[ -f $src ]] || continue
+    if [[ ! -f $src ]]; then
+      # programma tolto (13 novembre: Ristretto, Gestione attività e Cattura di XFCE, Xarchiver): la nostra copia
+      # nascosta resterebbe orfana, una voce che punta al nulla. Una copia dell'utente (senza il segno) resta
+      if [[ -f $dst ]] && grep -q '^X-TOD-Hidden=true' "$dst"; then rm -f "$dst"; fi
+      continue
+    fi
     if [[ -f $dst ]] && ! grep -q '^X-TOD-Hidden=true' "$dst"; then continue; fi   # scelta dell'utente
     if [[ -f $dst && $dst -nt $src ]]; then continue; fi
     mkdir -p "$apps"

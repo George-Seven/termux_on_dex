@@ -1273,6 +1273,12 @@ test_media_voci() { # Foto, Lettore multimediale e Lettore musicale nello Start,
   has "all'installazione e dopo gli aggiornamenti" "desktop_media_entries" "$(declare -f desktop_install_entries)"
   has "Ristretto non più nello Start" "org.xfce.ristretto.desktop" "$DESKTOP_USELESS"
   hasnt "Ristretto non più installato" "ristretto" "$(desktop_packages xfce)"
+  # 13 novembre, Pietro: "la roba linux la vorrei eliminare": niente più i pezzi di XFCE sostituiti da app nostre
+  local v
+  for v in xfce4-taskmanager xfce4-screenshooter xarchiver; do
+    hasnt "$v non più installato (c'è la nostra)" "$v" "$(desktop_packages xfce)"
+  done
+  has "gli archivi li apre File Roller (Estrai qui di Esplora file)" "thunar-archive-plugin file-roller" "$(desktop_packages xfce)"
 }
 
 test_media_pacchetti() { # GStreamer e i caricatori di immagini: con l'installazione, gli Aggiornamenti e tod update
@@ -1955,6 +1961,13 @@ test_menu_only_useful() { # nello Start solo ciò che serve: niente demo, doppio
   has "Xarchiver nascosto" "NoDisplay=true" "$(cat "$apps/xarchiver.desktop")"
   has "ma apre ancora gli archivi" "MimeType=application/zip;" "$(cat "$apps/xarchiver.desktop")"
   eq "Mousepad resta" no "$([[ -e $apps/org.xfce.mousepad.desktop ]] && echo si || echo no)"
+  # programma tolto (13 novembre): la nostra copia nascosta se ne va, quella dell'utente no
+  rm -f "$sys/xarchiver.desktop"
+  printf '[Desktop Entry]\nName=Ristretto mio\n' >"$apps/org.xfce.ristretto.desktop"
+  desktop_hide_useless
+  eq "programma tolto: niente copia orfana" no "$([[ -e $apps/xarchiver.desktop ]] && echo si || echo no)"
+  eq "copia dell'utente di un programma tolto: resta" si "$([[ -e $apps/org.xfce.ristretto.desktop ]] && echo si || echo no)"
+  rm -f "$apps/org.xfce.ristretto.desktop"
   printf '[Desktop Entry]\nName=Mio\n' >"$apps/thunar-settings.desktop"
   printf '[Desktop Entry]\nName=Thunar\n' >"$sys/thunar-settings.desktop"
   desktop_hide_useless
