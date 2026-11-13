@@ -115,6 +115,13 @@ desktop_sistema_entries() { # share/tod-cattura.py e share/tod-attivita.py nello
   printf '%s\n' "StartupWMClass=tod-attivita" "StartupNotify=true" "Comment=See and end running apps" \
     "Comment[it]=Guarda e termina le app aperte" "Keywords=task;process;cpu;memory;processi;memoria;termina;" \
     >>"$apps/tod-attivita.desktop"
+  # Archiviazione come macOS (13 novembre, Pietro: "un'app che mi fa vedere la memoria occupata")
+  desktop_entry "$apps/tod-archivio.desktop" "Storage" "Archiviazione" \
+    "python3 $TOD_ROOT/share/tod-archivio.py" org.gnome.baobab false
+  sed -i 's/^Categories=.*/Categories=System;Monitor;/' "$apps/tod-archivio.desktop"
+  printf '%s\n' "StartupWMClass=tod-archivio" "StartupNotify=true" "Comment=See what takes up space on the phone" \
+    "Comment[it]=Guarda cosa occupa lo spazio del telefono" \
+    "Keywords=storage;disk;space;memory;archiviazione;spazio;memoria;disco;pulisci;" >>"$apps/tod-archivio.desktop"
 }
 
 # Stamp e Ctrl+Maiusc+Esc alle app nostre, come Windows; e come macOS con il tasto Windows al posto di Command

@@ -2587,6 +2587,61 @@ False" "$out"
   fi
 }
 
+test_archiviazione() { # 13 novembre, Pietro: "ho 120 GB su Termux, che abbiamo combinato?" (un registro di prova da
+  # 62 GB in $PREFIX/tmp) → app Archiviazione come macOS. I conti (share/archivio_dati.py) su misure finte di du:
+  # ogni byte in una sola categoria, il resto del disco ad Android, i consigli solo quando servono
+  command -v python3 >/dev/null || return 0
+  local d="$WORK/arch_$$" out
+  mkdir -p "$d/tmp"
+  head -c 10000 /dev/urandom >"$d/tmp/grande.log"
+  printf 'x' >"$d/tmp/piccolo.log"
+  out=$(TOD_TERMUX_HOME=/c PREFIX=/u TOD_CX_ROOTFS=/r ARCH_TMP="$d/tmp" _stampa_py "$ROOT/share/archivio_dati.py" <<'EOF'
+import os
+a = {"/c": 1000, "/c/.cache": 100, "/c/.cache/chromium": 60, "/c/.cache/tod": 10, "/c/.config": 50, "/c/.config/x": 50,
+     "/c/.local": 300, "/c/.local/share": 290, "/c/.local/share/Trash": 200, "/c/.local/share/tod-store": 80,
+     "/c/.local/share/altro": 10, "/c/.local/bin": 10, "/c/src": 400, "/c/src/prova": 400, "/c/Desktop": 100}
+b = {"/u": 2000, "/u/tmp": 600, "/u/tmp/x": 100, "/u/var": 1100, "/u/var/lib": 1100, "/u/var/lib/proot-distro": 1000,
+     "/u/lib": 300}
+R = "/u/var/lib/proot-distro/containers/debian/rootfs"
+c = {R: 900, R + "/usr": 500, R + "/home": 300, R + "/home/dex": 300, R + "/home/dex/.cache": 40,
+     R + "/home/dex/.config": 200, R + "/tmp": 100}
+dd = {"/c/.local/share/Trash/files": 190, "/c/.local/share/Trash/files/a.iso": 190}
+r = m.calcola(a, b, c, dd, (10000, 8000, 2000), casa="/c", prefix="/u", rootfs=R, case_cx=[R + "/home/dex"])
+print({k: r["categorie"][k]["byte"] for k, *_ in m.CATEGORIE}, r["nostro"], r["libero"])
+print(r["categorie"]["cestino"]["parti"], r["categorie"]["temporanei"]["parti"][0])
+t = [("/u/tmp/big.log", 62259920062, False), ("/u/tmp/in-uso.log", 10**9, True)]
+print([(k, n) for k, n, _x in m.consigli(r, t, [("/c/.cache/chromium", 2 * 10**8)])], m.consigli(r, [], []))
+print(m.cache_pulibili(r, ["/usr/bin/chromium --type=gpu"]), m.cache_pulibili(r, []))
+print(m.dimensione(62259920062), m.dimensione(500), m.dimensione(1.5e6), m.dimensione(120e9), m.dimensione(1e9),
+      m.dimensione(2.5e9, False))
+print(m.leggi_du("4\t/a\nnon una riga\n12\t/a/b\n"), m.figli({"/a": 9, "/a/b": 1, "/a/c": 5, "/a/c/d": 5}, "/a"))
+T = os.environ["ARCH_TMP"]
+print([(os.path.basename(p), aperto) for p, _n, aperto in m.temporanei_grandi([T], 5000, {T + "/grande.log"})],
+      m.temporanei_grandi([T], 5000, set())[0][2])
+EOF
+)
+  eq "categorie senza doppioni, Android = il resto, consigli, cache aperte salve, misure" "{'android': 5000, 'termux': 400, 'debian': 600, 'store': 80, 'dati': 330, 'documenti': 150, 'sviluppo': 400, 'cache': 140, 'temporanei': 700, 'cestino': 200} 3000 2000
+[('/c/.local/share/Trash/files/a.iso', 190), ('/c/.local/share/Trash/info', 10)] ('/u/tmp', 500)
+[('temporanei', 62259920062), ('cache', 200000000)] []
+[] [('/c/.cache/chromium', 60)]
+62,3 GB 500 byte 1,5 MB 120 GB 1 GB 2.5 GB
+{'/a': 4096, '/a/b': 12288} [('/a/c', 5), ('/a/b', 1)]
+[('grande.log', True)] False" "$out"
+  has "voce nello Start" 'desktop_entry "$apps/tod-archivio.desktop" "Storage" "Archiviazione"' "$(cat "$ROOT/lib/desktop.sh")"
+  has "icona DeX OS (disco)" '"org.gnome.baobab"' "$(cat "$ROOT/share/dexos/dexos-icons.py")"
+  # la finestra (GTK: il Python di Termux): percorsi leggibili
+  local py=/data/data/com.termux/files/usr/bin/python3
+  if [[ -x $py ]] && "$py" -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null; then
+    out=$(env -u LD_PRELOAD TOD_TERMUX_HOME=/c TOD_CX_ROOTFS=/r PREFIX=/u "$py" -c 'import importlib.util as u, sys
+s = u.spec_from_file_location("m", sys.argv[1]); m = u.module_from_spec(s); s.loader.exec_module(m)
+print(m.gentile("/c/src/x"), m.gentile("/r/usr/lib"), m.gentile("/u/lib"), m.gentile("/altro"), sorted(m.SPIEGA) == sorted(k for k, *_ in m.D.CATEGORIE))' \
+      "$ROOT/share/tod-archivio.py" 2>&1)
+    has "Archiviazione: percorsi e spiegazioni" "~/src/x Debian: /usr/lib Termux: /usr/lib /altro True" "$out"
+  else
+    echo "  (PyGObject di Termux assente: finestra di Archiviazione saltata)"
+  fi
+}
+
 test_gestione_attivita() { # 12 novembre, Pietro: Gestione attività e Cattura di XFCE "hanno l'aspetto Linux": nostre.
   # I dati (share/attivita_dati.py) su un /proc finto: nomi leggibili, processore tra due letture, processi raggruppati
   # sotto l'app della finestra, i pezzi del desktop che non si terminano
