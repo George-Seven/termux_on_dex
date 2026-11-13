@@ -842,6 +842,8 @@ test_diretto_run() { # app di Debian senza proot: programma, script, Electron, r
   has "desktop passato all'app" "DE=XFCE" "$(cat "$o")"; : >"$o"
   has "programma ELF dal caricatore, con il suo nome" "argomenti: --argv0 /usr/bin/app $r/usr/bin/app uno due tre" "$out"
   has "socket di X per intero" "DISPLAY=$TMPDIR/.X11-unix/X0" "$out"
+  # x11rb (appunti di egui: le app Craft) si collega comunque a /tmp/.X11-unix/X0 del container (13 novembre)
+  has "socket di X anche nel /tmp del container" "$TMPDIR/.X11-unix/X0" "$(readlink "$r/tmp/.X11-unix/X0")"
   has "ora del telefono" "TZ=Europe/Rome" "$out"
   has "profilo GPU del container" "GPU=zink" "$out"
   # i programmi Bun e le app Rust (rustix) aprono i file senza il glibc: /home/dex non lo vedrebbero
@@ -2786,6 +2788,39 @@ everywhere ''
 True" "$out"
 }
 
+test_stampa_ricoh_airprint() { # 13 novembre, Pietro: "o ip non valido oppure che manca il driver". (1) La Ricoh si presenta via
+  # IPP come "RICOH MP C2011 AirPrint", e CUPS con quel nome risponde client-error-not-found: driver "non installato" con
+  # openprinting-ppds presente. (2) "192.168.0.150/ipp" (indirizzo con percorso, senza ipp://) era "non valido"
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(TMPDIR="$WORK/sra_tmp" TOD_TERMUX_HOME="$WORK/sra_home" _stampa_py "$ROOT/share/stampa/tod-stampa.py" <<'EOF'
+R = ["openprinting-ppds:0/ppd/openprinting/Ricoh/PXL/Ricoh-MP_C2011_PXL.ppd Ricoh MP C2011 PXL", "everywhere IPP Everywhere"]
+chieste = []
+class Ris:
+    def __init__(s, out=""): s.returncode, s.stdout, s.stderr = (0 if out else 1), out, ""
+def cups(*a, timeout=0):   # come il CUPS vero: col suffisso AirPrint non trova niente
+    chieste.append(a[1:3])
+    return Ris("\n".join(R) if a[1] == "--make-and-model" and a[2].upper() == "RICOH MP C2011" else "")
+m.cups = cups
+st = {"senza_driver": False, "device_id": "", "formati": ["application/octet-stream"], "modello": "RICOH MP C2011 AirPrint",
+      "ip": "192.168.0.150"}
+print(m.modello_per(st).rsplit("/", 1)[-1], chieste)
+for n in ("HP Envy 6100e series [EAF212]", "Canon IPP Everywhere", "Brother HL-L2350DW"):
+    chieste.clear(); m.driver_per("", (), n); print([c[1] for c in chieste if c[0] == "--make-and-model"])
+viste = []
+m.ipp.attributi = lambda host, porta, percorso, tls: (viste.append((host, porta, percorso, tls)), (None, ""))[1]
+m.ipp.porta_aperta = lambda host, porta: False
+m.log = lambda *a: None
+print(m.aggiungi_indirizzo({}, "192.168.0.150/ipp"), viste)
+EOF
+)
+  eq "driver trovato senza 'AirPrint'; indirizzo con percorso accettato come ipp://" "Ricoh-MP_C2011_PXL.ppd [('--make-and-model', 'RICOH MP C2011 AirPrint'), ('--make-and-model', 'RICOH MP C2011')]
+['HP Envy 6100e series [EAF212]', 'HP Envy 6100e']
+['Canon IPP Everywhere', 'Canon']
+['Brother HL-L2350DW']
+Nessuna stampante risponde a 192.168.0.150. Controlla che sia accesa e sulla stessa rete Wi-Fi. [('192.168.0.150', 631, 'ipp', False)]" "$out"
+}
+
 test_video_chip_app() { # 13 novembre, Pietro: il video col chip "deve essere generale per tutti, tipo io installo una
   # nuova app e ha già questa miglioria". lib/videochip.sh compila driver VA-API, shim, GBM (glibc del container) e
   # l'aiutante (Termux); /etc/tod/video.env c'è solo col ponte pronto e acceso; diretto_run e tod-run lo danno a ogni
@@ -3771,6 +3806,32 @@ EOF
 )
   local r="$WORK/rete_tmp/tod-rete"
   eq "elenco e tod-smb" $'NAS di casa\t192.168.1.9\nPC-PIETRO\t192.168.1.23\nPC-PIETRO (192.168.1.24)\t192.168.1.24\n'"['', '$r nas-di-casa 192.168.1.9:4450 NAS di casa', '$r pc-pietro 192.168.1.23 PC-PIETRO', '$r pc-pietro--192.168.1.24- 192.168.1.24 PC-PIETRO (192.168.1.24)']"$'\nNAS di casa\t192.168.1.9\nPC-PIETRO (192.168.1.24)\t192.168.1.24\n'"['NAS di casa', 'PC-PIETRO (192.168.1.24)']"$'\n'"'PC-PIETRO (192.168.1.24)\\t192.168.1.24\\n' []" "$out"
+}
+
+test_rete_orfani() { # 13 novembre: servizio ucciso senza SIGTERM (riavvio forzato), i suoi tod-smb restano vivi e il servizio
+  # nuovo ne avvia altri sulle stesse prese → due copie per PC, Esplora file appeso. All'avvio si chiudono quelli rimasti,
+  # riconosciuti per argomenti esatti (mai per testo: la shell di chi li cerca contiene lo stesso testo)
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(TOD_SMB_BIN="/finto/tod-smb" _rete_py <<'EOF'
+import os, tempfile
+p = tempfile.mkdtemp()
+def proc(pid, *argv):
+    os.makedirs(os.path.join(p, pid))
+    open(os.path.join(p, pid, "cmdline"), "wb").write(b"\0".join(os.fsencode(a) for a in argv) + b"\0")
+proc("101", m.SMB, m.RUN, "pc-a", "192.168.0.2", "PC-A")              # orfano: si chiude
+proc("102", m.SMB, m.RUN, "pc-b", "192.168.0.3", "PC-B")              # orfano: si chiude
+proc("103", m.SMB, "/altra/cartella", "pc-c", "192.168.0.4", "PC-C")  # di un'altra prova: resta
+proc("104", "bash", "-c", "kill " + m.SMB + " " + m.RUN)              # la shell che lo cita: resta
+proc("self", m.SMB, m.RUN)
+uccisi, scritti = [], []
+os.killpg = lambda pid, sig: uccisi.append((pid, int(sig)))
+m.log = scritti.append
+print(m.ferma_orfani(p), sorted(uccisi), scritti)
+EOF
+)
+  eq "chiusi solo i tod-smb rimasti" "2 [(101, 15), (102, 15)] ['chiusi 2 tod-smb rimasti da prima']" "$out"
+  has "il servizio li chiude prima di partire" "ferma_orfani()" "$(sed -n '/^def sorveglia/,/srv = Servizio/p' "$ROOT/share/rete/tod-rete.py")"
 }
 
 test_rete_cambio_rete() { # 9 novembre, Pietro: "metti che cambio rete in corso d'opera". Rete nuova: i PC della vecchia

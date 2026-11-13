@@ -138,6 +138,17 @@ diretto_casa() { # diretto_casa rootfs utente → la home dell'utente del contai
   printf '%s' "$c"
 }
 
+diretto_socket_x() { # diretto_socket_x rootfs n → /tmp/.X11-unix/X<n> del container porta al socket vero di Termux:X11
+  local dir="$1/tmp/.X11-unix" vero="$TMPDIR/.X11-unix/X$2"
+  local l="$dir/X$2"
+  if [[ -L $l && $(readlink "$l") == "$vero" ]]; then return 0; fi
+  # un socket vero lì (un server X nel container) non si tocca
+  if [[ -e $l && ! -L $l ]]; then return 0; fi
+  mkdir -p "$dir" 2>/dev/null || return 0
+  chmod 1777 "$dir" 2>/dev/null || true
+  ln -sfn "$vero" "$l" 2>/dev/null || true
+}
+
 diretto_run() { # diretto_run comando [argomenti] → esce come l'app; 97 = senza proot non si può (usare proot)
   local root d c real prog line u uid n zona rc=0 t0
   root=$(cx_rootfs) || return 97
@@ -236,6 +247,10 @@ diretto_run() { # diretto_run comando [argomenti] → esce come l'app; 97 = senz
   if [[ -n $va_pre ]]; then amb+=("${va_amb[@]}"); fi
   # il socket di X per intero: /tmp per l'app è quello del container, e il nome resta sotto i 108 caratteri
   amb+=(DISPLAY="$TMPDIR/.X11-unix/X${n:-0}")
+  # ...ma x11rb 0.13 (gli appunti di egui/arboard: tutte le app Craft) legge il percorso e poi si collega
+  # comunque a /tmp/.X11-unix/X<n>, che fakechroot porta nel /tmp del container: lì non c'era nulla e
+  # copia/incolla non funzionava in nessuna app Craft (13 novembre). Un collegamento al socket vero basta
+  diretto_socket_x "$root" "${n:-0}"
   zona=$(prop persist.sys.timezone)
   if [[ -n $zona && -f $root/usr/share/zoneinfo/$zona ]]; then amb+=(TZDIR="$root/usr/share/zoneinfo" TZ="$zona"); fi
   if [[ -n ${DESKTOP_STARTUP_ID:-} ]]; then amb+=(DESKTOP_STARTUP_ID="$DESKTOP_STARTUP_ID"); fi
