@@ -1,7 +1,8 @@
-"""archivio_dati.py — quanto spazio occupa cosa, per l'app Archiviazione (share/tod-archivio.py). Senza grafica.
+"""archivio_dati.py — quanto spazio occupa cosa, per Impostazioni → Archiviazione (share/tod-settings.py). Senza grafica.
 
 13 novembre 2026, Pietro: "ho 120 GB di roba su Termux, che cosa abbiamo combinato?" (era un registro di prova da
-62 GB in $PREFIX/tmp) → "fammi un'app tipo macOS che mi fa vedere la memoria occupata".
+62 GB in $PREFIX/tmp) → "fammi un'app tipo macOS che mi fa vedere la memoria occupata", poi "lo volevo nelle
+impostazioni": come macOS, Impostazioni → Generali → Archiviazione.
 
 Misura con `du` (molto più veloce di un giro in Python): tre misure in parallelo (casa di Termux, $PREFIX, il container)
 e poi le categorie per sottrazione, così niente è contato due volte. "Android e altre app" è quello che resta dello
@@ -327,6 +328,17 @@ def ultima():
         return r
     except (OSError, ValueError, KeyError):
         return None
+
+
+def leggibile(p):
+    """un percorso da mostrare: ~ per la casa di Termux, «Debian:» per il container, «Termux:» per $PREFIX"""
+    if p.startswith(ROOTFS):
+        return "Debian: " + (p[len(ROOTFS):] or "/")
+    if p.startswith(CASA):
+        return "~" + p[len(CASA):]
+    if p.startswith(PREFIX):
+        return "Termux: /usr" + p[len(PREFIX):]
+    return p
 
 
 def dimensione(n, it=True):

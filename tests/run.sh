@@ -2618,6 +2618,7 @@ print(m.leggi_du("4\t/a\nnon una riga\n12\t/a/b\n"), m.figli({"/a": 9, "/a/b": 1
 T = os.environ["ARCH_TMP"]
 print([(os.path.basename(p), aperto) for p, _n, aperto in m.temporanei_grandi([T], 5000, {T + "/grande.log"})],
       m.temporanei_grandi([T], 5000, set())[0][2])
+print(m.leggibile("/c/src/x"), m.leggibile("/r/usr/lib"), m.leggibile("/u/lib"), m.leggibile("/altro"))
 EOF
 )
   eq "categorie senza doppioni, Android = il resto, consigli, cache aperte salve, misure" "{'android': 5000, 'termux': 400, 'debian': 600, 'store': 80, 'dati': 330, 'documenti': 150, 'sviluppo': 400, 'cache': 140, 'temporanei': 700, 'cestino': 200} 3000 2000
@@ -2626,20 +2627,20 @@ EOF
 [] [('/c/.cache/chromium', 60)]
 62,3 GB 500 byte 1,5 MB 120 GB 1 GB 2.5 GB
 {'/a': 4096, '/a/b': 12288} [('/a/c', 5), ('/a/b', 1)]
-[('grande.log', True)] False" "$out"
-  has "voce nello Start" 'desktop_entry "$apps/tod-archivio.desktop" "Storage" "Archiviazione"' "$(cat "$ROOT/lib/desktop.sh")"
-  has "icona DeX OS (disco)" '"org.gnome.baobab"' "$(cat "$ROOT/share/dexos/dexos-icons.py")"
-  # la finestra (GTK: il Python di Termux): percorsi leggibili
-  local py=/data/data/com.termux/files/usr/bin/python3
-  if [[ -x $py ]] && "$py" -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null; then
-    out=$(env -u LD_PRELOAD TOD_TERMUX_HOME=/c TOD_CX_ROOTFS=/r PREFIX=/u "$py" -c 'import importlib.util as u, sys
-s = u.spec_from_file_location("m", sys.argv[1]); m = u.module_from_spec(s); s.loader.exec_module(m)
-print(m.gentile("/c/src/x"), m.gentile("/r/usr/lib"), m.gentile("/u/lib"), m.gentile("/altro"), sorted(m.SPIEGA) == sorted(k for k, *_ in m.D.CATEGORIE))' \
-      "$ROOT/share/tod-archivio.py" 2>&1)
-    has "Archiviazione: percorsi e spiegazioni" "~/src/x Debian: /usr/lib Termux: /usr/lib /altro True" "$out"
-  else
-    echo "  (PyGObject di Termux assente: finestra di Archiviazione saltata)"
-  fi
+[('grande.log', True)] False
+~/src/x Debian: /usr/lib Termux: /usr/lib /altro" "$out"
+  # Pietro: "lo volevo nelle impostazioni" → Impostazioni → Archiviazione (come macOS); niente app a parte nello Start
+  local s
+  s=$(cat "$ROOT/share/tod-settings.py")
+  has "voce Archiviazione nelle Impostazioni" '("archiviazione", T("Archiviazione", "Storage")' "$s"
+  has "il pannello" "def pane_archiviazione(self, box):" "$s"
+  has "Informazioni → Gestisci… apre Archiviazione" 'self.open_pane("archiviazione")' "$s"
+  local k
+  for k in android termux debian store dati documenti sviluppo cache temporanei cestino; do
+    has "spiegazione della categoria $k" "\"$k\": T(" "$(sed -n '/ARCH_SPIEGA = {/,/^    }/p' "$ROOT/share/tod-settings.py")"
+  done
+  has "la voce dell'app a parte si toglie" 'rm -f "$apps/tod-archivio.desktop"' "$(cat "$ROOT/lib/desktop.sh")"
+  hasnt "nessuna app a parte" "tod-archivio.py" "$(cat "$ROOT/lib/desktop.sh")"
 }
 
 test_gestione_attivita() { # 12 novembre, Pietro: Gestione attività e Cattura di XFCE "hanno l'aspetto Linux": nostre.

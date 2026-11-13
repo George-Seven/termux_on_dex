@@ -2,7 +2,7 @@
 """Impostazioni, come quelle di macOS: barra laterale con le voci, a destra il pannello.
 
   tod-settings.py [voce]        voce: rete, batteria, aspetto, schermo, suono, notifiche, telefono,
-                                tastiera, stampanti, app, aggiornamenti, info, avanzate
+                                tastiera, stampanti, app, archiviazione, aggiornamenti, info, avanzate
 
 Una finestra sola al posto dei tanti pannelli di XFCE. Le cose semplici si fanno qui (tema, sfondo,
 dimensioni, volume, non disturbare, app di Android...); per quelle complesse (scorciatoie, mouse,
@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 
 import gi
 
@@ -169,6 +170,15 @@ CSS = b"""
 .choice.selected { box-shadow: inset 0 0 0 2px @theme_selected_bg_color; }
 .thumb { border-radius: 8px; padding: 3px; }
 .thumb.selected { box-shadow: inset 0 0 0 3px @theme_selected_bg_color; }
+.arch-uso { font-size: 13pt; font-weight: bold; }
+.arch-legenda { font-size: 9pt; opacity: 0.8; }
+.arch-voce { padding: 9px 14px; border: none; border-radius: 0; background: none; box-shadow: none; }
+.arch-voce:hover { background-color: alpha(@theme_fg_color, 0.05); }
+.arch-voce label, .arch-voce image { color: @theme_fg_color; }
+.arch-voce:first-child { border-top-left-radius: 10px; border-top-right-radius: 10px; }
+.arch-voce:last-child { border-bottom-left-radius: 10px; border-bottom-right-radius: 10px; }
+.arch-misura { opacity: 0.7; font-feature-settings: "tnum"; }
+.arch-indietro { color: @theme_selected_bg_color; padding: 2px 6px 2px 0; }
 """
 
 
@@ -192,6 +202,8 @@ class Settings(Gtk.Window):
          "stampante stampare stampa scanner usb wifi pdf coda lavori driver"),
         ("app", T("App", "Apps"), "applications-system-symbolic", "orange",
          "app installate disinstalla rimuovi elimina predefinite browser apri con file"),
+        ("archiviazione", T("Archiviazione", "Storage"), "drive-harddisk-symbolic", "gray",
+         "spazio memoria disco occupato libero pieno pulisci cache cestino temporanei file grandi storage"),
         ("aggiornamenti", T("Aggiornamenti", "Updates"), "software-update-available-symbolic", "blue", "update pacchetti"),
         ("info", T("Informazioni", "About"), "help-about-symbolic", "gray", "dispositivo modello memoria spazio versione"),
         ("avanzate", T("Avanzate", "Advanced"), "preferences-other-symbolic", "gray", "gpu grafica sviluppo xfce"),
@@ -249,6 +261,7 @@ class Settings(Gtk.Window):
         outer.pack_start(self.stack, True, True, 0)
         self.built = {}
         self.gone = set()
+        self.arch_dati, self.arch_aperta, self.arch_in_misura = None, None, False
         self.show_all()
         self.sidebar.select_row(self.rows.get(first) or self.rows["aspetto"])
 
@@ -275,6 +288,8 @@ class Settings(Gtk.Window):
             page.show_all()
             self.built[key] = True
         self.stack.set_visible_child_name(key)
+        if key == "archiviazione" and self.arch_dati and time.time() - self.arch_dati[0].get("quando", 0) > 300:
+            self.arch_misura()   # come macOS: tornandoci dopo un po' si rifanno i conti
 
     # --- mattoncini come macOS: titolo, gruppi arrotondati con righe ---------------------
     def page(self, key):
@@ -1415,6 +1430,442 @@ class Settings(Gtk.Window):
                      self.switch(auto, lambda on: conf_set("AGGIORNAMENTI_AUTO", "1" if on else "0")),
                      T("All'avvio e ogni 6 ore; ti avvisa con una notifica.", "At start and every 6 hours, with a notification."))])
 
+    # --- Archiviazione (13 novembre, come macOS: Generali → Archiviazione; i conti in archivio_dati.py) ----------
+    ARCH_SPIEGA = {
+        "android": T("Foto, video, app del telefono e sistema Android: si gestiscono dalle impostazioni del telefono.",
+                     "Photos, videos, phone apps and Android itself: managed from the phone's settings."),
+        "termux": T("I programmi del desktop: XFCE, Python, GStreamer e tutto quello che lo fa funzionare.",
+                    "The desktop's programs: XFCE, Python, GStreamer and everything that makes it work."),
+        "debian": T("Il sistema Debian e le app che ci sono installate (LibreOffice, GIMP, VS Code…).",
+                    "The Debian system and the apps installed in it (LibreOffice, GIMP, VS Code…)."),
+        "store": T("Le app installate dallo Store.", "Apps installed from the Store."),
+        "dati": T("Impostazioni, accessi e file che le app salvano per conto loro.",
+                  "Settings, sign-ins and files the apps keep for themselves."),
+        "documenti": T("I tuoi file nella casa del desktop: Scrivania, download e il resto.",
+                       "Your files in the desktop's home: Desktop, downloads and the rest."),
+        "sviluppo": T("Sorgenti, compilazioni e prove: si possono rifare quando servono.",
+                      "Sources, builds and tests: they can be redone when needed."),
+        "cache": T("Copie che le app ricreano da sole quando servono.", "Copies the apps recreate by themselves when needed."),
+        "temporanei": T("File che le app usano mentre lavorano: di solito spariscono da soli.",
+                        "Files the apps use while working: they usually go away by themselves."),
+        "cestino": T("I file che hai buttato, finché non svuoti il Cestino.",
+                     "Files you threw away, until you empty the Trash."),
+    }
+
+    def pane_archiviazione(self, box):
+        import archivio_dati as AD
+        self.ad = AD
+        testa = Gtk.Box(spacing=8)
+        self.arch_stato = Gtk.Label(xalign=0)
+        self.arch_stato.get_style_context().add_class("hint")
+        testa.pack_start(self.arch_stato, True, True, 0)
+        self.arch_agg = Gtk.Button.new_from_icon_name("view-refresh-symbolic", Gtk.IconSize.BUTTON)
+        self.arch_agg.set_relief(Gtk.ReliefStyle.NONE)
+        self.arch_agg.set_tooltip_text(T("Misura di nuovo", "Measure again"))
+        self.arch_agg.connect("clicked", lambda *_: self.arch_misura())
+        testa.pack_end(self.arch_agg, False, False, 0)
+        self.arch_rotella = Gtk.Spinner()
+        testa.pack_end(self.arch_rotella, False, False, 0)
+        box.pack_start(testa, False, False, 0)
+        self.arch_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.pack_start(self.arch_box, False, False, 0)
+        self.arch_aperta = None
+        vecchia = AD.ultima()
+        if vecchia:   # subito l'ultima misura (e i consigli, che costano poco), poi i conti nuovi
+            self.arch_dati = (vecchia, AD.temporanei_grandi([os.path.join(AD.PREFIX, "tmp"),
+                                                             os.path.join(AD.ROOTFS, "tmp")]), AD.cache_pulibili(vecchia))
+            self.arch_mostra()
+        self.arch_misura()
+
+    def arch_colore_testo(self, w):
+        c = w.get_style_context().get_color(Gtk.StateFlags.NORMAL)
+        return c.red, c.green, c.blue
+
+    @staticmethod
+    def arch_rgb(h):
+        h = h.lstrip("#")
+        return tuple(int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+
+    @staticmethod
+    def arch_tondo(cr, x, y, w, h, r):
+        import math
+        r = min(r, w / 2, h / 2)
+        cr.new_sub_path()
+        cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+        cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+        cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+        cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
+        cr.close_path()
+
+    def arch_pallino(self, colore, lato=12):
+        """il quadratino tondo del colore della categoria; None = come lo spazio libero"""
+        a = Gtk.DrawingArea()
+        a.set_size_request(lato, lato)
+        a.set_valign(Gtk.Align.CENTER)
+
+        def disegna(w, cr):
+            self.arch_tondo(cr, 0, 0, lato, lato, lato * 0.3)
+            if colore:
+                cr.set_source_rgb(*self.arch_rgb(colore))
+            else:
+                cr.set_source_rgba(*self.arch_colore_testo(w), 0.14)
+            cr.fill()
+        a.connect("draw", disegna)
+        return a
+
+    def arch_barra(self, dati):
+        """la barra a colori; al passaggio del mouse dice cosa è quel pezzo"""
+        AD = self.ad
+        cat = dati["categorie"]
+        pezzi = [(k, cat[k]["byte"], col) for k, _it, _en, col, _i in AD.CATEGORIE if cat[k]["byte"] > 0]
+        totale = dati["totale"] or sum(n for _k, n, _c in pezzi)
+        nomi = {k: (it if ITALIAN else en) for k, it, en, *_ in AD.CATEGORIE}
+        a = Gtk.DrawingArea()
+        a.set_size_request(-1, 22)
+        a.set_has_tooltip(True)
+
+        def posizioni(larga):
+            x, out = 0.0, []
+            for k, n, col in pezzi:
+                l = larga * n / totale if totale else 0
+                out.append((k, n, col, x, l))
+                x += l
+            return out
+
+        def disegna(w, cr):
+            larga, alta = w.get_allocated_width(), w.get_allocated_height()
+            self.arch_tondo(cr, 0, 0, larga, alta, 6)
+            cr.save()
+            cr.clip_preserve()
+            cr.set_source_rgba(*self.arch_colore_testo(w), 0.14)   # lo spazio libero
+            cr.fill()
+            for _k, _n, col, x, l in posizioni(larga):
+                if l < 0.5:
+                    continue
+                cr.rectangle(x, 0, max(1.0, l), alta)
+                cr.set_source_rgb(*self.arch_rgb(col))
+                cr.fill()
+                if l > 3:   # una lineetta chiara tra un pezzo e l'altro, come macOS
+                    cr.rectangle(x + l - 1, 0, 1, alta)
+                    cr.set_source_rgba(1, 1, 1, 0.6)
+                    cr.fill()
+            cr.restore()
+            return False
+
+        def suggerimento(w, x, _y, _t, tip):
+            for k, n, _c, x0, l in posizioni(w.get_allocated_width()):
+                if x0 <= x < x0 + l:
+                    tip.set_text(f"{nomi[k]}: {AD.dimensione(n, ITALIAN)}")
+                    return True
+            tip.set_text(T(f"Libero: {AD.dimensione(dati['libero'], ITALIAN)}",
+                           f"Free: {AD.dimensione(dati['libero'], ITALIAN)}"))
+            return True
+        a.connect("draw", disegna)
+        a.connect("query-tooltip", suggerimento)
+        return a
+
+    def arch_mostra(self):
+        if self.arch_dati is None:
+            return
+        for f in self.arch_box.get_children():
+            self.arch_box.remove(f)
+            f.destroy()
+        if self.arch_aperta:
+            self.arch_dettaglio(self.arch_aperta)
+        else:
+            self.arch_panoramica()
+        self.arch_box.show_all()
+        quando = self.arch_dati[0].get("quando")
+        if not self.arch_in_misura and quando:
+            self.arch_stato.set_text(T(f"Misurato alle {time.strftime('%H:%M', time.localtime(quando))}",
+                                       f"Measured at {time.strftime('%H:%M', time.localtime(quando))}"))
+
+    def arch_panoramica(self):
+        AD, (dati, temp, pul) = self.ad, self.arch_dati
+        cat = dati["categorie"]
+        b = self.arch_box
+        tot = dati["totale"] or sum(v["byte"] for v in cat.values())
+        # il telefono e la barra
+        g = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin=16)
+        riga = Gtk.Box(spacing=12)
+        img = Gtk.Image.new_from_icon_name("drive-harddisk", Gtk.IconSize.DIALOG)
+        img.set_pixel_size(40)
+        riga.pack_start(img, False, False, 0)
+        nomi = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, valign=Gtk.Align.CENTER)
+        nomi.pack_start(Gtk.Label(label=T("Memoria del telefono", "Phone storage"), xalign=0), False, False, 0)
+        model = sh(["getprop", "ro.product.model"], timeout=3)
+        sotto = Gtk.Label(label=next((v for k, v in DEVICES.items() if model.startswith(k)), model) if model
+                          else T("Spazio interno", "Internal storage"), xalign=0)
+        sotto.get_style_context().add_class("hint")
+        nomi.pack_start(sotto, False, False, 0)
+        riga.pack_start(nomi, True, True, 0)
+        uso = Gtk.Label(label=T(f"{AD.dimensione(dati['usato'], ITALIAN)} di {AD.dimensione(tot, ITALIAN)} usati",
+                                f"{AD.dimensione(dati['usato'], ITALIAN)} of {AD.dimensione(tot, ITALIAN)} used"))
+        uso.get_style_context().add_class("arch-uso")
+        riga.pack_end(uso, False, False, 0)
+        g.pack_start(riga, False, False, 0)
+        g.pack_start(self.arch_barra(dati), False, False, 0)
+        legenda = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=14, row_spacing=4,
+                              max_children_per_line=5)
+        voci = [(col, it if ITALIAN else en) for k, it, en, col, _i in AD.CATEGORIE if cat[k]["byte"] > 0]
+        voci.append((None, T(f"Libero · {AD.dimensione(dati['libero'], ITALIAN)}",
+                             f"Free · {AD.dimensione(dati['libero'], ITALIAN)}")))
+        for col, testo in voci:
+            v = Gtk.Box(spacing=6)
+            v.pack_start(self.arch_pallino(col, 10), False, False, 0)
+            lab = Gtk.Label(label=testo)
+            lab.get_style_context().add_class("arch-legenda")
+            v.pack_start(lab, False, False, 0)
+            legenda.add(v)
+        g.pack_start(legenda, False, False, 0)
+        carta = Gtk.Box()
+        carta.get_style_context().add_class("group")
+        carta.pack_start(g, True, True, 0)
+        b.pack_start(carta, False, False, 0)
+        # consigli
+        righe = []
+        for k, n, extra in AD.consigli(dati, temp, pul):
+            if k == "temporanei":
+                righe.append(self.row(T("Elimina i file temporanei grandi", "Delete large temporary files"),
+                                      self.button(T("Elimina…", "Delete…"), self.arch_elimina_temporanei),
+                                      T(f"{len(extra)} file che nessun programma sta usando occupano "
+                                        f"{AD.dimensione(n, ITALIAN)} (il più grande: {os.path.basename(extra[0][0])}).",
+                                        f"{len(extra)} files no program is using take {AD.dimensione(n, ITALIAN)} "
+                                        f"(the largest: {os.path.basename(extra[0][0])}).")))
+            elif k == "cestino":
+                righe.append(self.row(T("Svuota il Cestino", "Empty the Trash"),
+                                      self.button(T("Svuota…", "Empty…"), self.arch_svuota_cestino),
+                                      T(f"Il Cestino occupa {AD.dimensione(n, ITALIAN)}.",
+                                        f"The Trash takes {AD.dimensione(n, ITALIAN)}.")))
+            else:
+                righe.append(self.row(T("Pulisci la cache", "Clean the cache"),
+                                      self.button(T("Pulisci…", "Clean…"), self.arch_pulisci_cache),
+                                      T(f"{AD.dimensione(n, ITALIAN)} di copie che le app ricreano quando servono "
+                                        "(quelle delle app aperte non si toccano).",
+                                        f"{AD.dimensione(n, ITALIAN)} of copies apps recreate when needed "
+                                        "(those of open apps are left alone).")))
+        if righe:
+            self.group(b, T("Consigli", "Recommendations"), righe)
+        # le categorie, dalla più grande: un clic apre il dettaglio
+        righe = []
+        for k, it, en, col, _i in sorted(AD.CATEGORIE, key=lambda c: -cat[c[0]]["byte"]):
+            if cat[k]["byte"] <= 0:
+                continue
+            bt = Gtk.Button()
+            bt.set_relief(Gtk.ReliefStyle.NONE)
+            bt.get_style_context().add_class("arch-voce")
+            h = Gtk.Box(spacing=12)
+            h.pack_start(self.arch_pallino(col, 14), False, False, 0)
+            h.pack_start(Gtk.Label(label=it if ITALIAN else en, xalign=0), True, True, 0)
+            m = Gtk.Label(label=AD.dimensione(cat[k]["byte"], ITALIAN))
+            m.get_style_context().add_class("arch-misura")
+            h.pack_start(m, False, False, 0)
+            h.pack_start(Gtk.Image.new_from_icon_name("go-next-symbolic", Gtk.IconSize.MENU), False, False, 0)
+            bt.add(h)
+            bt.connect("clicked", lambda _b, k=k: self.arch_apri(k))
+            righe.append(bt)
+        self.group(b, T("Cosa occupa lo spazio", "What uses the space"), righe)
+        nota = Gtk.Label(label=T("«Android e altre app» è il resto dello spazio occupato sul telefono: lo gestiscono le "
+                                 "impostazioni del telefono.", "“Android and other apps” is the rest of the used space "
+                                 "on the phone: the phone's settings manage it."), xalign=0, wrap=True)
+        nota.get_style_context().add_class("hint")
+        b.pack_start(nota, False, False, 0)
+
+    def arch_apri(self, k):
+        self.arch_aperta = k
+        self.arch_mostra()
+        sw = self.arch_box.get_ancestor(Gtk.ScrolledWindow)
+        if sw is not None:
+            sw.get_vadjustment().set_value(0)
+
+    def arch_dettaglio(self, k):
+        AD, (dati, temp, pul) = self.ad, self.arch_dati
+        nome = next((it if ITALIAN else en, col) for kk, it, en, col, _i in AD.CATEGORIE if kk == k)
+        cat = dati["categorie"][k]
+        b = self.arch_box
+        indietro = Gtk.Button()
+        indietro.set_relief(Gtk.ReliefStyle.NONE)
+        indietro.get_style_context().add_class("arch-indietro")
+        h = Gtk.Box(spacing=4)
+        h.pack_start(Gtk.Image.new_from_icon_name("go-previous-symbolic", Gtk.IconSize.MENU), False, False, 0)
+        h.pack_start(Gtk.Label(label=T("Tutte le categorie", "All categories")), False, False, 0)
+        indietro.add(h)
+        indietro.set_halign(Gtk.Align.START)
+        indietro.connect("clicked", lambda *_: (setattr(self, "arch_aperta", None), self.arch_mostra()))
+        b.pack_start(indietro, False, False, 0)
+        testa = Gtk.Box(spacing=10)
+        testa.pack_start(self.arch_pallino(nome[1], 18), False, False, 0)
+        t = Gtk.Label(label=nome[0], xalign=0)
+        t.get_style_context().add_class("arch-uso")
+        testa.pack_start(t, True, True, 0)
+        m = Gtk.Label(label=AD.dimensione(cat["byte"], ITALIAN))
+        m.get_style_context().add_class("arch-uso")
+        testa.pack_end(m, False, False, 0)
+        b.pack_start(testa, False, False, 0)
+        spiega = Gtk.Label(label=self.ARCH_SPIEGA[k], xalign=0, wrap=True)
+        spiega.get_style_context().add_class("hint")
+        b.pack_start(spiega, False, False, 0)
+        azione = {"cestino": (T("Svuota il Cestino…", "Empty the Trash…"), self.arch_svuota_cestino),
+                  "cache": (T("Pulisci la cache…", "Clean the cache…"), self.arch_pulisci_cache),
+                  "temporanei": (T("Elimina i file grandi non in uso…", "Delete large unused files…"),
+                                 self.arch_elimina_temporanei),
+                  "android": (T("Apri le impostazioni del telefono", "Open the phone's settings"),
+                              lambda: am("android.settings.INTERNAL_STORAGE_SETTINGS"))}.get(k)
+        if azione and (k != "temporanei" or any(not x[2] for x in temp)) and (k != "cache" or pul) and \
+                (k != "cestino" or cat["byte"] > 0):
+            bt = self.button(*azione)
+            bt.set_halign(Gtk.Align.START)
+            b.pack_start(bt, False, False, 0)
+        parti = [p for p in cat["parti"] if p[0]]
+        righe = []
+        for p, n in parti[:60]:
+            w = Gtk.Box(spacing=8)
+            m = Gtk.Label(label=AD.dimensione(n, ITALIAN))
+            m.get_style_context().add_class("arch-misura")
+            w.pack_start(m, False, False, 0)
+            if os.path.exists(p):
+                mostra = Gtk.Button.new_from_icon_name("folder-open-symbolic", Gtk.IconSize.BUTTON)
+                mostra.set_relief(Gtk.ReliefStyle.NONE)
+                mostra.set_tooltip_text(T("Mostra in Esplora file", "Show in File Explorer"))
+                mostra.connect("clicked", lambda _b, p=p: self.arch_mostra_file(p))
+                w.pack_start(mostra, False, False, 0)
+            righe.append(self.row(os.path.basename(p.rstrip("/")) or p, w, AD.leggibile(p)))
+        if righe:
+            self.group(b, None, righe)
+        if len(parti) > 60:
+            resto = sum(n for _p, n in parti[60:])
+            l = Gtk.Label(label=T(f"e altre {len(parti) - 60} cartelle: {AD.dimensione(resto, ITALIAN)}",
+                                  f"and {len(parti) - 60} more folders: {AD.dimensione(resto, ITALIAN)}"), xalign=0)
+            l.get_style_context().add_class("hint")
+            b.pack_start(l, False, False, 0)
+
+    def arch_mostra_file(self, p):
+        """Esplora file con la cartella scelta (D-Bus FileManager1 di Thunar; se no la cartella che la contiene)"""
+        uri = Gio.File.new_for_path(p).get_uri()
+        try:
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            bus.call_sync("org.freedesktop.FileManager1", "/org/freedesktop/FileManager1", "org.freedesktop.FileManager1",
+                          "ShowItems", GLib.Variant("(ass)", ([uri], "")), None, Gio.DBusCallFlags.NONE, 3000, None)
+        except GLib.Error:
+            spawn(["xdg-open", os.path.dirname(p)])
+
+    def arch_misura(self):
+        if self.arch_in_misura:
+            return
+        AD = self.ad
+        self.arch_in_misura = True
+        self.arch_rotella.start()
+        self.arch_agg.set_sensitive(False)
+        self.arch_stato.set_text(T("Misuro lo spazio…", "Measuring the space…"))
+
+        def lavoro():
+            try:
+                dati = AD.analizza(lambda n: GLib.idle_add(lambda: self.arch_stato.set_text(
+                    T(f"Misuro lo spazio… ({n} di 4)", f"Measuring the space… ({n} of 4)")) and False))
+                temp = AD.temporanei_grandi([os.path.join(AD.PREFIX, "tmp"), os.path.join(AD.ROOTFS, "tmp")])
+                pul = AD.cache_pulibili(dati)
+                ris = (dati, temp, pul)
+            except Exception as e:   # noqa: BLE001 - una misura andata male non chiude le Impostazioni
+                print(f"tod-settings: archiviazione: {type(e).__name__}: {e}", file=sys.stderr)
+                ris = None
+            GLib.idle_add(lambda: self.arch_misurato(ris) and False)
+        threading.Thread(target=lavoro, daemon=True).start()
+
+    def arch_misurato(self, ris):
+        self.arch_in_misura = False
+        self.arch_rotella.stop()
+        self.arch_agg.set_sensitive(True)
+        if ris is None:
+            self.arch_stato.set_text(T("Misura non riuscita", "Measuring failed"))
+            return
+        self.arch_dati = ris
+        self.arch_mostra()
+
+    def arch_chiedi(self, titolo, testo, si, pericoloso=True):
+        d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.WARNING,
+                              buttons=Gtk.ButtonsType.NONE, text=titolo)
+        d.format_secondary_text(testo)
+        d.add_button(T("Annulla", "Cancel"), Gtk.ResponseType.CANCEL)
+        bt = d.add_button(si, Gtk.ResponseType.OK)
+        if pericoloso:
+            bt.get_style_context().add_class("destructive-action")
+        d.set_default_response(Gtk.ResponseType.CANCEL)
+        tod_avviso.come_macos(d)
+        r = d.run()
+        d.destroy()
+        return r == Gtk.ResponseType.OK
+
+    def arch_dopo(self, lavoro):
+        """un'azione in sottofondo, poi una misura nuova"""
+        self.arch_stato.set_text(T("Libero lo spazio…", "Freeing space…"))
+        self.arch_rotella.start()
+
+        def giro():
+            try:
+                lavoro()
+            except Exception as e:   # noqa: BLE001
+                print(f"tod-settings: archiviazione: {type(e).__name__}: {e}", file=sys.stderr)
+            GLib.idle_add(lambda: (self.arch_rotella.stop(), self.arch_misura()) and False)
+        threading.Thread(target=giro, daemon=True).start()
+
+    def arch_elimina_temporanei(self):
+        AD = self.ad
+        liberi = [t for t in self.arch_dati[1] if not t[2]]
+        if not liberi:
+            return
+        n = sum(t[1] for t in liberi)
+        elenco = "\n".join(f"• {os.path.basename(p)} ({AD.dimensione(x, ITALIAN)})" for p, x, _a in liberi[:6])
+        if not self.arch_chiedi(T(f"Eliminare {len(liberi)} file temporanei?", f"Delete {len(liberi)} temporary files?"),
+                                T(f"Si libera {AD.dimensione(n, ITALIAN)}. Nessun programma li sta usando; non vanno nel "
+                                  "Cestino.\n\n", f"This frees {AD.dimensione(n, ITALIAN)}. No program is using them; "
+                                  "they don't go to the Trash.\n\n") + elenco, T("Elimina", "Delete")):
+            return
+
+        def lavoro():
+            in_uso = AD.aperti()   # di nuovo, subito prima: un programma potrebbe averli aperti nel frattempo
+            for p, _x, _a in liberi:
+                if p not in in_uso:
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+        self.arch_dopo(lavoro)
+
+    def arch_svuota_cestino(self):
+        AD = self.ad
+        n = self.arch_dati[0]["categorie"]["cestino"]["byte"]
+        if not self.arch_chiedi(T("Svuotare il Cestino?", "Empty the Trash?"),
+                                T(f"I file nel Cestino ({AD.dimensione(n, ITALIAN)}) vengono eliminati per sempre: non si "
+                                  "possono più recuperare.", f"The files in the Trash ({AD.dimensione(n, ITALIAN)}) are "
+                                  "deleted forever: they can't be recovered."), T("Svuota il Cestino", "Empty Trash")):
+            return
+
+        def lavoro():
+            try:
+                subprocess.run(["gio", "trash", "--empty"], timeout=600, check=True, capture_output=True)
+            except (OSError, subprocess.SubprocessError):
+                base = os.path.join(AD.CASA, ".local/share/Trash")
+                for sotto in ("files", "info"):
+                    shutil.rmtree(os.path.join(base, sotto), ignore_errors=True)
+                    os.makedirs(os.path.join(base, sotto), exist_ok=True)
+        self.arch_dopo(lavoro)
+
+    def arch_pulisci_cache(self):
+        AD = self.ad
+        pul = list(self.arch_dati[2])
+        if not pul:
+            return
+        n = sum(x for _p, x in pul)
+        nomi = ", ".join(os.path.basename(p) for p, _x in pul[:6])
+        if not self.arch_chiedi(T("Pulire la cache?", "Clean the cache?"),
+                                T(f"Si libera {AD.dimensione(n, ITALIAN)} ({nomi}). Le app ricreano le copie che servono; "
+                                  "la prima apertura può essere un po' più lenta.",
+                                  f"This frees {AD.dimensione(n, ITALIAN)} ({nomi}). Apps recreate the copies they "
+                                  "need; the first start may be a little slower."), T("Pulisci", "Clean"),
+                                pericoloso=False):
+            return
+        self.arch_dopo(lambda: [shutil.rmtree(p, ignore_errors=True) for p, _x in pul])
+
     def pane_info(self, box):
         model = sh(["getprop", "ro.product.model"]) or "?"
         name = next((v for k, v in DEVICES.items() if model.startswith(k)), model)
@@ -1452,8 +1903,12 @@ class Settings(Gtk.Window):
             rows.append(self.row(T("Chip", "Chip"), self.value(CHIPS.get(soc, soc))))
         if ram:
             rows.append(self.row(T("Memoria", "Memory"), self.value(ram)))
-        if disk:
-            rows.append(self.row(T("Spazio", "Storage"), self.value(disk)))
+        if disk:   # come "Impostazioni archiviazione…" di macOS
+            spazio = Gtk.Box(spacing=10)
+            spazio.pack_start(self.value(disk), False, False, 0)
+            spazio.pack_start(self.button(T("Gestisci…", "Manage…"), lambda: self.open_pane("archiviazione")),
+                              False, False, 0)
+            rows.append(self.row(T("Spazio", "Storage"), spazio))
         if android:
             sysname = f"Android {android}" + (f" · One UI {int(oneui) // 10000}" if oneui.isdigit() else "")
             rows.append(self.row(T("Telefono", "Phone software"), self.value(sysname)))
