@@ -455,6 +455,8 @@ session_hook() { # autostart dentro il desktop: DPI per lo schermo attuale, env 
   fi
   # il chip video per il Lettore: si ricompila solo se il sorgente è cambiato (qualche secondo, in sottofondo)
   (media_chip_compila || true) </dev/null >/dev/null 2>&1 &
+  # e per le app Chromium/Electron del container (lib/videochip.sh): pezzi, video.env, aiutante del chip
+  (videochip_start || true) </dev/null >/dev/null 2>&1 &
   # XFCE_TUNED: versione dei ritocchi (2 = compositore acceso e ombre); cambiandola si riapplicano
   if [[ $(conf_get DE xfce) == xfce && $(conf_get XFCE_TUNED 0) != 2 ]]; then
     xfce_first_run || true

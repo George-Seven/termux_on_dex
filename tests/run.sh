@@ -2541,6 +2541,72 @@ everywhere ''
 True" "$out"
 }
 
+test_video_chip_app() { # 13 novembre, Pietro: il video col chip "deve essere generale per tutti, tipo io installo una
+  # nuova app e ha già questa miglioria". lib/videochip.sh compila driver VA-API, shim, GBM (glibc del container) e
+  # l'aiutante (Termux); /etc/tod/video.env c'è solo col ponte pronto e acceso; diretto_run e tod-run lo danno a ogni
+  # app Chromium/Electron riconosciuta dalla sua cartella, solo con l'aiutante acceso
+  local d="$WORK/vchip_$$" out
+  mkdir -p "$d/bin" "$d/casa" "$d/stato" "$d/conf" "$d/prefix/include/va" "$d/root/lib/aarch64-linux-gnu" "$d/root/etc"
+  : >"$d/prefix/include/va/va_backend.h"
+  : >"$d/root/lib/aarch64-linux-gnu/libc.so.6"
+  cat >"$d/bin/clang" <<'EOF'
+#!/bin/sh
+echo "clang $*" >>"$VC_REG"
+while [ $# -gt 0 ]; do [ "$1" = -o ] && { echo finto >"$2"; chmod +x "$2"; exit 0; }; shift; done
+EOF
+  printf '#!/bin/sh\necho "-lavcodec -lavutil"\n' >"$d/bin/pkg-config"
+  chmod +x "$d/bin/clang" "$d/bin/pkg-config"
+  out=$(PATH="$d/bin:$PATH" TOD_TERMUX_HOME="$d/casa" PREFIX="$d/prefix" VC_REG="$d/reg" TOD_STATE_DIR="$d/stato" \
+    TOD_CONF="$d/conf/tod.conf" TOD_ROOT="$ROOT" VC_ROOT="$d/root" bash -c '
+    source "$TOD_ROOT/lib/core.sh" 2>/dev/null; source "$TOD_ROOT/lib/videochip.sh"
+    have() { command -v "$1" >/dev/null; }
+    log() { echo "LOG $*"; }
+    cx_rootfs() { echo "$VC_ROOT"; }
+    D=$TOD_TERMUX_HOME/.local/share/tod-va
+    videochip_compila && ls "$D" | tr "\n" " "; echo
+    readlink "$D/include/va"
+    videochip_compila; wc -l <"$VC_REG"
+    videochip_finto; cat "$D/finto/sys/dev/char/226:128/device/uevent" | sed -n 3p
+    videochip_pronto && echo pronto
+    videochip_env; cat "$VC_ROOT/etc/tod/video.env"
+    conf_set VIDEO_CHIP 0; videochip_env; [ -f "$VC_ROOT/etc/tod/video.env" ] || echo "spento: niente video.env"
+    conf_set VIDEO_CHIP 1; rm -f "$D/tod-gbm.so"; videochip_env; [ -f "$VC_ROOT/etc/tod/video.env" ] || echo "incompleto: niente video.env"' 2>&1)
+  local D="$d/casa/.local/share/tod-va"
+  has "i quattro pezzi compilati" "include tod-gbm.so tod-va-chip tod-va-shim.so tod_drv_video.so" "$out"
+  has "il driver per il glibc del container, con le sole intestazioni di libva" \
+    "clang --target=aarch64-linux-gnu -O2 -fPIC -shared -nostdlib -ffreestanding -fno-builtin -fuse-ld=lld -I$D/include -o $D/tod_drv_video.so.nuovo $ROOT/share/video/tod_drv_video.c $d/root/lib/aarch64-linux-gnu/libc.so.6" \
+    "$(cat "$d/reg")"
+  has "intestazioni: un collegamento a quelle di libva di Termux" "$d/prefix/include/va" "$out"
+  has "l'aiutante con ffmpeg" "-o $D/tod-va-chip.nuovo $ROOT/share/video/tod-va-chip.c -lavcodec -lavutil" "$(cat "$d/reg")"
+  has "non ricompilati se i sorgenti non cambiano" $'\n4\n' "$out"
+  has "scheda finta: un dispositivo PCI con i numeri veri (non \$VV)" "PCI_ID=5143:0840" "$out"
+  has "pronto" "pronto" "$out"
+  has "video.env: prima la GBM, poi lo shim" "VA_PRELOAD=\"$D/tod-gbm.so $D/tod-va-shim.so\"" "$out"
+  has "video.env: ANGLE su Vulkan e il nodo finto" "--use-angle=vulkan --ignore-gpu-blocklist --render-node-override=/dev/dri/renderD128" "$out"
+  has "video.env: il driver tod" "LIBVA_DRIVER_NAME=\"tod\"" "$out"
+  has "spento: le app partono come sempre" "spento: niente video.env" "$out"
+  has "un pezzo mancante: le app partono come sempre" "incompleto: niente video.env" "$out"
+  # gli agganci: ogni app Chromium/Electron (anche nuova), solo con l'aiutante acceso; installazione, sessione, comando
+  local s
+  s=$(cat "$ROOT/lib/diretto.sh")
+  has "diretto_run: video.env per le app Chromium/Electron, solo con l'aiutante acceso" \
+    'if ((chromium)) && [[ -f $root/etc/tod/video.env ]] && videochip_aiutante_vivo; then' "$s"
+  has "diretto_run: le nostre librerie davanti" 'LD_PRELOAD="${va_pre:+$va_pre }$pre"' "$s"
+  has "diretto_run: lo shim riconosce i processi dell'app" 'TOD_VA_PROG="${real#"$root"}"' "$s"
+  s=$(cat "$ROOT/lib/container.sh")
+  has "tod-run (proot): lo stesso" 'export TOD_VA_PROG="$p" LD_PRELOAD="$VA_PRELOAD${LD_PRELOAD:+ $LD_PRELOAD}"' "$s"
+  has "libva nel container" "libva2 libva-drm2" "$(sed -n 's/^CX_AIUTI=//p' "$ROOT/lib/container.sh")"
+  has "a ogni avvio del desktop" "(videochip_start || true)" "$(cat "$ROOT/lib/session.sh")"
+  has "nell'installazione" 'videochip_install' "$(cat "$ROOT/lib/installer.sh")"
+  has "negli aggiornamenti" 'videochip_install || warn' "$(cat "$ROOT/lib/maint.sh")"
+  has "tod videochip" "videochip | video-chip) videochip_cli" "$(cat "$ROOT/tod")"
+  s=$(cat "$ROOT/share/video/tod_drv_video.c")
+  has "driver: senza l'aiutante non parte (mai un video finto)" "aiutante tod-va-chip non raggiungibile: il driver non parte" "$s"
+  has "driver: avvio per ogni versione di libva (Debian 2.22, Termux 2.24)" "AVVIO(22) AVVIO(23) AVVIO(24)" "$s"
+  has "driver: niente motivo di prova se il chip non decodifica" "return VA_STATUS_ERROR_DECODING_ERROR;" "$s"
+  has "shim: resta nei processi dell'app, si toglie dagli altri" 'getenv("TOD_VA_PROG")' "$(cat "$ROOT/share/video/tod-va-shim.c")"
+}
+
 test_video_col_chip() { # 12 novembre: il Lettore decodifica col chip del telefono (MediaCodec via ffmpeg) con
   # share/media/tod-chip.c. Si compila sul telefono solo se il sorgente è cambiato; se il chip rifiuta un file si torna
   # al processore. Trappola trovata: senza i fili binder (ABinderProcess_startThreadPool) il chip prende 8 pacchetti e

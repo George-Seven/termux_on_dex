@@ -236,6 +236,7 @@ installer_steps() {
   # dischi USB: tod-lkl e le sue librerie (scaricati, o compilati se non si può), ntfs-3g nel container
   if usb_on; then _step usb "$(t s_usb)" usb_install; fi
   if rete_on; then _step rete "$(t s_rete)" rete_install; fi
+  if videochip_on; then _step videochip "$(t s_videochip)" videochip_install; fi
   _step integrate "$(t s_integrate)" installer_integrate
   # tema, icone, cartelle e barra già nei file: il desktop parte la prima volta già sistemato
   if [[ $de == xfce ]]; then _step preseed "$(t s_preseed)" session_preseed; fi

@@ -105,7 +105,7 @@ cx_startup_watch() { # in sottofondo: spegne il cursore di attesa alla prima fin
 # app di Termux. cups (senza i consigliati: solo cups-driverd, cups-deviced, rastertopwg) e openprinting-ppds: senza
 # cups-driverd CUPS non elenca NESSUN driver ("lpinfo: cups-driverd failed to execute"), e ogni stampante che non sia
 # AirPrint restava senza (12 novembre, la Ricoh MP C2011 di Pietro: i suoi driver PXL/PS/PDF stanno in openprinting-ppds).
-CX_AIUTI="zenity cups-daemon cups-filters cups-core-drivers cups openprinting-ppds"
+CX_AIUTI="zenity cups-daemon cups-filters cups-core-drivers cups openprinting-ppds libva2 libva-drm2"
 
 cx_install() {
   local u loc
@@ -186,6 +186,21 @@ export XDG_RUNTIME_DIR="/tmp/xdg-$(id -u)"
 mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null && chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null
 cd "$HOME" 2>/dev/null || true
 if [ "$#" -eq 0 ]; then exec "${SHELL:-/bin/bash}" -l; fi
+# video col chip (lib/videochip.sh, come diretto_run): le app Chromium/Electron partono col driver VA-API "tod"
+vp=$(cat /tmp/tod-va-chip.pid 2>/dev/null || true)
+if [ -f "$E/video.env" ] && [ -n "$vp" ] && grep -q tod-va-chip "/proc/$vp/cmdline" 2>/dev/null; then
+  p=$(command -v "$1" 2>/dev/null || true)
+  p=$(readlink -f "$p" 2>/dev/null || true)
+  d=${p%/*}
+  if [ -n "$p" ] && { [ -e "$d/chrome-sandbox" ] || [ -e "$d/resources/app.asar" ] || [ -e "$d/resources.pak" ]; }; then
+    set -a; . "$E/video.env"; set +a
+    export TOD_VA_PROG="$p" LD_PRELOAD="$VA_PRELOAD${LD_PRELOAD:+ $LD_PRELOAD}"
+    prog=$1
+    shift
+    # shellcheck disable=SC2086
+    set -- "$prog" $VA_FLAGS "$@"
+  fi
+fi
 exec "$@"
 EOF
 )

@@ -167,9 +167,33 @@ diretto_run() { # diretto_run comando [argomenti] → esce come l'app; 97 = senz
   real=$(realpath -m -s "$real")   # /usr/bin/../lib/x → /usr/lib/x (senza seguire i link: sono del container)
   diretto_elf "$real" || return 97
   # Chromium ed Electron: /dev/shm su Android non c'è (memoria condivisa in TMPDIR)
-  local dir=${real%/*}
+  local dir=${real%/*} chromium=0
   if [[ -e $dir/chrome-sandbox || -e $dir/resources/app.asar || -e $dir/resources.pak ]]; then
+    chromium=1
     if [[ " ${args[*]} " != *" --disable-dev-shm-usage "* ]]; then args=(--disable-dev-shm-usage "${args[@]}"); fi
+  fi
+  # video col chip (lib/videochip.sh): ogni app Chromium/Electron, anche installata dopo, parte col driver VA-API "tod"
+  local va_pre="" va_flags=""
+  local -a va_amb=()
+  # (solo con l'aiutante del chip acceso: senza, l'app parte come sempre, grafica compresa)
+  if ((chromium)) && [[ -f $root/etc/tod/video.env ]] && videochip_aiutante_vivo; then
+    local vl vv
+    while IFS= read -r vl; do
+      vv=${vl#*=}
+      vv=${vv#\"}
+      vv=${vv%\"}
+      case $vl in
+        VA_PRELOAD=*) va_pre=$vv ;;
+        VA_FLAGS=*) va_flags=$vv ;;
+        [A-Za-z_]*=*) va_amb+=("${vl%%=*}=$vv") ;;
+      esac
+    done <"$root/etc/tod/video.env"
+    if [[ -n $va_pre ]]; then
+      va_amb+=(TOD_VA_PROG="${real#"$root"}")   # così lo shim riconosce i processi dell'app (vedi tod-va-shim.c)
+      local -a vf
+      read -r -a vf <<<"$va_flags"
+      args=("${vf[@]}" "${args[@]}")
+    fi
   fi
   u=$(cx_user)
   uid=$(awk -F: -v u="$u" '$1 == u { print $3 }' "$root/etc/passwd")
@@ -189,7 +213,7 @@ diretto_run() { # diretto_run comando [argomenti] → esce come l'app; 97 = senz
     GLIBC_TUNABLES=glibc.pthread.rseq=0
     FAKECHROOT_BASE="$root" FAKECHROOT_ELFLOADER="$d/ld.so" FAKECHROOT_ELFLOADER_OPT_ARGV0=--argv0
     FAKECHROOT_EXCLUDE_PATH="$fuori"
-    LD_PRELOAD="$pre" LD_LIBRARY_PATH="$(diretto_librerie "$root" "$d")"
+    LD_PRELOAD="${va_pre:+$va_pre }$pre" LD_LIBRARY_PATH="$(diretto_librerie "$root" "$d")"
     TOD_FS_RUN="$TMPDIR/tod-usb"
     TOD_DIRETTO_PROOT="$TOD_ROOT/share/diretto/tod-proot" TOD_DIRETTO_THOME="${TOD_TERMUX_HOME:-$HOME}"
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -209,6 +233,7 @@ diretto_run() { # diretto_run comando [argomenti] → esce come l'app; 97 = senz
       case $l in DISPLAY=* | PULSE_SERVER=*) ;; [A-Za-z_]*=*) amb+=("$l") ;; esac
     done <"$root/etc/tod/$f.env"
   done
+  if [[ -n $va_pre ]]; then amb+=("${va_amb[@]}"); fi
   # il socket di X per intero: /tmp per l'app è quello del container, e il nome resta sotto i 108 caratteri
   amb+=(DISPLAY="$TMPDIR/.X11-unix/X${n:-0}")
   zona=$(prop persist.sys.timezone)
