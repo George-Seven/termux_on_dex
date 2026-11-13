@@ -2376,6 +2376,62 @@ test_diretto_execvpe() { # 6 novembre: execvpe del glibc cerca nel PATH senza fa
   has "cercata nel PATH come execvp" 'if (f) return execve(f, argv, envp);' "$s"
 }
 
+test_tastiera_mouse() { # 13 novembre, Pietro: "i pannelli di tastiera e mouse sono la cosa che mi dà più fastidio di
+  # tutti" → Impostazioni → Tastiera (con le Scorciatoie) e Mouse al posto delle finestre di XFCE. I conti delle
+  # scorciatoie (share/scorciatoie_dati.py) su un elenco finto di xfconf-query -lv: doppioni nascosti, conflitti, nomi
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(PREFIX=/u _stampa_py "$ROOT/share/scorciatoie_dati.py" <<'EOF'
+t = """/commands/custom/<Super><Shift>4 python3 /x/tod-cattura.py
+/commands/custom/<Super><Shift>dollar python3 /x/tod-cattura.py
+/commands/custom/<Super><Shift>3 python3 /x/tod-cattura.py --schermo
+/commands/custom/Print python3 /x/tod-cattura.py --schermo
+/commands/custom/Super_L /u/bin/tod-start
+/commands/custom/override true
+/commands/custom/<Primary><Alt>t exo-open --launch TerminalEmulator
+/xfwm4/custom/<Alt>F4 close_window_key
+/xfwm4/custom/<Super>Left tile_left_key
+/xfwm4/custom/<Alt>Tab cycle_windows_key
+riga strana"""
+v = m.leggi(t)
+A = {a[1]: a for a in m.AZIONI}
+print(len(v), [k for _p, k in m.di(A["zona"], v)], sorted(m.tutte_di(A["zona"], v)))
+print([k for _p, k in m.di(A["schermo"], v)], [k for _p, k in m.di(A["start"], v)], m.di(A["finestra"], v))
+print(m.comando_di(A["zona"], v), "|", m.comando_di(A["finestra"], v).endswith("/share/tod-cattura.py --finestra"))
+a, p = m.chi_usa("<Shift><Super>4", v)
+print(a[1], p, m.chi_usa("<Super><Shift>4", v, salvo=A["zona"]), m.chi_usa("<Control><Alt>T", v)[0][1])
+print(m.chi_usa("<Super>z", v), m.chi_usa("<Alt>F4", v)[0][1])
+print(m.normale("<Shift><Control>A"), m.normale("<Super><Shift>numbersign"))
+print(m.etichetta("<Super><Shift>4"), "|", m.etichetta("<Primary><Alt>Delete"), "|", m.etichetta("Print"), "|",
+      m.etichetta("Super_L", False), "|", m.etichetta("<Alt>KP_Up"), "|", m.etichetta("<Shift><Super>t"), "|",
+      m.etichetta("HomePage"), "|", m.etichetta("XF86WWW", False), "|", m.etichetta("XF86Nuovo"))
+print(all(g in [x[0] for x in m.GRUPPI] for g, *_ in m.AZIONI), len({a[1] for a in m.AZIONI}) == len(m.AZIONI))
+EOF
+)
+  eq "scorciatoie: doppioni nascosti, comando esistente, conflitti, nomi in chiaro" "10 ['<Super><Shift>4'] ['/commands/custom/<Super><Shift>4', '/commands/custom/<Super><Shift>dollar']
+['<Super><Shift>3', 'Print'] ['Super_L'] []
+python3 /x/tod-cattura.py | True
+zona /commands/custom/<Super><Shift>4 (None, None) terminale
+(None, None) close_window_key
+<Primary><Shift>a <Shift><Super>3
+Win + Maiusc + 4 | Ctrl + Alt + Canc | Stamp | Win | Alt + ↑ (tastierino) | Win + Maiusc + T | Tasto Pagina iniziale | Internet key | Nuovo
+True True" "$out"
+  local s
+  s=$(cat "$ROOT/share/tod-settings.py")
+  has "voce Tastiera" '("tastiera", T("Tastiera", "Keyboard")' "$s"
+  has "voce Mouse" '("mouse", T("Mouse", "Mouse")' "$s"
+  has "il pannello Mouse" "def pane_mouse(self, box):" "$s"
+  has "ripetizione dei tasti (la fa X: Termux:X11 ignora quella di Android)" '"/Default/KeyRepeat/Rate"' "$s"
+  has "la finestrella si prende la tastiera (sennò Stamp scatta invece di essere registrato)" "sede.grab(" "$s"
+  has "tasto principale per tutti i dispositivi" 'per_tutti("RightHanded"' "$s"
+  hasnt "niente più finestra di XFCE per la tastiera" "xfce4-keyboard-settings" "$s"
+  local n
+  for n in keyboard:tastiera mouse:mouse; do
+    has "xfce4-${n%%:*}-settings apre le nostre Impostazioni" "tod-settings.py\" ${n#*:}" \
+      "$(cat "$ROOT/share/bin/xfce4-${n%%:*}-settings")"
+  done
+}
+
 _stampa_py() { # _stampa_py FILE: python con FILE caricato come modulo m; il codice della prova arriva da stdin
   python3 -c 'import importlib.util as u, sys
 s = u.spec_from_file_location("m", sys.argv[1]); m = u.module_from_spec(s); s.loader.exec_module(m)

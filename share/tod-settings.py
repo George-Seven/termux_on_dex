@@ -2,7 +2,7 @@
 """Impostazioni, come quelle di macOS: barra laterale con le voci, a destra il pannello.
 
   tod-settings.py [voce]        voce: rete, batteria, aspetto, schermo, suono, notifiche, telefono,
-                                tastiera, stampanti, app, archiviazione, aggiornamenti, info, avanzate
+                                tastiera, mouse, stampanti, app, archiviazione, aggiornamenti, info, avanzate
 
 Una finestra sola al posto dei tanti pannelli di XFCE. Le cose semplici si fanno qui (tema, sfondo,
 dimensioni, volume, non disturbare, app di Android...); per quelle complesse (scorciatoie, mouse,
@@ -128,6 +128,27 @@ def xq(channel, prop, *set_args):
     return sh(["xfconf-query", "-c", channel, "-p", prop])
 
 
+def xf_valore(canale, prop, predefinito):
+    """un valore di xfconf con il suo tipo (bool, int o testo); se non c'è, il predefinito di XFCE"""
+    v = xq(canale, prop)
+    if not v:
+        return predefinito
+    if isinstance(predefinito, bool):
+        return v.strip().lower() == "true"
+    if isinstance(predefinito, int):
+        try:
+            return int(float(v))
+        except ValueError:
+            return predefinito
+    return v
+
+
+def xf_scrivi(canale, prop, valore):
+    tipo = "bool" if isinstance(valore, bool) else "int" if isinstance(valore, int) else "string"
+    testo = ("true" if valore else "false") if isinstance(valore, bool) else str(valore)
+    sh(["xfconf-query", "-c", canale, "-p", prop, "-n", "-t", tipo, "-s", testo])
+
+
 def phone_state():
     try:
         return json.load(open(os.path.join(TMP, "tod-phone.json")))
@@ -196,8 +217,10 @@ class Settings(Gtk.Window):
         ("notifiche", T("Notifiche", "Notifications"), "preferences-system-notifications-symbolic", "red",
          "non disturbare avvisi"),
         ("telefono", T("Telefono", "Phone"), "phone-symbolic", "teal", "android app notifiche telefono"),
-        ("tastiera", T("Tastiera e mouse", "Keyboard & Mouse"), "input-keyboard-symbolic", "gray",
-         "layout lingua scorciatoie mouse puntatore"),
+        ("tastiera", T("Tastiera", "Keyboard"), "input-keyboard-symbolic", "gray",
+         "layout lingua scorciatoie ripetizione tasti bloc num cursore lampeggiante combinazioni"),
+        ("mouse", T("Mouse", "Mouse"), "input-mouse-symbolic", "gray",
+         "puntatore velocità doppio clic scorrimento naturale tasto destro sinistro mancino trackpad"),
         ("stampanti", T("Stampanti e scanner", "Printers & Scanners"), "printer-symbolic", "gray",
          "stampante stampare stampa scanner usb wifi pdf coda lavori driver"),
         ("app", T("App", "Apps"), "applications-system-symbolic", "orange",
@@ -872,7 +895,56 @@ class Settings(Gtk.Window):
             self.row(T("Batteria, rete e notifiche", "Battery, network and notifications"),
                      self.value(T("Attive", "Active") if api else T("Serve Termux:API", "Termux:API needed")))])
 
+    # --- Tastiera e Mouse (13 novembre, Pietro: "i pannelli di tastiera e mouse sono la cosa che mi dà più fastidio di
+    # tutti"): niente più finestre di XFCE. I valori restano quelli di XFCE (xfconf: keyboards, pointers, xsettings,
+    # xfce4-keyboard-shortcuts), che xfsettingsd applica subito. Con Termux:X11: la ripetizione dei tasti la fa il server X
+    # (Termux:X11 ignora quella di Android: InputEventSender.java), quindi velocità e ritardo funzionano; il puntatore
+    # invece arriva già posizionato dal telefono (pointerCapture spento), quindi la sua velocità la decide DeX.
+    def piu_tardi(self, chiave, fatto, ms=250):
+        """un cursore scrive solo quando ci si ferma (non a ogni passo)"""
+        if not hasattr(self, "_tardi"):
+            self._tardi = {}
+        if chiave in self._tardi:
+            GLib.source_remove(self._tardi[chiave])
+
+        def ora():
+            self._tardi.pop(chiave, None)
+            fatto()
+            return False
+        self._tardi[chiave] = GLib.timeout_add(ms, ora)
+
+    def cursore(self, chiave, valore, minimo, massimo, sinistra, destra, cambia, inverti=False):
+        """un cursore come quelli di macOS, con le parole agli estremi (inverti: a sinistra il valore più alto)"""
+        adj = Gtk.Adjustment(value=valore, lower=minimo, upper=massimo, step_increment=1, page_increment=10)
+        sc = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=adj, draw_value=False)
+        sc.set_size_request(240, -1)
+        sc.set_inverted(inverti)
+        sc.add_mark(massimo if inverti else minimo, Gtk.PositionType.BOTTOM, sinistra)
+        sc.add_mark(minimo if inverti else massimo, Gtk.PositionType.BOTTOM, destra)
+        sc.connect("value-changed", lambda w: self.piu_tardi(chiave, lambda: cambia(int(round(w.get_value())))))
+        return sc
+
     def pane_tastiera(self, box):
+        self.kb_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.pack_start(self.kb_box, False, False, 0)
+        self.kb_scorciatoie = False
+        self.kb_mostra()
+
+    def kb_mostra(self):
+        for f in self.kb_box.get_children():
+            self.kb_box.remove(f)
+            f.destroy()
+        if self.kb_scorciatoie:
+            self.kb_pagina_scorciatoie()
+        else:
+            self.kb_pagina_tastiera()
+        self.kb_box.show_all()
+        sw = self.kb_box.get_ancestor(Gtk.ScrolledWindow)
+        if sw is not None:
+            sw.get_vadjustment().set_value(0)
+
+    def kb_pagina_tastiera(self):
+        b = self.kb_box
         cur = xq("keyboard-layout", "/Default/XkbLayout") or "it"
         combo = Gtk.ComboBoxText()
         for code, name in LAYOUTS:
@@ -881,13 +953,208 @@ class Settings(Gtk.Window):
             combo.append(cur, cur)
             combo.set_active_id(cur)
         combo.connect("changed", lambda c: self.set_layout(c.get_active_id()))
-        self.group(box, T("Tastiera", "Keyboard"), [
+        rip = xf_valore("keyboards", "/Default/KeyRepeat", True)
+        vel = self.cursore("rate", xf_valore("keyboards", "/Default/KeyRepeat/Rate", 20), 2, 60,
+                           T("Lenta", "Slow"), T("Veloce", "Fast"),
+                           lambda v: xf_scrivi("keyboards", "/Default/KeyRepeat/Rate", v))
+        rit = self.cursore("delay", xf_valore("keyboards", "/Default/KeyRepeat/Delay", 500), 150, 1500,
+                           T("Lungo", "Long"), T("Breve", "Short"),
+                           lambda v: xf_scrivi("keyboards", "/Default/KeyRepeat/Delay", v), inverti=True)
+
+        def ripeti(acceso):
+            xf_scrivi("keyboards", "/Default/KeyRepeat", acceso)
+            vel.set_sensitive(acceso)
+            rit.set_sensitive(acceso)
+        vel.set_sensitive(rip)
+        rit.set_sensitive(rip)
+        prova = Gtk.Entry(placeholder_text=T("Tieni premuto un tasto per provare", "Hold a key down to try it"))
+        prova.set_size_request(260, -1)
+        self.group(b, None, [
             self.row(T("Lingua della tastiera", "Keyboard layout"), combo),
+            self.row(T("Ripetizione dei tasti", "Key repeat"), self.switch(rip, ripeti),
+                     T("Tenendo premuto un tasto, il carattere si ripete.", "Holding a key down repeats the character.")),
+            self.row(T("Velocità di ripetizione", "Key repeat rate"), vel),
+            self.row(T("Ritardo prima della ripetizione", "Delay until repeat"), rit),
+            self.row(T("Prova", "Try it"), prova)])
+        self.group(b, None, [
+            self.row(T("Bloc Num acceso all'avvio", "Num Lock on at startup"),
+                     self.switch(xf_valore("keyboards", "/Default/Numlock", False),
+                                 lambda a: xf_scrivi("keyboards", "/Default/Numlock", a))),
+            self.row(T("Cursore del testo lampeggiante", "Blinking text cursor"),
+                     self.switch(xf_valore("xsettings", "/Net/CursorBlink", True),
+                                 lambda a: xf_scrivi("xsettings", "/Net/CursorBlink", a)))])
+        self.group(b, T("Scorciatoie", "Shortcuts"), [
             self.row(T("Scorciatoie da tastiera", "Keyboard shortcuts"),
-                     self.button(T("Apri", "Open"), lambda: spawn(["xfce4-keyboard-settings"])))])
-        self.group(box, T("Mouse e touchpad", "Mouse & touchpad"), [
-            self.row(T("Velocità e pulsanti", "Speed and buttons"),
-                     self.button(T("Apri", "Open"), lambda: spawn(["xfce4-mouse-settings"])))])
+                     self.button(T("Modifica…", "Edit…"), lambda: (setattr(self, "kb_scorciatoie", True), self.kb_mostra())),
+                     T("Le combinazioni di tasti per lo Start, le schermate, le app e le finestre.",
+                       "Key combinations for Start, screenshots, apps and windows."))])
+
+    def kb_voci(self):
+        import scorciatoie_dati as SD
+        return SD.leggi(sh(["xfconf-query", "-c", "xfce4-keyboard-shortcuts", "-lv"]))
+
+    def kb_pagina_scorciatoie(self):
+        import scorciatoie_dati as SD
+        b = self.kb_box
+        voci = self.kb_voci()
+        indietro = Gtk.Button()
+        indietro.set_relief(Gtk.ReliefStyle.NONE)
+        indietro.get_style_context().add_class("arch-indietro")
+        h = Gtk.Box(spacing=4)
+        h.pack_start(Gtk.Image.new_from_icon_name("go-previous-symbolic", Gtk.IconSize.MENU), False, False, 0)
+        h.pack_start(Gtk.Label(label=T("Tastiera", "Keyboard")), False, False, 0)
+        indietro.add(h)
+        indietro.set_halign(Gtk.Align.START)
+        indietro.connect("clicked", lambda *_: (setattr(self, "kb_scorciatoie", False), self.kb_mostra()))
+        b.pack_start(indietro, False, False, 0)
+        t = Gtk.Label(label=T("Scorciatoie da tastiera", "Keyboard shortcuts"), xalign=0)
+        t.get_style_context().add_class("arch-uso")
+        b.pack_start(t, False, False, 0)
+        nota = Gtk.Label(label=T("Fai clic su «Cambia» e premi la nuova combinazione: vale subito. "
+                                 "Win è il tasto con il logo (in DeX anche il tasto Samsung).",
+                                 "Click “Change” and press the new combination: it applies right away. "
+                                 "Win is the logo key (in DeX also the Samsung key)."), xalign=0, wrap=True)
+        nota.get_style_context().add_class("hint")
+        b.pack_start(nota, False, False, 0)
+        for g, it, en in SD.GRUPPI:
+            righe = []
+            for a in SD.AZIONI:
+                if a[0] != g:
+                    continue
+                combos = SD.di(a, voci)
+                w = Gtk.Box(spacing=8)
+                # al massimo due combinazioni, sennò la finestra si allarga (le altre restano e funzionano)
+                nomi = [SD.etichetta(k, ITALIAN) for _p, k in combos]
+                lab = Gtk.Label(label="   ".join(nomi[:2]) + ("   …" if len(nomi) > 2 else "") or T("Nessuna", "None"))
+                lab.set_tooltip_text("\n".join(nomi) if len(nomi) > 2 else None)
+                lab.get_style_context().add_class("dim-label")
+                w.pack_start(lab, False, False, 0)
+                w.pack_start(self.button(T("Cambia…", "Change…"), lambda a=a: self.kb_registra(a)), False, False, 0)
+                righe.append(self.row(a[2] if ITALIAN else a[3], w))
+            self.group(b, it if ITALIAN else en, righe)
+
+    def kb_registra(self, a):
+        """la finestrella che registra la nuova combinazione. Si prende tutta la tastiera (come fa XFCE): sennò un
+        tasto già usato (Stamp, Win+Maiusc+4…) farebbe partire la sua azione invece di essere registrato."""
+        nome = a[2] if ITALIAN else a[3]
+        d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.INFO,
+                              buttons=Gtk.ButtonsType.NONE, text=T(f"Nuova combinazione per «{nome}»", f"New shortcut for “{nome}”"))
+        d.format_secondary_text(T("Premi i tasti insieme. Esc annulla, ⌫ toglie la scorciatoia.",
+                                  "Press the keys together. Esc cancels, ⌫ removes the shortcut."))
+        d.add_button(T("Annulla", "Cancel"), Gtk.ResponseType.CANCEL)
+        tod_avviso.come_macos(d)
+        preso = {}
+        mod = Gdk.ModifierType
+        modificatori = {"Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", "Super_L", "Super_R",
+                        "Meta_L", "Meta_R", "ISO_Level3_Shift", "Hyper_L", "Hyper_R"}
+
+        def premuto(_w, ev):
+            k = Gdk.keyval_name(ev.keyval) or ""
+            m = ev.state & (mod.CONTROL_MASK | mod.SHIFT_MASK | mod.MOD1_MASK | mod.SUPER_MASK | mod.MOD4_MASK)
+            if k == "Escape" and not m:
+                d.response(Gtk.ResponseType.CANCEL)
+            elif k == "BackSpace" and not m:
+                preso["tasti"] = ""
+                d.response(Gtk.ResponseType.OK)
+            elif k in modificatori:
+                preso["mod"] = k
+            else:
+                s = ("<Primary>" if m & mod.CONTROL_MASK else "") + ("<Alt>" if m & mod.MOD1_MASK else "") + \
+                    ("<Shift>" if m & mod.SHIFT_MASK else "") + ("<Super>" if m & (mod.SUPER_MASK | mod.MOD4_MASK) else "")
+                preso["tasti"] = s + k
+                d.response(Gtk.ResponseType.OK)
+            return True
+
+        def lasciato(_w, ev):
+            k = Gdk.keyval_name(ev.keyval) or ""
+            if k in ("Super_L", "Super_R") and preso.get("mod") == k and "tasti" not in preso:
+                preso["tasti"] = k   # Win da solo (lo Start)
+                d.response(Gtk.ResponseType.OK)
+            return True
+        d.connect("key-press-event", premuto)
+        d.connect("key-release-event", lasciato)
+        sede = Gdk.Display.get_default().get_default_seat()
+
+        def prendi(*_):
+            sede.grab(d.get_window(), Gdk.SeatCapabilities.KEYBOARD, False, None, None, None, None)
+            return False
+        d.connect("map-event", prendi)
+        r = d.run()
+        sede.ungrab()
+        d.destroy()
+        if r == Gtk.ResponseType.OK and "tasti" in preso:
+            self.kb_applica(a, preso["tasti"])
+
+    def kb_applica(self, a, tasti):
+        import scorciatoie_dati as SD
+        voci = self.kb_voci()
+        if tasti:
+            altra, p = SD.chi_usa(tasti, voci, salvo=a)
+            if p:
+                chi = (altra[2] if ITALIAN else altra[3]) if altra else T("un'altra funzione", "another function")
+                d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
+                                      buttons=Gtk.ButtonsType.NONE,
+                                      text=T(f"«{SD.etichetta(tasti, True)}» è già usata", f"“{SD.etichetta(tasti, False)}” is already used"))
+                d.format_secondary_text(T(f"La usa «{chi}». Spostarla qui?", f"“{chi}” uses it. Move it here?"))
+                d.add_button(T("Annulla", "Cancel"), Gtk.ResponseType.CANCEL)
+                d.add_button(T("Sposta", "Move"), Gtk.ResponseType.OK)
+                d.set_default_response(Gtk.ResponseType.OK)
+                tod_avviso.come_macos(d)
+                r = d.run()
+                d.destroy()
+                if r != Gtk.ResponseType.OK:
+                    return
+                sh(["xfconf-query", "-c", "xfce4-keyboard-shortcuts", "-p", p, "-r", "-R"])
+        valore = SD.comando_di(a, voci) if a[4] == "cmd" else a[1]
+        for p in SD.tutte_di(a, voci):
+            sh(["xfconf-query", "-c", "xfce4-keyboard-shortcuts", "-p", p, "-r", "-R"])
+        if tasti:
+            sh(["xfconf-query", "-c", "xfce4-keyboard-shortcuts", "-p", SD.RADICE[a[4]] + tasti, "-n", "-t", "string",
+                "-s", valore])
+        self.kb_mostra()
+
+    def pane_mouse(self, box):
+        elenco = sh(["xfconf-query", "-c", "pointers", "-l"])
+        dispositivi = sorted({l.split("/")[1] for l in elenco.splitlines() if l.count("/") >= 2}) or ["Lorie_mouse"]
+        d0 = dispositivi[0]
+
+        def per_tutti(prop, valore):
+            for d in dispositivi:
+                xf_scrivi("pointers", f"/{d}/{prop}", valore)
+        tasto = Gtk.ComboBoxText()
+        tasto.append("sinistro", T("Sinistro", "Left"))
+        tasto.append("destro", T("Destro", "Right"))
+        tasto.set_active_id("sinistro" if xf_valore("pointers", f"/{d0}/RightHanded", True) else "destro")
+        tasto.connect("changed", lambda c: per_tutti("RightHanded", c.get_active_id() == "sinistro"))
+        dc = self.cursore("doppio", xf_valore("xsettings", "/Net/DoubleClickTime", 400), 200, 900,
+                          T("Lenta", "Slow"), T("Veloce", "Fast"),
+                          lambda v: xf_scrivi("xsettings", "/Net/DoubleClickTime", v), inverti=True)
+        prova = Gtk.Button(label=T("Fai doppio clic qui", "Double-click here"))
+
+        def clic(w, ev):
+            if ev.type == Gdk.EventType._2BUTTON_PRESS:
+                w.set_label(T("Doppio clic riconosciuto ✓", "Double-click recognized ✓"))
+                GLib.timeout_add(1500, lambda: (w.set_label(T("Fai doppio clic qui", "Double-click here")), False)[1])
+            return False
+        prova.connect("button-press-event", clic)
+        self.group(box, None, [
+            self.row(T("Tasto principale", "Primary button"), tasto,
+                     T("Quello con cui fai clic e selezioni (destro per chi usa la sinistra).",
+                       "The one you click and select with (right for left-handed use).")),
+            self.row(T("Scorrimento naturale", "Natural scrolling"),
+                     self.switch(xf_valore("pointers", f"/{d0}/ReverseScrolling", False),
+                                 lambda a: per_tutti("ReverseScrolling", a)),
+                     T("Il contenuto segue il movimento delle dita, come sul telefono.",
+                       "Content follows your fingers, like on the phone.")),
+            self.row(T("Velocità del doppio clic", "Double-click speed"), dc),
+            self.row(T("Prova", "Try it"), prova)])
+        self.group(box, T("Puntatore", "Pointer"), [
+            self.row(T("Velocità del puntatore", "Pointer speed"),
+                     self.button(T("Impostazioni del telefono", "Phone settings"), lambda: am("android.settings.SETTINGS")),
+                     T("In DeX il puntatore lo muove il telefono: la velocità si cambia nelle impostazioni del telefono, "
+                       "in Samsung DeX → Mouse e trackpad.",
+                       "In DeX the phone moves the pointer: change its speed in the phone's settings, "
+                       "under Samsung DeX → Mouse and trackpad."))])
 
     def set_layout(self, code):
         if not code:
