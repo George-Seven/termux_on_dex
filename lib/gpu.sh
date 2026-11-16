@@ -144,7 +144,27 @@ virgl_pid() { # il pid del server virgl del desktop, se è vivo
   return 1
 }
 
-virgl_running() { virgl_pid >/dev/null || pgrep -x "$VIRGL_NOME" >/dev/null 2>&1; }
+# virgl_pids: tutti i processi del server (anche i figli, uno per app collegata, e quelli avviati senza file pid),
+# letti da /proc/<pid>/comm. Non con `pgrep -x`: quello di Termux (procps-ng 4) per i nomi più lunghi di 15 lettere
+# confronta il nome intero, quello di Debian le prime 15: sul S20+ (16 novembre) `pgrep -x virgl_test_serv` non
+# trovava il server acceso. Nei test solo i processi nati dal test (mai un server vero sul telefono).
+virgl_pids() {
+  local f n p
+  for f in /proc/[0-9]*/comm; do
+    n=""
+    read -r n 2>/dev/null <"$f" || true
+    [[ $n == "$VIRGL_NOME" ]] || continue
+    p=${f%/comm}
+    p=${p##*/}
+    if [[ -n ${TOD_TEST_RUN:-} ]] && ! tr '\0' '\n' <"/proc/$p/environ" 2>/dev/null | grep -qxF "TOD_TEST_RUN=$TOD_TEST_RUN"; then
+      continue
+    fi
+    printf '%s\n' "$p"
+  done
+  return 0
+}
+
+virgl_running() { virgl_pid >/dev/null || [[ -n $(virgl_pids) ]]; }
 
 virgl_start() { # virgl_start [modo]: senza argomento il modo scelto dalla prova (VIRGL_MODO)
   have virgl_test_server_android || return 1
@@ -168,7 +188,7 @@ virgl_start() { # virgl_start [modo]: senza argomento il modo scelto dalla prova
   sleep 1
   if ! virgl_pid >/dev/null; then
     # setsid può aver cambiato pid: si cerca per nome
-    p=$(pgrep -n -x "$VIRGL_NOME" 2>/dev/null) || p=""
+    p=$(virgl_pids | sort -n | tail -n 1)
     if [[ -n $p ]]; then printf '%s\n' "$p" >"$TMPDIR/tod-virgl.pid"; fi
   fi
   if virgl_running; then return 0; fi
@@ -180,7 +200,7 @@ virgl_start() { # virgl_start [modo]: senza argomento il modo scelto dalla prova
 virgl_stop() {
   local p
   if p=$(virgl_pid); then kill "$p" 2>/dev/null || true; fi
-  pkill -x "$VIRGL_NOME" 2>/dev/null || true   # anche i figli (uno per app collegata) e i server di prima
+  for p in $(virgl_pids); do kill "$p" 2>/dev/null || true; done   # anche i figli e i server di prima
   rm -f "$TMPDIR/tod-virgl.pid" "$TMPDIR/tod-virgl.modo"
 }
 

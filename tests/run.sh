@@ -581,6 +581,18 @@ EOF
   virgl_stop
   fails virgl_pid
   eq "niente tracce" no "$([[ -e $TMPDIR/tod-virgl.pid || -e $TMPDIR/tod-virgl.modo ]] && echo si || echo no)"
+  # un server acceso senza file pid (avviato da una versione di prima) si riconosce lo stesso, dal nome del processo
+  # in /proc (sul S20+ `pgrep -x` di Termux non lo trovava: confronta il nome intero, non le prime 15 lettere)
+  virgl_test_server_android >/dev/null 2>&1 &
+  local senza=$!
+  sleep 0.3
+  fails virgl_pid
+  virgl_running
+  has "trovato da /proc" "$senza" "$(virgl_pids)"
+  hasnt "mai pgrep -x per il server" 'pgrep -x "$VIRGL_NOME"' "$(cat "$ROOT/lib/gpu.sh" | grep -v '^#')"
+  virgl_stop
+  sleep 0.2
+  fails virgl_running
   # un processo qualunque col testo nel comando non è il server (prima: pgrep -f / pkill -f)
   sh -c 'sleep 5 # virgl_test_server' &
   local altro=$!
