@@ -142,6 +142,12 @@ def rientro(r, m):
     return r
 
 
+def unione(a, b):
+    """Il rettangolo più piccolo che contiene tutti e due (x, y, larghezza, altezza)."""
+    x, y = min(a[0], b[0]), min(a[1], b[1])
+    return (x, y, max(a[0] + a[2], b[0] + b[2]) - x, max(a[1] + a[3], b[1] + b[3]) - y)
+
+
 def verso(da, a, t):
     """Da un rettangolo all'altro, con frenata finale (t da 0 a 1)."""
     k = 1 - (1 - min(max(t, 0.0), 1.0)) ** 3
@@ -246,6 +252,8 @@ class Anteprima:
                    "cairo_close_path": (None, [ctypes.c_void_p]), "cairo_fill": (None, [ctypes.c_void_p]),
                    "cairo_fill_preserve": (None, [ctypes.c_void_p]), "cairo_stroke": (None, [ctypes.c_void_p]),
                    "cairo_set_line_width": (None, [ctypes.c_void_p, ctypes.c_double]),
+                   "cairo_push_group": (None, [ctypes.c_void_p]),
+                   "cairo_pop_group_to_source": (None, [ctypes.c_void_p]),
                    "cairo_destroy": (None, [ctypes.c_void_p]), "cairo_surface_flush": (None, [ctypes.c_void_p])}
 
     def __init__(self, a):
@@ -263,6 +271,7 @@ class Anteprima:
         self.strisce = []
         self.modo = None
         self.rett = self.da = self.a_rett = None
+        self.tela = None   # il rettangolo della finestra ARGB: tutta l'animazione ci sta dentro
         self.t0 = 0.0
         self.sotto = 0
         self.col = colori("#0067c0", False)
@@ -328,6 +337,15 @@ class Anteprima:
         self.da, self.a_rett, self.t0 = inizio, meta, time.monotonic()
         if modo == "contorno":
             self._strisce()
+        else:
+            # La finestra prende UNA volta la misura che contiene tutta l'animazione, e dentro si disegna soltanto.
+            # Ridimensionarla a ogni fotogramma la svuotava ogni volta (il server azzera la finestra, il compositore
+            # la mostra vuota, poi arriva il disegno): sul S20+, senza la via veloce, l'anteprima sfarfallava.
+            tela = unione(inizio, meta)
+            if tela != self.tela:
+                self.tela = tela
+                self.x.XMoveResizeWindow(self.dpy, self.vetro, tela[0], tela[1], max(1, tela[2]), max(1, tela[3]))
+                self.c.cairo_xlib_surface_set_size(self.sup, max(1, tela[2]), max(1, tela[3]))
         self._disponi(inizio, nuova)
 
     def anima(self):
@@ -347,7 +365,6 @@ class Anteprima:
         self.rett = r
         rx, ry, rw, rh = r
         if self.modo == "vetro":
-            x.XMoveResizeWindow(dpy, self.vetro, rx, ry, max(1, rw), max(1, rh))
             if mappa:
                 x.XMapWindow(dpy, self.vetro)
                 self._sotto(self.vetro)
@@ -373,17 +390,20 @@ class Anteprima:
         c.cairo_close_path(cr)
 
     def disegna(self):
-        if self.modo != "vetro" or not self.rett:
+        if self.modo != "vetro" or not self.rett or not self.tela:
             return
         c, col = self.c, self.col
         w, h = max(1, self.rett[2]), max(1, self.rett[3])
-        c.cairo_xlib_surface_set_size(self.sup, w, h)
+        ox, oy = self.rett[0] - self.tela[0], self.rett[1] - self.tela[1]
         cr = c.cairo_create(self.sup)
+        # il fotogramma si compone fuori dalla finestra e ci arriva con una copia sola: il compositore non vede
+        # mai la finestra svuotata o disegnata a metà
+        c.cairo_push_group(cr)
         c.cairo_set_operator(cr, 1)   # SOURCE: si parte da trasparente
         c.cairo_set_source_rgba(cr, 0, 0, 0, 0)
         c.cairo_paint(cr)
         c.cairo_set_operator(cr, 2)   # OVER
-        self._tondo(cr, 0.5, 0.5, w - 1, h - 1, self.raggio)
+        self._tondo(cr, ox + 0.5, oy + 0.5, w - 1, h - 1, self.raggio)
         c.cairo_set_source_rgba(cr, *col["fondo"])
         c.cairo_fill_preserve(cr)
         c.cairo_set_source_rgba(cr, *col["tinta"])
@@ -391,9 +411,12 @@ class Anteprima:
         c.cairo_set_line_width(cr, 1.0)
         c.cairo_set_source_rgba(cr, *col["bordo"])
         c.cairo_stroke(cr)
-        self._tondo(cr, 1.5, 1.5, w - 3, h - 3, self.raggio - 1)
+        self._tondo(cr, ox + 1.5, oy + 1.5, w - 3, h - 3, self.raggio - 1)
         c.cairo_set_source_rgba(cr, *col["filo"])
         c.cairo_stroke(cr)
+        c.cairo_pop_group_to_source(cr)
+        c.cairo_set_operator(cr, 1)   # SOURCE: sostituisce tutto in un colpo
+        c.cairo_paint(cr)
         c.cairo_destroy(cr)
         c.cairo_surface_flush(self.sup)
         self.x.XFlush(self.dpy)
@@ -405,6 +428,7 @@ class Anteprima:
             self.x.XUnmapWindow(self.dpy, w)
         self.x.XFlush(self.dpy)
         self.modo = self.rett = self.da = self.a_rett = None
+        self.tela = None
 
 
 class Aggancio:

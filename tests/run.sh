@@ -7448,6 +7448,13 @@ test_aggancio_bordi() { # 15 novembre, come Windows 11: metà, quarti, ingrandit
   printf '#!/bin/sh\n' >"$PREFIX/bin/python3"
   chmod +x "$PREFIX/bin/python3"
   xfwm_aggancio
+  # l'anteprima non si ridimensiona a ogni fotogramma (sul S20+ sfarfallava): una finestra grande quanto tutta
+  # l'animazione, e ogni fotogramma composto fuori e copiato in un colpo
+  local agg
+  agg=$(cat "$ROOT/share/tod_aggancio.py")
+  has "finestra grande quanto tutta l'animazione" "tela = unione(inizio, meta)" "$agg"
+  has "fotogramma composto fuori dalla finestra" "cairo_pop_group_to_source(cr)" "$agg"
+  eq "nessun ridimensionamento per fotogramma" 0 "$(sed -n '/def _disponi/,/def _tondo/p' <<<"$agg" | grep -c 'XMoveResizeWindow(dpy, self.vetro')"
   eq "wrap_windows spento (acceso, xfwm4 non aggancia affatto)" false "$($q -c xfwm4 -p /general/wrap_windows)"
   eq "aggancio nostro: quello di xfwm4 (senza anteprima) spento" false "$($q -c xfwm4 -p /general/tile_on_move)"
   conf_set AGGANCIO xfwm4
