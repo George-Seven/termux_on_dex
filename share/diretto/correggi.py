@@ -13,7 +13,10 @@ import os
 import struct
 import sys
 
-VIETATE = {99: "set_robust_list"}
+# clone3 (Android fino al 13 la vieta): pthread_create la chiama con TUTTI i segnali bloccati, quindi il
+# SIGSYS non arriva a tod-diretto.so e il kernel chiude il programma al primo filo (S20+, 16 novembre:
+# vkcube "Bad system call"). Con -ENOSYS il glibc ripiega da solo su clone.
+VIETATE = {99: "set_robust_list", 435: "clone3"}
 SVC = 0xD4000001
 ENOSYS = 0x92800000 | (37 << 5)   # movn x0, #37 → x0 = -38
 FILE = {

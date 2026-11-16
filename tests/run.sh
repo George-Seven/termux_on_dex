@@ -1882,15 +1882,19 @@ test_diretto_correggi() { # la copia del glibc: set_robust_list → -ENOSYS, fil
 import struct, sys
 b = struct.pack("<IIII", 0x52800C68, 0xD503201F, 0xD4000001, 0xD4000001)   # mov w8,#99; nop; svc; svc
 b += struct.pack("<II", 0x52800B08, 0xD4000001)                            # mov w8,#88; svc (altra chiamata)
+b += struct.pack("<II", 0xD2803668, 0xD4000001)                            # mov x8,#435; svc (clone3)
 b += b"\0/etc/hosts\0/etc/hosts.allow\0/etc/resolv.conf\0"
 open(sys.argv[1], "wb").write(b)' "$f"
   python3 "$TOD_ROOT/share/diretto/correggi.py" "$f" "$f.ok" >/dev/null
   out=$(python3 -c '
 import struct, sys
 b = open(sys.argv[1], "rb").read()
-w = struct.unpack_from("<6I", b)
-print(hex(w[2]), hex(w[5]), [x for x in b[24:].split(b"\0") if x])' "$f.ok")
+w = struct.unpack_from("<8I", b)
+print(hex(w[2]), hex(w[5]), hex(w[7]), [x for x in b[32:].split(b"\0") if x])' "$f.ok")
   eq "svc di set_robust_list → movn x0,#37; l'altra chiamata resta" "0x928004a0 0xd4000001" "$(cut -d' ' -f1,2 <<<"$out")"
+  # Android fino al 13 vieta clone3 e pthread_create la chiama coi segnali bloccati: ogni app con un filo
+  # veniva chiusa ("Bad system call", S20+ 16 novembre). -ENOSYS → il glibc ripiega su clone
+  eq "svc di clone3 → movn x0,#37" "0x928004a0" "$(cut -d' ' -f3 <<<"$out")"
   has "file interni sui descrittori, gli altri intatti" "[b'/dev/fd/96', b'/etc/hosts.allow', b'/dev/fd/97']" "$out"
   eq "stessa lunghezza" "$(stat -c %s "$f")" "$(stat -c %s "$f.ok")"
   # le azioni di posix_spawn le fa il glibc senza fakechroot: ArtCraft Launcher avviava le app in /usr/bin
