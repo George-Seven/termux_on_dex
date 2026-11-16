@@ -7,12 +7,16 @@
 #    lfdevs   → mesa con backend Freedreno-KGSL (OpenGL nativo su Adreno, senza
 #               Zink) dai pacchetti di lfdevs/termux-packages, bloccati con apt-mark
 #  Profili (variabili d'ambiente) provati in ordine, il primo che funziona vince:
-#    kgsl > zink-turnip > zink-turnip-sw > zink-wrapper > virgl > llvmpipe
-#  Il test è reale (glxinfo su un server X vero), quindi gestisce da solo casi
-#  come le Adreno 840 "v2" che Turnip non riconosce (VK_ERROR_INCOMPATIBLE_DRIVER).
+#    kgsl > zink-turnip > zink-turnip-sw > zink-wrapper > virgl > virgl-angle > llvmpipe
+#  Il test è reale (glxinfo su un server X vero, poi un disegno riletto: gpu_disegna),
+#  quindi gestisce da solo casi come le Adreno 840 "v2" che Turnip non riconosce
+#  (VK_ERROR_INCOMPATIBLE_DRIVER) e i driver che si aprono ma non disegnano.
+#  Senza Adreno (Mali, Xclipse, PowerVR) non c'è un driver Mesa: OpenGL passa da virgl,
+#  cioè dal driver del telefono: "virgl" col suo OpenGL ES, "virgl-angle" con ANGLE sul
+#  suo Vulkan (per i telefoni dove l'OpenGL ES di sistema non basta a virgl).
 # =============================================================================
 
-declare -gA GPU_RANK=([kgsl]=1 [zink-turnip]=2 [zink-turnip-sw]=3 [zink-wrapper]=4 [virgl]=5 [llvmpipe]=9)
+declare -gA GPU_RANK=([kgsl]=1 [zink-turnip]=2 [zink-turnip-sw]=3 [zink-wrapper]=4 [virgl]=5 [virgl-angle]=6 [llvmpipe]=9)
 
 LFDEVS_TERMUX_REPO=lfdevs/termux-packages
 LFDEVS_CX_REPO=lfdevs/mesa-for-android-container
@@ -36,7 +40,7 @@ TOD_GPU_PROBE="$TOD_STATE_DIR/gpu-probe.txt"
 # altrimenti (es. lanciando "tod gpu probe" dal terminale del desktop) si mescolano
 GPU_VARS=(MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER VK_ICD_FILENAMES VK_DRIVER_FILES TU_DEBUG
   MESA_VK_WSI_DEBUG MESA_GL_VERSION_OVERRIDE MESA_GLSL_VERSION_OVERRIDE LIBGL_ALWAYS_SOFTWARE
-  TOD_NEEDS_VIRGL TOD_GPU_PROFILE vblank_mode MESA_VK_WSI_PRESENT_MODE)
+  TOD_NEEDS_VIRGL TOD_GPU_PROFILE vblank_mode MESA_VK_WSI_PRESENT_MODE VTEST_SOCKET_NAME)
 
 gpu_env_reset() { unset "${GPU_VARS[@]}"; }
 
@@ -74,7 +78,8 @@ gpu_profile_env() {
       icd=$(gpu_icd wrapper) || return 1
       printf '%s\n' MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink "VK_ICD_FILENAMES=$icd" "VK_DRIVER_FILES=$icd"
       ;;
-    virgl) # OpenGL tramite virgl_test_server_android (GLES di sistema): va su qualsiasi GPU
+    virgl | virgl-angle) # OpenGL tramite virgl_test_server_android (driver di sistema): va su qualsiasi GPU.
+      # Le variabili sono le stesse: cambia come parte il server (VIRGL_MODO in tod.conf, vedi gpu_write_env)
       printf '%s\n' GALLIUM_DRIVER=virpipe MESA_GL_VERSION_OVERRIDE=4.0 MESA_GLSL_VERSION_OVERRIDE=400 TOD_NEEDS_VIRGL=1
       ;;
     llvmpipe)
@@ -107,22 +112,127 @@ gpu_write_env() { # gpu_write_env profilo
     esac
   } >"$TOD_GPU_ENV"
   conf_set GPU_PROFILE "$p"
+  # un solo server virgl per desktop e container: come parte lo decide il profilo del desktop, se è virgl
+  if [[ $p == virgl* ]]; then conf_set VIRGL_MODO "$(virgl_modo_di "$p")"; fi
 }
 
 # ----------------------------------------------------------------------------
 #  virgl (server lato Termux, usato anche dal container come ripiego)
+#
+#  Su Mali, Xclipse e PowerVR tutto l'OpenGL del desktop passa da questo processo: se si ferma, ogni app
+#  che disegna con la GPU si chiude. Quindi (16 novembre): lo si riconosce dal pid e dal nome del processo
+#  (mai `pgrep -f`/`pkill -f`: prendono anche le shell che hanno quel testo nel comando), le prove dei
+#  profili usano un server a parte su un socket loro (prima `tod gpu probe` spegneva quello del desktop
+#  acceso), e il guardiano della sessione lo riaccende se cade (virgl_riaccendi).
 # ----------------------------------------------------------------------------
-virgl_running() { pgrep -f virgl_test_server >/dev/null 2>&1; }
+VIRGL_NOME=virgl_test_serv   # il nome del processo come lo dà il kernel (15 lettere)
 
-virgl_start() {
-  have virgl_test_server_android || return 1
-  if virgl_running; then return 0; fi
-  nohup virgl_test_server_android >"$TOD_STATE_DIR/virgl.log" 2>&1 </dev/null &
-  sleep 1
-  virgl_running
+virgl_modo_di() { # profilo → opzione del server ("" = OpenGL ES di sistema)
+  case $1 in
+    virgl-angle) echo angle-vulkan ;;
+    *) echo "" ;;
+  esac
 }
 
-virgl_stop() { pkill -f virgl_test_server 2>/dev/null || true; }
+virgl_pid() { # il pid del server virgl del desktop, se è vivo
+  local p n
+  p=$(cat "$TMPDIR/tod-virgl.pid" 2>/dev/null) || p=""
+  if [[ $p =~ ^[0-9]+$ ]]; then
+    n=$(cat "/proc/$p/comm" 2>/dev/null) || n=""
+    if [[ $n == "$VIRGL_NOME" ]]; then printf '%s' "$p"; return 0; fi
+  fi
+  return 1
+}
+
+virgl_running() { virgl_pid >/dev/null || pgrep -x "$VIRGL_NOME" >/dev/null 2>&1; }
+
+virgl_start() { # virgl_start [modo]: senza argomento il modo scelto dalla prova (VIRGL_MODO)
+  have virgl_test_server_android || return 1
+  local modo p
+  if (($#)); then modo=$1; else modo=$(conf_get VIRGL_MODO); fi
+  if virgl_running; then
+    # già acceso nel modo giusto (o acceso da una versione di prima, senza traccia del modo): resta
+    if [[ ! -f $TMPDIR/tod-virgl.modo || $(cat "$TMPDIR/tod-virgl.modo" 2>/dev/null) == "$modo" ]]; then return 0; fi
+    virgl_stop
+  fi
+  local -a arg=() avvio=(nohup)
+  if [[ -n $modo ]]; then arg=("--$modo"); fi
+  # nuova sessione di processo, come il server X: chiudere la scheda di Termux non lo spegne
+  if have setsid; then avvio=(setsid nohup); fi
+  # azzerato e poi aperto in coda (>>): così session_log_cap può accorciarlo mentre il server scrive
+  : >"$TOD_STATE_DIR/virgl.log"
+  "${avvio[@]}" virgl_test_server_android "${arg[@]}" >>"$TOD_STATE_DIR/virgl.log" 2>&1 </dev/null &
+  p=$!
+  printf '%s\n' "$p" >"$TMPDIR/tod-virgl.pid"
+  printf '%s\n' "$modo" >"$TMPDIR/tod-virgl.modo"
+  sleep 1
+  if ! virgl_pid >/dev/null; then
+    # setsid può aver cambiato pid: si cerca per nome
+    p=$(pgrep -n -x "$VIRGL_NOME" 2>/dev/null) || p=""
+    if [[ -n $p ]]; then printf '%s\n' "$p" >"$TMPDIR/tod-virgl.pid"; fi
+  fi
+  if virgl_running; then return 0; fi
+  log "virgl: il server non è partito (modo: ${modo:-sistema}): $(tail -n 3 "$TOD_STATE_DIR/virgl.log" 2>/dev/null | tr '\n' ' ')"
+  rm -f "$TMPDIR/tod-virgl.pid" "$TMPDIR/tod-virgl.modo"
+  return 1
+}
+
+virgl_stop() {
+  local p
+  if p=$(virgl_pid); then kill "$p" 2>/dev/null || true; fi
+  pkill -x "$VIRGL_NOME" 2>/dev/null || true   # anche i figli (uno per app collegata) e i server di prima
+  rm -f "$TMPDIR/tod-virgl.pid" "$TMPDIR/tod-virgl.modo"
+}
+
+# Le prove dei profili: un server a parte, su un socket suo. Quello del desktop non si tocca mai.
+virgl_prova_sock() { printf '%s/tod-virgl-prova.sock' "$TMPDIR"; }
+
+virgl_prova_start() { # virgl_prova_start [modo] → 0 se il server di prova risponde
+  have virgl_test_server_android || return 1
+  local i sock
+  local -a arg=()
+  sock=$(virgl_prova_sock)
+  virgl_prova_stop
+  if [[ -n ${1:-} ]]; then arg=("--$1"); fi
+  nohup virgl_test_server_android "${arg[@]}" --socket-path "$sock" >"$TOD_STATE_DIR/virgl-prova.log" 2>&1 </dev/null &
+  VIRGL_PROVA_PID=$!
+  for ((i = 0; i < 20; i++)); do
+    if [[ -S $sock ]]; then return 0; fi
+    kill -0 "$VIRGL_PROVA_PID" 2>/dev/null || break
+    sleep 0.25
+  done
+  log "virgl: il server di prova non è partito (modo: ${1:-sistema}): $(tail -n 3 "$TOD_STATE_DIR/virgl-prova.log" 2>/dev/null | tr '\n' ' ')"
+  virgl_prova_stop
+  return 1
+}
+
+virgl_prova_stop() {
+  if [[ -n ${VIRGL_PROVA_PID:-} ]]; then
+    kill "$VIRGL_PROVA_PID" 2>/dev/null || true
+    wait "$VIRGL_PROVA_PID" 2>/dev/null || true
+  fi
+  VIRGL_PROVA_PID=""
+  rm -f "$(virgl_prova_sock)"
+}
+
+virgl_serve() { # il desktop o il container usano virgl?
+  [[ $(conf_get GPU_PROFILE) == virgl* || $(conf_get CX_GPU_PROFILE) == virgl* ]]
+}
+
+# virgl_riaccendi: un passo del guardiano della sessione (session_guardia, lib/session.sh). Se il server è caduto
+# (Android lo chiude quando manca memoria, o un'app lo fa cadere) lo riaccende e lo dice: le app aperte che
+# disegnavano con la GPU vanno riaperte, ma quelle nuove partono di nuovo. Al più 5 volte per sessione.
+VIRGL_RIAVVII=0
+virgl_riaccendi() {
+  if ! virgl_serve || ! have virgl_test_server_android || virgl_running; then return 0; fi
+  if ((VIRGL_RIAVVII >= 5)); then return 0; fi
+  VIRGL_RIAVVII=$((VIRGL_RIAVVII + 1))
+  log "virgl: il server non c'è più, lo riaccendo (volta $VIRGL_RIAVVII)"
+  if virgl_start && have notify-send; then
+    notify-send -a "Termux On DeX" -i video-display "$(t virgl_riavviato_titolo)" "$(t virgl_riavviato)" 2>/dev/null || true
+  fi
+  return 0
+}
 
 # ----------------------------------------------------------------------------
 #  Installazione degli stack
@@ -202,6 +312,32 @@ gpu_vk_ok() { # gpu_vk_ok icd.json → 0 se vulkaninfo trova un dispositivo
   grep -q 'deviceName' <<<"$out"
 }
 
+# gpu_disegna [-u VAR | VAR=valore]...: il profilo disegna davvero? 1 solo se la prova dice di no; una prova che
+# non si può fare (niente python3, niente glmark2, nessuno schermo) non boccia nessuno. Due prove, perché
+# sbagliano in modi diversi (16 novembre): share/tod-gl-prova.py disegna su una finestra vera e scambia i
+# fotogrammi (zink senza presentazione: "could not create swapchain"); una scena breve di glmark2 fuori schermo
+# usa shader da app vera (virgl su ANGLE-GL: glxinfo e il triangolo passano, glmark2 no).
+gpu_disegna() {
+  local out rc
+  if [[ ${TOD_GPU_DISEGNO:-1} != 1 ]]; then return 0; fi
+  if have python3 && [[ -f $TOD_ROOT/share/tod-gl-prova.py ]]; then
+    if out=$(env "$@" timeout 25 python3 "$TOD_ROOT/share/tod-gl-prova.py" 2>&1 </dev/null); then rc=0; else rc=$?; fi
+    log "disegno: rc=$rc $(grep -E '^(TEXTURE|FINESTRA|MOTIVO|ESITO)=' <<<"$out" | tr '\n' ' ')"
+    # 0 disegna, 2 non si è potuto provare; il resto (1, tempo scaduto, caduta) = non disegna
+    if [[ $rc != 0 && $rc != 2 ]]; then return 1; fi
+  fi
+  if have glmark2; then
+    if out=$(env "$@" timeout 40 glmark2 --off-screen -s 128x128 -b build:use-vbo=true:duration=1 \
+      -b shading:shading=phong:duration=1 2>&1 </dev/null); then rc=0; else rc=$?; fi
+    if grep -qiE 'unrecognized option|invalid option' <<<"$out"; then return 0; fi   # glmark2 senza --off-screen
+    if ! grep -qE 'glmark2 Score:[[:space:]]*[1-9]' <<<"$out"; then
+      log "disegno: glmark2 non arriva in fondo (rc=$rc): $(tail -n 2 <<<"$out" | tr '\n' ' ')"
+      return 1
+    fi
+  fi
+  return 0
+}
+
 gpu_probe_one() { # gpu_probe_one profilo → stampa il renderer OpenGL; 0 = funziona
   local p=$1 spec out renderer icd rc=0
   local -a envs=() clean=()
@@ -214,17 +350,27 @@ gpu_probe_one() { # gpu_probe_one profilo → stampa il renderer OpenGL; 0 = fun
       gpu_vk_ok "$icd" || return 1
       ;;
   esac
-  if [[ $p == virgl ]]; then virgl_start || return 1; fi
+  if [[ $p == virgl* ]]; then
+    virgl_prova_start "$(virgl_modo_di "$p")" || return 1
+    envs+=("VTEST_SOCKET_NAME=$(virgl_prova_sock)")
+  fi
   if out=$(env "${clean[@]}" "${envs[@]}" timeout 25 glxinfo -B 2>&1 </dev/null); then rc=0; else rc=$?; fi
-  if [[ $p == virgl ]]; then virgl_stop; fi
   renderer=$(sed -n 's/^[[:space:]]*OpenGL renderer string:[[:space:]]*//p' <<<"$out" | sed -n 1p)
   log "probe $p: rc=$rc renderer=${renderer:-nessuno}"
   if [[ $rc != 0 || -z $renderer ]]; then
     log "probe $p output: $(tail -n 3 <<<"$out" | tr '\n' ' ')"
+    virgl_prova_stop
     return 1
   fi
-  if [[ $p != llvmpipe && ${renderer,,} =~ llvmpipe|softpipe|swrast ]]; then return 1; fi
+  if [[ $p != llvmpipe && ${renderer,,} =~ llvmpipe|softpipe|swrast ]]; then virgl_prova_stop; return 1; fi
   if [[ $p == zink-* && ${renderer,,} != *zink* ]]; then return 1; fi
+  # il software è l'ultima spiaggia: non c'è niente sotto, inutile provarlo
+  if [[ $p != llvmpipe ]] && ! gpu_disegna "${clean[@]}" "${envs[@]}"; then
+    log "probe $p: il driver risponde ma non disegna: scartato"
+    virgl_prova_stop
+    return 1
+  fi
+  virgl_prova_stop
   printf '%s' "$renderer"
 }
 
@@ -234,11 +380,14 @@ gpu_bench_one() { # gpu_bench_one profilo → punteggio glmark2 (0 se fallisce)
   if ! have glmark2 || ! spec=$(gpu_profile_env "$1"); then echo 0; return 0; fi
   mapfile -t envs <<<"$spec"
   mapfile -t clean < <(gpu_unset_args)
-  if [[ $1 == virgl ]]; then virgl_start || true; fi
+  if [[ $1 == virgl* ]]; then
+    if ! virgl_prova_start "$(virgl_modo_di "$1")"; then echo 0; return 0; fi
+    envs+=("VTEST_SOCKET_NAME=$(virgl_prova_sock)")
+  fi
   if out=$(env "${clean[@]}" "${envs[@]}" vblank_mode=0 timeout 150 glmark2 -s 800x600 \
     -b build:use-vbo=true:duration=4 -b texture:texture-filter=mipmap:duration=4 \
     -b shading:shading=phong:duration=4 -b bump:bump-render=high-poly:duration=4 2>&1 </dev/null); then :; fi
-  if [[ $1 == virgl ]]; then virgl_stop; fi
+  virgl_prova_stop
   s=$(sed -n 's/.*glmark2 Score:[[:space:]]*\([0-9][0-9]*\).*/\1/p' <<<"$out" | sed -n 1p)
   printf '%s' "${s:-0}"
 }
@@ -278,7 +427,7 @@ gpu_candidates() {
     if gpu_icd freedreno >/dev/null; then c+=(zink-turnip zink-turnip-sw); fi
   fi
   if gpu_icd wrapper >/dev/null; then c+=(zink-wrapper); fi
-  if have virgl_test_server_android; then c+=(virgl); fi
+  if have virgl_test_server_android; then c+=(virgl virgl-angle); fi
   c+=(llvmpipe)
   printf '%s\n' "${c[@]}"
 }
@@ -373,7 +522,7 @@ gpu_setup() {
   fi
 
   # Ultima spiaggia prima del software: Zink sul driver Vulkan di Android
-  if [[ $best == llvmpipe || $best == virgl ]] && pkg_has vulkan-wrapper-android && ! pkg_installed vulkan-wrapper-android; then
+  if [[ $best == llvmpipe || $best == virgl* ]] && pkg_has vulkan-wrapper-android && ! pkg_installed vulkan-wrapper-android; then
     if apt_run "${APT_FLAGS[@]}" install --no-remove vulkan-wrapper-android; then
       : >"$TOD_GPU_PROBE"
       x11_with_server gpu_probe_all "$bench" || true
@@ -435,7 +584,7 @@ gpu_cli() { # tod gpu [status|probe [--bench]|bench|use <profilo>|stack official
       local -a envs=() clean=()
       mapfile -t envs <<<"$spec"
       mapfile -t clean < <(gpu_unset_args)
-      if [[ $p == virgl ]]; then virgl_start || true; fi
+      if [[ $p == virgl* ]]; then virgl_start "$(virgl_modo_di "$p")" || true; fi
       exec env "${clean[@]}" "${envs[@]}" "$@"
       ;;
     *) die "tod gpu [status|probe|bench|use <profilo>|stack official|lfdevs|run <profilo> -- cmd]" ;;

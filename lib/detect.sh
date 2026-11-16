@@ -41,13 +41,22 @@ detect_gpu() {
 }
 
 # gpu_classify modello egl vulkan soc produttore  (pura, testabile)
-# Imposta: GPU_FAMILY (adreno|mali|xclipse|other), GPU_ADRENO (es. 840), GPU_REV, GPU_LABEL
+# Imposta: GPU_FAMILY (adreno|mali|powervr|xclipse|other), GPU_ADRENO (es. 840), GPU_REV, GPU_LABEL
+# Solo Adreno ha un driver Mesa (Turnip/Freedreno); le altre passano dal driver del telefono (virgl).
+# I nodi in /dev contano più delle proprietà: i MediaTek recenti dichiarano "meow" (uno strato sopra il
+# driver vero) e certi telefoni non dichiarano niente. TOD_DEV_DIR: un /dev finto per i test.
 gpu_classify() {
-  local model=${1,,} egl=${2,,} vk=${3,,} soc=${4^^} mfr=${5,,}
+  local model=${1,,} egl=${2,,} vk=${3,,} soc=${4^^} mfr=${5,,} dev=${TOD_DEV_DIR:-/dev}
   GPU_FAMILY=other GPU_ADRENO="" GPU_REV=""
-  if [[ $model == adreno* || $egl == adreno* || $vk == adreno* || -e /dev/kgsl-3d0 ]]; then
+  if [[ $model == adreno* || $egl == adreno* || $vk == adreno* || -e $dev/kgsl-3d0 ]]; then
     GPU_FAMILY=adreno
-  elif [[ $egl == mali* || $vk == mali* ]]; then
+  elif [[ $egl == mali* || $vk == mali* || -e $dev/mali0 ]]; then
+    GPU_FAMILY=mali
+  elif [[ $egl == powervr* || $vk == powervr* || -e $dev/pvr_sync ]]; then
+    GPU_FAMILY=powervr
+  elif [[ $egl == *xclipse* || $vk == *xclipse* ]]; then
+    GPU_FAMILY=xclipse
+  elif [[ $egl == meow* && ($mfr == mediatek* || $soc == MT*) ]]; then
     GPU_FAMILY=mali
   elif [[ $mfr == samsung* || $soc == S5E* ]]; then
     GPU_FAMILY=xclipse
@@ -65,7 +74,12 @@ gpu_classify() {
     if [[ $model =~ v([0-9]+)$ ]]; then GPU_REV=${BASH_REMATCH[1]}; fi
     GPU_LABEL="Adreno ${GPU_ADRENO:-?}${GPU_REV:+ v$GPU_REV}"
   else
-    GPU_LABEL="${GPU_FAMILY^}${2:+ ($2)}"
+    case $GPU_FAMILY in
+      powervr) GPU_LABEL="PowerVR" ;;
+      other) GPU_LABEL="${2:-?}" ;;
+      *) GPU_LABEL="${GPU_FAMILY^}" ;;
+    esac
+    if [[ $GPU_FAMILY != other && -n ${2:-} && ${2,,} != "$GPU_FAMILY" ]]; then GPU_LABEL+=" ($2)"; fi
   fi
 }
 

@@ -202,7 +202,8 @@ videochip_start() { # dall'hook di sessione: compila se serve, scrive video.env,
   fi
   # un registro per sessione (l'aiutante scrive al massimo poche centinaia di righe per video); il numero di processo lo
   # scrive lui, solo dopo essersi messo in ascolto
-  (setsid "$bin" --pid "$TMPDIR/tod-va-chip.pid" </dev/null >"$TOD_STATE_DIR/video-chip.log" 2>&1 &)
+  : >"$TOD_STATE_DIR/video-chip.log"   # rifatto a ogni sessione, poi in coda (session_log_cap)
+  (setsid "$bin" --pid "$TMPDIR/tod-va-chip.pid" </dev/null >>"$TOD_STATE_DIR/video-chip.log" 2>&1 &)
   for pid in 1 2 3 4 5 6 7 8 9 10; do
     if videochip_aiutante_vivo; then return 0; fi
     sleep 0.2

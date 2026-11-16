@@ -189,12 +189,32 @@ test_gpu_classify() {
   gpu_classify "Adreno (TM) 840" "" "" "" ""
   eq "nome con (TM)" 840 "$GPU_ADRENO"
   eq "senza revisione" "" "$GPU_REV"
-  if [[ ! -e /dev/kgsl-3d0 ]]; then
-    gpu_classify "" mali mali MT6989 Mediatek
-    eq "mali" mali "$GPU_FAMILY"
-    gpu_classify "" "" "" S5E9965 Samsung
-    eq "exynos" xclipse "$GPU_FAMILY"
-  fi
+  # le altre GPU, con un /dev finto (su un telefono Adreno quello vero ha kgsl-3d0)
+  local dev="$WORK/dev_$$"
+  mkdir -p "$dev"
+  TOD_DEV_DIR=$dev
+  gpu_classify "" mali mali MT6989 Mediatek
+  eq "mali" mali "$GPU_FAMILY"
+  eq "mali: etichetta senza ripetizioni" "Mali" "$GPU_LABEL"
+  gpu_classify "" "" "" S5E9965 Samsung
+  eq "exynos" xclipse "$GPU_FAMILY"
+  gpu_classify "" meow "" MT6989 MediaTek
+  eq "MediaTek che dichiara meow" mali "$GPU_FAMILY"
+  eq "etichetta con ciò che dichiara" "Mali (meow)" "$GPU_LABEL"
+  gpu_classify "" powervr "" MT6765 MediaTek
+  eq "PowerVR" powervr "$GPU_FAMILY"
+  gpu_classify "" "" "" "" ""
+  eq "niente di noto" other "$GPU_FAMILY"
+  touch "$dev/mali0"
+  gpu_classify "" "" "" GS201 Google
+  eq "Mali dal nodo in /dev (Tensor senza proprietà)" mali "$GPU_FAMILY"
+  gpu_classify "" "" "" S5E9830 Samsung
+  eq "Exynos con Mali (S20+): il nodo vince sul produttore" mali "$GPU_FAMILY"
+  rm -f "$dev/mali0"
+  touch "$dev/kgsl-3d0"
+  gpu_classify "" "" "" "" ""
+  eq "Adreno dal nodo in /dev" adreno "$GPU_FAMILY"
+  unset TOD_DEV_DIR
   eq "One UI" 8.5 "$(oneui_version 80500)"
   eq "One UI vuota" "" "$(oneui_version "")"
 }
@@ -297,11 +317,11 @@ test_gpu_candidates() {
   chmod +x "$PREFIX/bin/virgl_test_server_android"
   PATH="$PREFIX/bin:$PATH"
   gpu_set_stack official
-  eq "official" "zink-turnip zink-turnip-sw virgl llvmpipe" "$(gpu_candidates | tr '\n' ' ' | sed 's/ $//')"
+  eq "official" "zink-turnip zink-turnip-sw virgl virgl-angle llvmpipe" "$(gpu_candidates | tr '\n' ' ' | sed 's/ $//')"
   gpu_set_stack lfdevs
-  eq "lfdevs: kgsl per primo" "kgsl zink-turnip zink-turnip-sw virgl llvmpipe" "$(gpu_candidates | tr '\n' ' ' | sed 's/ $//')"
+  eq "lfdevs: kgsl per primo" "kgsl zink-turnip zink-turnip-sw virgl virgl-angle llvmpipe" "$(gpu_candidates | tr '\n' ' ' | sed 's/ $//')"
   GPU_FAMILY=mali
-  eq "mali" "virgl llvmpipe" "$(gpu_candidates | tr '\n' ' ' | sed 's/ $//')"
+  eq "mali" "virgl virgl-angle llvmpipe" "$(gpu_candidates | tr '\n' ' ' | sed 's/ $//')"
 }
 
 # --- logica di gpu_setup con driver finti -------------------------------------
@@ -416,6 +436,334 @@ EOF
 
 test_virgl_profile_needs_server_flag() {
   has "flag virgl" "TOD_NEEDS_VIRGL=1" "$(gpu_profile_env virgl)"
+}
+
+# --- 16 novembre: telefoni senza Adreno (Mali, Xclipse, PowerVR). Pietro: "le prove le stiamo facendo solo su adreno" ---
+_virgl_finto() { # un virgl_test_server_android finto: resta acceso e, con --socket-path, apre il socket
+  cat >"$PREFIX/bin/virgl_test_server_android" <<'EOF'
+#!/bin/sh
+echo "$*" >>"$HOME/virgl_args"
+s=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = --socket-path ]; then s=$2; fi
+  shift
+done
+if [ -n "$s" ]; then
+  python3 -c 'import socket, sys, time
+k = socket.socket(socket.AF_UNIX); k.bind(sys.argv[1]); k.listen(1); time.sleep(20)' "$s" >/dev/null 2>&1 &
+fi
+sleep 20 >/dev/null 2>&1
+EOF
+  chmod +x "$PREFIX/bin/virgl_test_server_android"
+  PATH="$PREFIX/bin:$PATH"
+}
+
+test_gpu_virgl_modi() { # virgl-angle: stesse variabili di virgl, cambia come parte il server (VIRGL_MODO)
+  eq "virgl-angle: variabili di virgl" "$(gpu_profile_env virgl)" "$(gpu_profile_env virgl-angle)"
+  eq "container: variabili di virgl" "$(cx_profile_env virgl)" "$(cx_profile_env virgl-angle)"
+  eq "modo di virgl" "" "$(virgl_modo_di virgl)"
+  eq "modo di virgl-angle" angle-vulkan "$(virgl_modo_di virgl-angle)"
+  (( ${GPU_RANK[virgl]} < ${GPU_RANK[virgl-angle]} && ${GPU_RANK[virgl-angle]} < ${GPU_RANK[llvmpipe]} ))
+  gpu_write_env virgl-angle
+  eq "il profilo decide il modo del server" angle-vulkan "$(conf_get VIRGL_MODO)"
+  gpu_write_env virgl
+  eq "virgl: OpenGL ES di sistema" "" "$(conf_get VIRGL_MODO)"
+  conf_set VIRGL_MODO angle-vulkan
+  mkdir -p "$PREFIX/share/vulkan/icd.d"
+  touch "$PREFIX/share/vulkan/icd.d/freedreno_icd.aarch64.json"
+  gpu_write_env zink-turnip
+  eq "un profilo non virgl lascia il modo (è del container)" angle-vulkan "$(conf_get VIRGL_MODO)"
+  conf_set GPU_PROFILE virgl
+  conf_set CX_GPU_PROFILE llvmpipe
+  virgl_serve
+  conf_set GPU_PROFILE zink-turnip
+  fails virgl_serve
+  conf_set CX_GPU_PROFILE virgl-angle
+  virgl_serve
+}
+
+test_gpu_disegna() { # un driver che si apre ma non disegna va scartato; una prova che non si può fare non boccia
+  command -v python3 >/dev/null || return 0
+  local vero
+  vero=$(command -v python3)
+  cat >"$PREFIX/bin/python3" <<EOF
+#!/bin/sh
+case "\${FINTO_DISEGNO:-}" in
+  ko) echo "RENDERER=virgl (finto)"; echo "TEXTURE=ko 255,0,0"; echo "ESITO=ko"; exit 1 ;;
+  incerto) echo "MOTIVO=nessuno schermo (DISPLAY)"; echo "ESITO=incerto"; exit 2 ;;
+  caduto) kill -SEGV \$\$ ;;
+  ok) echo "TEXTURE=ok 0,255,0"; echo "FINESTRA=ok 0,255,0"; echo "ESITO=ok"; exit 0 ;;
+esac
+exec "$vero" "\$@"
+EOF
+  chmod +x "$PREFIX/bin/python3"
+  PATH="$PREFIX/bin:$PATH"
+  gpu_disegna FINTO_DISEGNO=ok
+  gpu_disegna FINTO_DISEGNO=incerto
+  fails gpu_disegna FINTO_DISEGNO=ko
+  fails gpu_disegna FINTO_DISEGNO=caduto
+  has "l'esito nel registro" "TEXTURE=ko 255,0,0" "$(cat "$TOD_LOG")"
+  TOD_GPU_DISEGNO=0 gpu_disegna FINTO_DISEGNO=ko
+  # glmark2 fuori schermo: shader da app vera (virgl su ANGLE-GL passava glxinfo e il triangolo, non questo)
+  cat >"$PREFIX/bin/glmark2" <<'EOF'
+#!/bin/sh
+case "${FINTO_GLMARK:-}" in
+  ok) echo "[build] FPS: 400"; echo "glmark2 Score: 457 " ;;
+  vecchio) echo "glmark2: unrecognized option '--off-screen'"; exit 1 ;;
+  *) echo "Error: Failed to compile shader"; exit 134 ;;
+esac
+EOF
+  chmod +x "$PREFIX/bin/glmark2"
+  gpu_disegna FINTO_DISEGNO=ok FINTO_GLMARK=ok
+  gpu_disegna FINTO_DISEGNO=ok FINTO_GLMARK=vecchio
+  fails gpu_disegna FINTO_DISEGNO=ok FINTO_GLMARK=rotto
+  # la prova vera, senza schermo: non decide niente (esce con 2) e dice perché
+  local out rc=0
+  out=$(env -u DISPLAY "$vero" "$ROOT/share/tod-gl-prova.py" 2>&1) || rc=$?
+  eq "senza schermo: incerto" 2 "$rc"
+  has "senza schermo: esito" "ESITO=incerto" "$out"
+  out=$(_stampa_py "$ROOT/share/tod-gl-prova.py" <<'EOF'
+print(m.colore_giusto((0, 255, 0, 255)), m.colore_giusto((6, 250, 3, 255)), m.colore_giusto((255, 0, 0, 255)),
+      m.colore_giusto((0, 0, 0, 0)))
+print(m.esito(True, True), m.esito(True, None), m.esito(False, None), m.esito(True, False), m.esito(None, None))
+EOF
+)
+  has "il verde riletto, con un po' di scarto" "True True False False" "$out"
+  has "esiti" "('ok', 0) ('ok', 0) ('ko', 1) ('ko', 1) ('incerto', 2)" "$out"
+}
+
+test_gpu_probe_scarta_chi_non_disegna() {
+  cat >"$PREFIX/bin/glxinfo" <<'EOF'
+#!/bin/sh
+echo "OpenGL renderer string: FD840"
+EOF
+  chmod +x "$PREFIX/bin/glxinfo"
+  PATH="$PREFIX/bin:$PATH"
+  gpu_disegna() { [[ ! -f $HOME/non_disegna ]]; }
+  eq "disegna: profilo buono" FD840 "$(gpu_probe_one kgsl)"
+  touch "$HOME/non_disegna"
+  fails gpu_probe_one kgsl
+  has "motivo nel registro" "risponde ma non disegna" "$(cat "$TOD_LOG")"
+  eq "il software non si prova: è l'ultima spiaggia" FD840 "$(gpu_probe_one llvmpipe)"
+}
+
+test_virgl_prova_non_tocca_il_desktop() { # `tod gpu probe` dal desktop acceso su virgl (Mali) spegneva il server di
+  # tutte le app: ora le prove usano un server a parte, su un socket loro, e quello del desktop resta
+  command -v python3 >/dev/null || return 0
+  _virgl_finto
+  cat >"$PREFIX/bin/glxinfo" <<'EOF'
+#!/bin/sh
+echo "sock=${VTEST_SOCKET_NAME:-nessuno}" >>"$HOME/glxinfo_env"
+echo "OpenGL renderer string: virgl (Mali-G77)"
+EOF
+  chmod +x "$PREFIX/bin/glxinfo"
+  gpu_disegna() { return 0; }
+  conf_set VIRGL_MODO ""
+  virgl_start
+  local prima dopo
+  prima=$(virgl_pid)
+  [[ -n $prima ]]
+  eq "il pid è del server" virgl_test_serv "$(cat "/proc/$prima/comm")"
+  virgl_start   # già acceso: non ne parte un altro
+  eq "uno solo" "$prima" "$(virgl_pid)"
+  eq "prova di virgl" "virgl (Mali-G77)" "$(gpu_probe_one virgl)"
+  eq "prova di virgl-angle" "virgl (Mali-G77)" "$(gpu_probe_one virgl-angle)"
+  dopo=$(virgl_pid)
+  eq "il server del desktop è ancora lui" "$prima" "$dopo"
+  has "la prova usa il suo socket" "sock=$TMPDIR/tod-virgl-prova.sock" "$(cat "$HOME/glxinfo_env")"
+  has "server di prova col suo socket" "--socket-path $TMPDIR/tod-virgl-prova.sock" "$(cat "$HOME/virgl_args")"
+  has "virgl-angle: ANGLE sul Vulkan del telefono" "--angle-vulkan --socket-path" "$(cat "$HOME/virgl_args")"
+  eq "il socket di prova non resta" no "$([[ -e $TMPDIR/tod-virgl-prova.sock ]] && echo si || echo no)"
+  # cambio di modo: il server riparte con l'opzione nuova
+  virgl_start angle-vulkan
+  [[ $(virgl_pid) != "$prima" ]]
+  eq "modo ricordato" angle-vulkan "$(cat "$TMPDIR/tod-virgl.modo")"
+  virgl_stop
+  fails virgl_pid
+  eq "niente tracce" no "$([[ -e $TMPDIR/tod-virgl.pid || -e $TMPDIR/tod-virgl.modo ]] && echo si || echo no)"
+  # un processo qualunque col testo nel comando non è il server (prima: pgrep -f / pkill -f)
+  sh -c 'sleep 5 # virgl_test_server' &
+  local altro=$!
+  fails virgl_running
+  virgl_stop
+  kill -0 "$altro"
+  kill "$altro" 2>/dev/null || true
+}
+
+test_virgl_riaccendi() { # senza Adreno tutto l'OpenGL passa da virgl: se cade lo si riaccende
+  local fatti="$WORK/vs_fatti_$$"
+  : >"$fatti"
+  have() { [[ $1 == virgl_test_server_android ]] || { [[ $1 != notify-send ]] && command -v "$1" >/dev/null 2>&1; }; }
+  virgl_running() { [[ -s $fatti ]]; }
+  virgl_start() { echo riacceso >>"$fatti"; }
+  conf_set GPU_PROFILE virgl
+  virgl_riaccendi
+  virgl_riaccendi   # ora c'è: niente
+  eq "caduto: riacceso una volta" 1 "$(wc -l <"$fatti" | tr -d ' ')"
+  has "nel registro" "lo riaccendo" "$(cat "$TOD_LOG")"
+  # non riparte mai: dopo 5 tentativi si smette
+  virgl_running() { return 1; }
+  local i
+  for i in 1 2 3 4 5 6 7 8; do virgl_riaccendi; done
+  eq "al più 5 volte per sessione" 5 "$(wc -l <"$fatti" | tr -d ' ')"
+  # profili con un driver vero: virgl non serve, non si accende niente
+  : >"$fatti"
+  VIRGL_RIAVVII=0
+  conf_set GPU_PROFILE zink-turnip
+  conf_set CX_GPU_PROFILE zink
+  virgl_riaccendi
+  eq "Adreno: niente virgl" 0 "$(wc -l <"$fatti" | tr -d ' ')"
+}
+
+test_session_guardia() { # 16 novembre: solo la barra ripartiva da sola; bordi, priorità, popup, telefono, Start e
+  # pannelli caduti mancavano fino al riavvio del desktop
+  local avvii="$WORK/sg_avvii_$$" sg_fatti="$WORK/sg_fatti_$$" finto
+  : >"$avvii"; : >"$sg_fatti"
+  virgl_riaccendi() { :; }
+  # un servizio finto: un processo col nome giusto nel comando, e il suo file pid
+  finto() { # finto nome-del-file-pid testo
+    bash -c 'exec -a "python3 /x/'"$2"'" sleep 30' >/dev/null 2>&1 &
+    echo $! >"$TMPDIR/$1"
+  }
+  session_bordi_start() { echo bordi >>"$avvii"; finto tod-edges.pid tod-edges.py; }
+  priorita_start() { echo priorita >>"$avvii"; }
+  priorita_voluta() { [[ $(conf_get PRIORITA 1) == 1 ]]; }
+  session_avvisi_start() { echo avvisi >>"$avvii"; }
+  phone_status_start() { echo telefono >>"$avvii"; }
+  session_start_menu() { echo start >>"$avvii"; }
+  session_pannelli_start() { echo pannelli >>"$avvii"; }
+  local -A GUARDIA_VISTI=() GUARDIA_CADUTE=()
+  session_guardia_giro
+  eq "mai visti accesi: non si avvia niente" "" "$(cat "$avvii")"
+  finto tod-edges.pid tod-edges.py
+  local bordi=$!
+  finto tod-priorita.pid tod-priorita.py
+  local pri=$!
+  session_servizio_vivo "$TMPDIR/tod-edges.pid" tod-edges
+  fails session_servizio_vivo "$TMPDIR/tod-edges.pid" tod-barra
+  fails session_servizio_vivo "$TMPDIR/tod-nessuno.pid" tod-edges
+  session_guardia_giro
+  eq "accesi: niente da fare" "" "$(cat "$avvii")"
+  kill "$bordi"; wait "$bordi" 2>/dev/null || true
+  session_guardia_giro
+  eq "bordi caduti: riaccesi, e solo loro" bordi "$(cat "$avvii")"
+  has "nel registro" "guardiano: bordi non c'è più, lo riaccendo (volta 1)" "$(cat "$TOD_LOG")"
+  session_guardia_giro
+  eq "ora ci sono: niente" bordi "$(cat "$avvii")"
+  # spento apposta (tod priorita off): non si riaccende
+  conf_set PRIORITA 0
+  kill "$pri"; wait "$pri" 2>/dev/null || true
+  session_guardia_giro
+  eq "priorità spenta apposta: resta spenta" bordi "$(cat "$avvii")"
+  # un servizio che non riparte: 5 tentativi e basta
+  conf_set PRIORITA 1
+  GUARDIA_VISTI[priorita]=1
+  local i
+  for i in 1 2 3 4 5 6 7 8; do session_guardia_giro; done
+  eq "al più 5 volte a testa" 5 "$(grep -c priorita "$avvii")"
+  kill "$(cat "$TMPDIR/tod-edges.pid")" 2>/dev/null || true
+  # il ciclo: finché c'è il server X; uno solo; il lucchetto non resta
+  # (il socket di X si guarda a ogni giro, il controllo completo una volta al minuto)
+  mkdir -p "$TMPDIR/.X11-unix"
+  python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$(x11_sock)"
+  x11_running() { return 0; }
+  session_guardia_giro() { echo giro >>"$sg_fatti"; if (( $(wc -l <"$sg_fatti") >= 2 )); then rm -f "$(x11_sock)"; fi; }
+  TOD_GUARDIA_OGNI=0.05 session_guardia
+  eq "due giri, poi il server X non c'è più" 2 "$(wc -l <"$sg_fatti" | tr -d ' ')"
+  # socket rimasto da un server X morto: il controllo completo (al primo giro) se ne accorge
+  python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$(x11_sock)"
+  : >"$sg_fatti"
+  x11_running() { return 1; }
+  TOD_GUARDIA_OGNI=0.05 session_guardia
+  eq "server X morto col socket rimasto: nessun giro" 0 "$(wc -l <"$sg_fatti" | tr -d ' ')"
+  rm -f "$(x11_sock)"
+  eq "il lucchetto non resta" no "$([[ -e $TMPDIR/tod-guardia.pid ]] && echo si || echo no)"
+  has "comando interno" "_guardia) session_guardia" "$(cat "$ROOT/tod")"
+  has "dall'hook di sessione" "session_guardia_start" "$(declare -f session_hook)"
+  # all'arresto si ferma per primo: sennò riaccenderebbe i servizi che si stanno chiudendo
+  has "fermato prima di tutto" "session_guardia_stop" "$(declare -f session_stop | sed -n 1,6p)"
+  local n
+  for n in "${GUARDIA_SERVIZI[@]}"; do [[ $(tr -cd '|' <<<"${GUARDIA_TABELLA[$n]}") == '|||' ]]; done
+}
+
+test_cx_run_codice_dell_app() { # un'app uscita con un codice diverso da 0 non è un guasto di tod: prima ogni volta
+  # "ERRORE ... Errore inatteso" nel registro e sul terminale (oltre 200 in un mese)
+  _fake_rootfs
+  cx_run() { return "${FINTO_RC:-0}"; }
+  local rc=0 out
+  out=$( (trap 'tod_on_error $? x "$BASH_COMMAND"' ERR; FINTO_RC=137; cx_cli run -- app-finta) 2>&1) || rc=$?
+  eq "il codice dell'app arriva a chi l'ha lanciata" 137 "$rc"
+  hasnt "niente errore inatteso sul terminale" "✘" "$out"
+  hasnt "niente ERRORE nel registro" "ERRORE" "$(cat "$TOD_LOG")"
+  has "ma l'uscita resta scritta" "cx run: app-finta è uscita con 137" "$(cat "$TOD_LOG")"
+  rc=0
+  (FINTO_RC=0; cx_cli run -- app-finta) || rc=$?
+  eq "uscita normale" 0 "$rc"
+}
+
+test_frequenza_schermo_per_mesa() { # Chromium/Electron chiedono la frequenza a ogni fotogramma: senza l'estensione
+  # VidMode (Termux:X11 non l'ha) due righe di errore per fotogramma nel registro. I due moduli rispondono a Mesa
+  local f
+  for f in "$ROOT/share/tod-gettext.c" "$ROOT/share/diretto/tod-diretto.c"; do
+    has "${f##*/}: risponde alla versione" "int XF86VidModeQueryVersion(void *dpy" "$(cat "$f")"
+    has "${f##*/}: risponde alla modalità" "int XF86VidModeGetModeLine(void *dpy" "$(cat "$f")"
+    has "${f##*/}: solo a Mesa" 'strstr(chi_e.dli_fname, "libGLX_mesa")' "$(cat "$f")"
+    has "${f##*/}: solo se l'estensione manca" '"XFree86-VidModeExtension"' "$(cat "$f")"
+    # le librerie di X sono caricate in locale da Mesa: RTLD_DEFAULT non le vede (la prima versione rispondeva 0)
+    hasnt "${f##*/}: mai RTLD_DEFAULT per XQueryExtension" 'dlsym(RTLD_DEFAULT, "XQueryExtension")' "$(cat "$f")"
+  done
+}
+
+test_cx_gpu_probe_virgl_modo() { # container su virgl: il modo del server è uno solo, quello del desktop se usa virgl
+  _fake_rootfs
+  GPU_FAMILY=mali
+  conf_set CX_MESA_TAG ""
+  have() { [[ $1 == virgl_test_server_android ]] || command -v "$1" >/dev/null 2>&1; }
+  virgl_prova_start() { echo "prova:${1:-sistema}" >>"$WORK/cxm_$$"; }
+  virgl_prova_stop() { :; }
+  cx_gpu_disegna() { [[ ! -f $WORK/cxm_ko_$$ ]] || [[ " $* " != *" GALLIUM_DRIVER=virpipe "* ]] || [[ $(tail -n 1 "$WORK/cxm_$$") != prova:sistema ]]; }
+  cx_run() {
+    if [[ " $* " == *" GALLIUM_DRIVER=virpipe "* ]]; then
+      has "socket di prova visto dal container" "VTEST_SOCKET_NAME=/tmp/tod-virgl-prova.sock" "$*" >&2
+      echo "OpenGL renderer string: virgl (Mali-G77)"
+    else
+      echo "OpenGL renderer string: llvmpipe (LLVM 19)"
+    fi
+  }
+  conf_set GPU_PROFILE llvmpipe
+  cx_gpu_probe
+  eq "virgl di sistema" virgl "$(conf_get CX_GPU_PROFILE)"
+  eq "modo deciso dal container" "" "$(conf_get VIRGL_MODO)"
+  # l'OpenGL ES di sistema risponde ma non disegna: si passa ad ANGLE sul Vulkan
+  touch "$WORK/cxm_ko_$$"
+  cx_gpu_probe
+  eq "ripiego su ANGLE" virgl-angle "$(conf_get CX_GPU_PROFILE)"
+  eq "modo del server" angle-vulkan "$(conf_get VIRGL_MODO)"
+  has "scartato nel registro" "cx probe virgl: il driver risponde ma non disegna" "$(cat "$TOD_LOG")"
+  rm -f "$WORK/cxm_ko_$$"
+  # il desktop usa già virgl-angle: il container prova solo quello, e il modo resta del desktop
+  : >"$WORK/cxm_$$"
+  conf_set GPU_PROFILE virgl-angle
+  conf_set VIRGL_MODO angle-vulkan
+  cx_gpu_probe
+  eq "stesso modo del desktop" virgl-angle "$(conf_get CX_GPU_PROFILE)"
+  eq "provato solo quello" "prova:angle-vulkan" "$(cat "$WORK/cxm_$$")"
+}
+
+test_priorita_virgl() { # il server virgl è "schermo": mai abbassato né sacrificato per primo
+  command -v python3 >/dev/null || return 0
+  local out
+  out=$(_stampa_py "$ROOT/share/priorita_dati.py" <<'EOF'
+def p(pid, gen, nome, comm=None):
+    return m.Processo(pid, gen, nome, comm or nome)
+proc = {1: p(1, 0, "com.termux"), 5: p(5, 1, "virgl_test_server_android", "virgl_test_serv"),
+        6: p(6, 5, "virgl_test_server_android", "virgl_test_serv"), 7: p(7, 5, "virgl_render_server", "virgl_render_se"),
+        20: p(20, 1, "glmark2")}
+c = m.classi(proc, None, set())
+print(" ".join(f"{k}:{c[k]}" for k in sorted(c)))
+EOF
+)
+  has "server, figli e render server" "5:schermo 6:schermo 7:schermo 20:altro" "$out"
 }
 
 # --- rete e GitHub --------------------------------------------------------------
@@ -589,8 +937,9 @@ test_cx_gpu_probe_virgl_mali() { # Mali: glxinfo con virpipe dà BadMatch, ma co
   GPU_FAMILY=mali
   conf_set CX_MESA_TAG ""
   have() { [[ $1 == virgl_test_server_android ]] || command -v "$1" >/dev/null 2>&1; }
-  virgl_start() { return 0; }
-  virgl_stop() { :; }
+  virgl_prova_start() { return 0; }
+  virgl_prova_stop() { :; }
+  virgl_stop() { echo "spento il virgl del desktop" >>"$WORK/cxv_stop_$$"; }
   cx_run() {
     local a v=0
     for a in "$@"; do [[ $a == GALLIUM_DRIVER=virpipe ]] && v=1; done
@@ -601,6 +950,7 @@ test_cx_gpu_probe_virgl_mali() { # Mali: glxinfo con virpipe dà BadMatch, ma co
   cx_gpu_probe
   eq "virgl scelto" virgl "$(conf_get CX_GPU_PROFILE)"
   has "percorso di virpipe forzato" LIBGL_ALWAYS_SOFTWARE=1 "$(cat "$R/etc/tod/gpu.env")"
+  eq "la prova non spegne il virgl del desktop" no "$([[ -e $WORK/cxv_stop_$$ ]] && echo si || echo no)"
 }
 
 test_cx_runner_script() {
@@ -2711,6 +3061,84 @@ True" "$out"
   has "stampante ferma: si può riprendere" '"riprendi", n, then=' "$(cat "$ROOT/share/tod-settings.py")"
 }
 
+test_scanner_wsd() { # 13 novembre, Pietro: "su Windows funziona lo scanner di rete". La Ricoh MP C2011 non ha eSCL ma è uno
+  # scanner WSD (WS-Scan), che risponde solo alla ricerca multicast. share/stampa/wsd.py: ricerca, descrizione del
+  # dispositivo, capacità nelle unità di eSCL, scansione (vetro, alimentatore fronte-retro, occupato, vuoto), MTOM
+  command -v python3 >/dev/null || return 0
+  local d="$WORK/wsd_$$" out
+  mkdir -p "$d"
+  out=$(TMPDIR="$d" TOD_TERMUX_HOME="$d" LANGUAGE=it python3 - "$ROOT" "$d" <<'EOF'
+import os, subprocess, sys, threading
+root, d = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.join(root, "share/stampa"))
+import escl, wsd
+
+def finto(*arg):
+    p = subprocess.Popen([sys.executable, os.path.join(root, "tests/wsd_finto.py"), "--per", "30",
+                          "--registro", os.path.join(d, "registro")] + list(arg), stdout=subprocess.PIPE, text=True)
+    return p, [int(x) for x in p.stdout.readline().split()]
+
+p, (http, udp) = finto("--pagine", "2")
+try:
+    trovati = wsd.scopri(1.0, dest=("127.0.0.1", udp))
+    print(sorted(trovati), [(ip, x) == ("127.0.0.1", [f"http://127.0.0.1:{http}"]) for ip, x in trovati.values()])
+    ident, (ip, x) = next(iter(trovati.items()))
+    voce = wsd.descrivi(ident, x, ip)
+    print(voce["nome"], voce["chiave"], voce["url"] == f"wsd+http://127.0.0.1:{http}/scan", voce["dove"])
+    print(wsd.descrivi("urn:uuid:altro", x, ip))   # identità sbagliata: niente
+    cap = escl.capacita(voce["url"])
+    v, f = cap["fonti"]["Platen"], cap["fonti"]["Feeder"]
+    print(cap["modello"], cap["versione"], v["colori"], v["dpi"], v["max_l"], v["max_a"], v["formati"])
+    print(f["colori"], f["dpi"], f["fronte_retro"])
+    pagine = []
+    xml = escl.impostazioni_xml("Platen", "Grayscale8", 300, *escl.area(v, "a4"), versione=cap["versione"])
+    print("vetro", escl.scansiona(voce["url"], xml, pagine.append, una_sola=True), len(pagine), pagine[0][:2] == b"\xff\xd8")
+    xml = escl.impostazioni_xml("Feeder", "RGB24", 200, *escl.area(f, "a4"), versione="2.0", fronte_retro=True)
+    print("alimentatore", escl.scansiona(voce["url"], xml, pagine.append), len(pagine))
+    escl.salva([(j, 300) for j in pagine], os.path.join(d, "scansione.pdf"))
+    print("pdf", open(os.path.join(d, "scansione.pdf"), "rb").read().count(b"/Type /Page "))
+    reg = open(os.path.join(d, "registro")).read()
+    print("biglietto vetro", "<wscn:InputSource>Platen</wscn:InputSource>" in reg, "<wscn:ColorProcessing>Grayscale8<" in reg,
+          "<wscn:ScanRegionWidth>8267</wscn:ScanRegionWidth>" in reg, "<wscn:ImagesToTransfer>1<" in reg)
+    print("biglietto alimentatore", "ADFDuplex" in reg, "<wscn:MediaBack>" in reg, "<wscn:Width>200</wscn:Width>" in reg)
+finally:
+    p.kill(); p.wait()
+os.remove(os.path.join(d, "registro"))
+p, (http, udp) = finto("--pagine", "0", "--occupato", "2")
+try:
+    u = f"wsd+http://127.0.0.1:{http}/scan"
+    xml = escl.impostazioni_xml("Feeder", "RGB24", 300, 2480, 3508)
+    try: escl.scansiona(u, xml, lambda j: None, pausa=0.05)
+    except escl.Errore as e: print("vuoto:", e)
+    print("occupato due volte, poi riprova:", open(os.path.join(d, "registro")).read().count("CreateScanJob http"))
+    annulla = threading.Event(); annulla.set()
+    print("annullata", escl.scansiona(u, xml, lambda j: None, annulla=annulla))
+finally:
+    p.kill(); p.wait()
+try: escl.capacita("wsd+http://127.0.0.1:1/scan", attesa=2)
+except escl.Errore as e: print("spento:", str(e).split(" (")[0])
+EOF
+)
+  rm -rf "$d"
+  eq "WSD: ricerca, descrizione, capacità, vetro, alimentatore fronte-retro, PDF, vuoto, occupato, annullata, spento" \
+"['urn:uuid:fd9b6954-1dd1-11b2-a165-c82258373a8c'] [True]
+RICOH MP C2011 wsd:urn:uuid:fd9b6954-1dd1-11b2-a165-c82258373a8c True wifi
+None
+RICOH MP C2011 wsd ['Grayscale8', 'RGB24'] [100, 200, 300, 600] 3507 4960 ['image/jpeg']
+['Grayscale8', 'RGB24'] [200, 300] True
+vetro 1 1 True
+alimentatore 4 5
+pdf 5
+biglietto vetro True True True True
+biglietto alimentatore True True True
+vuoto: Nessun foglio da scansionare: mettilo nell'alimentatore
+occupato due volte, poi riprova: 3
+annullata 0
+spento: Scanner non raggiungibile" "$out"
+  has "la ricerca degli scanner chiede anche WSD" "wsd.cerca(attesa)" "$(sed -n '/^def cerca(/,/^def candidati/p' "$ROOT/share/stampa/escl.py")"
+  has "l'aggiunta per indirizzo prova anche WSD" "wsd.cerca(3.0)" "$(sed -n '/^def aggiungi_indirizzo(/,/^def togli/p' "$ROOT/share/stampa/escl.py")"
+}
+
 test_scanner_delle_stampanti() { # 11 novembre, Pietro: la multifunzione Wi-Fi "non viene né rilevata né riesco ad aggiungerla
   # via IP". Le multifunzione che annunciano solo la stampa: si prova la scansione agli indirizzi delle stampanti
   # trovate; più porte nell'aggiunta per indirizzo; l'errore dice se è spenta o se non sa fare la scansione in rete
@@ -2731,6 +3159,7 @@ m.scanner_delle_stampanti(prova, ora=1000 + 700); print(len(provati))     # dopo
 print(m.candidati_indirizzo("192.168.0.150"))
 print(m.candidati_indirizzo("192.168.0.150:9095"), m.candidati_indirizzo("http://x/eSCL"))
 m.candidati_indirizzo = lambda t: []
+import wsd; wsd.cerca = lambda attesa=2.0: []   # (niente ricerca WSD vera nelle prove)
 m.risponde_qualcuno = lambda t: False
 try: m.aggiungi_indirizzo("192.168.0.222")
 except m.Errore as e: print(e)
@@ -2745,7 +3174,7 @@ EOF
 ['http://192.168.0.150/eSCL', 'https://192.168.0.150/eSCL', 'http://192.168.0.150:8080/eSCL', 'http://192.168.0.150:9095/eSCL', 'http://192.168.0.150:631/eSCL', 'https://192.168.0.150:8443/eSCL']
 ['http://192.168.0.150:9095/eSCL', 'https://192.168.0.150:9095/eSCL'] ['http://x/eSCL']
 Nessun dispositivo risponde a «192.168.0.222». Controlla che sia acceso e sulla stessa rete Wi-Fi.
-Il dispositivo a «192.168.0.150» risponde, ma non offre la scansione in rete (AirScan/eSCL)." "$out"
+Il dispositivo a «192.168.0.150» risponde, ma non offre la scansione in rete (AirScan/eSCL o WSD)." "$out"
 }
 
 test_stampa_driver_ricoh() { # 12 novembre, la stampante vera di Pietro: Ricoh MP C2011 (da ufficio, non AirPrint). A CUPS
@@ -3019,6 +3448,146 @@ EOF
   hasnt "nessuna app a parte" "tod-archivio.py" "$(cat "$ROOT/lib/desktop.sh")"
 }
 
+test_priorita() { # 15 novembre, Pietro: "una gestione della memoria tale da mantenere sempre tutto fluido anche quando
+  # sotto sforzo". Tutto ereditava la priorità -10 del server grafico: ora (share/priorita_dati.py) schermo e app attiva
+  # in alto, le altre app e i servizi a 0, i lavori pesanti (e chi lanciano) a 10; l'app Android mai toccata; la
+  # memoria si libera sotto il 12%, al più ogni 2 minuti
+  command -v python3 >/dev/null || return 0
+  local d="$WORK/pri_$$" out
+  mkdir -p "$d"
+  out=$(PROC="$d/proc" _stampa_py "$ROOT/share/priorita_dati.py" <<'EOF'
+import os
+def p(pid, gen, nome):
+    return m.Processo(pid, gen, nome, nome)
+proc = {1: p(1, 0, "com.termux"), 10: p(10, 1, "xfwm4"), 11: p(11, 1, "tod-barra.py"), 20: p(20, 1, "code-oss"),
+        21: p(21, 20, "code"), 22: p(22, 21, "python3"), 23: p(23, 21, "clang"), 24: p(24, 23, "cc1"),
+        30: p(30, 1, "xfce4-terminal"), 31: p(31, 30, "bash"), 32: p(32, 31, "make"), 33: p(33, 32, "cc1"),
+        40: p(40, 1, "tod-phone-status.py"), 50: p(50, 1, "prova-carico"), 60: p(60, 1, "chrome"), 61: p(61, 60, "chrome"),
+        70: p(70, 11, "mousepad")}
+c = m.classi(proc, 20, {20, 30, 60})
+print(" ".join(f"{k}:{c[k]}" for k in sorted(c)))
+print([m.nuovo_nice(*a) for a in [("pesante", -10, -10), ("pesante", 10, -10), ("app", -10, -10), ("app", 5, -10),
+       ("altro", -8, -8), ("attiva", 0, -10), ("attiva", 10, -10), ("attiva", 5, -10), ("attiva", -10, -10),
+       ("attiva", 0, None), ("schermo", -10, -10), (None, -10, -10)]])
+print(m.da_liberare(1000, 10000, -1e9, 0), m.da_liberare(1300, 10000, -1e9, 0), m.da_liberare(1000, 10000, 0, 60),
+      m.da_liberare(1000, 10000, 0, 121), m.da_liberare(5, 0, -1e9, 0))
+P = os.environ["PROC"]
+def finto(pid, gen, comm, argv, nice, avvio):
+    os.makedirs(f"{P}/{pid}/task/{pid}", exist_ok=True)
+    open(f"{P}/{pid}/stat", "w").write(f"{pid} ({comm}) S {gen} 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 {nice} 1 0 {avvio} 0")
+    open(f"{P}/{pid}/cmdline", "wb").write(b"\0".join(a.encode() for a in argv) + b"\0")
+finto(5, 1, "python3", ["python3", "/x/tod-barra.py"], -10, 777)
+finto(6, 5, "ld.so", ["/x/ld.so", "--argv0", "/usr/bin/code"], 0, 778)
+nomi = {}
+a = m.leggi_processi(P, nomi)
+open(f"{P}/5/cmdline", "wb").write(b"altro\0")
+b = m.leggi_processi(P, nomi)
+print(sorted((x.pid, x.genitore, x.nome, x.inizio) for x in a.values()), b[5].nome, m.nice_di(5, P), m.fili(5, P),
+      m.nice_di(99, P), m.fili(99, P))
+EOF
+)
+  eq "priorità: classi, nice, memoria, /proc" "1:None 10:schermo 11:schermo 20:attiva 21:attiva 22:attiva 23:pesante 24:pesante 30:app 31:app 32:pesante 33:pesante 40:altro 50:None 60:app 61:app 70:altro
+[10, None, 0, None, 0, -10, -10, None, None, None, None, None]
+True False False True False
+[(5, 1, 'tod-barra.py', 777), (6, 5, 'code', 778)] tod-barra.py -10 [5] None []" "$out"
+  out=$(_stampa_py "$ROOT/share/prova_fluidita.py" <<'EOF'
+print(m.statistiche([5, 1, 3, 2, 4, 100, 0, 0, 0, 0]), m.statistiche([]))
+EOF
+)
+  eq "misura: mediana, percentili, massimo" "(2, 100, 100, 100) (0.0, 0.0, 0.0, 0.0)" "$out"
+  # avvio dalla sessione, spegnibile; tod priorita
+  out=$(TOD_ROOT=/r TOD_STATE_DIR="$d" bash -c 'source "$1/lib/priorita.sh"
+    have() { return 0; }; setsid() { "$@"; }; python3() { echo "PY $*"; }
+    conf_get() { echo "$PRI"; }
+    PRI=0 priorita_start; PRI=1 priorita_start; sleep 0.2; cat "$TOD_STATE_DIR/priorita.log"' _ "$ROOT" 2>&1)
+  eq "avviato solo con PRIORITA=1" "PY /r/share/tod-priorita.py" "$out"
+  has "dall'hook di sessione" "priorita_start || true" "$(sed -n '/^session_hook()/,/^}/p' "$ROOT/lib/session.sh")"
+  has "tod carica lib/priorita.sh" " installer priorita; do" "$(sed -n 9p "$ROOT/tod")"
+  has "tod priorita" 'priorita | priorità | priority) priorita_cli "$@"' "$(cat "$ROOT/tod")"
+  s=$(cat "$ROOT/share/tod-priorita.py")
+  has "servizio: uno solo" "fcntl.LOCK_EX | fcntl.LOCK_NB" "$s"
+  has "servizio: una finestra chiusa non lo fa cadere" "XSetErrorHandler" "$s"
+  has "servizio: alla fine rimette le priorità" "s.rimetti()" "$s"
+  has "memoria: solo le app del telefono in cache" '"am", "kill-all"' "$s"
+}
+
+test_adb_senza_fili() { # 15 novembre, Pietro: "un'interfaccia di sistema in stile DexOS per il collegamento adb
+  # wireless quando mi collego ad una rete wifi nuova" (e niente adb tcpip: "non voglio problemi di sicurezza"). La
+  # logica (share/adb_dati.py) con un adb finto: chi è collegato, le porte annunciate da Bonjour (solo quelle del
+  # telefono stesso), collegamento e associazione, la rete Wi-Fi, le reti dove non chiedere
+  command -v python3 >/dev/null || return 0
+  local d="$WORK/adb_$$" out
+  mkdir -p "$d/bin"
+  cat >"$d/bin/adb" <<'EOF'
+#!/bin/sh
+echo "$*" >>"$ADB_REG"
+case "$1" in
+  devices)
+    printf 'List of devices attached\n127.0.0.1:41829\toffline\n'
+    if [ -f "$ADB_REG.ok" ]; then printf '127.0.0.1:%s\tdevice\n' "$(cat "$ADB_REG.ok")"; fi ;;
+  connect)
+    if [ "$2" = 127.0.0.1:40001 ]; then echo 40001 >"$ADB_REG.ok"; echo "connected to $2"; else echo "failed to connect to $2"; fi ;;
+  pair)
+    if [ "$3" = 123456 ]; then echo "Successfully paired to $2 [guid=adb-X]"; else echo "Failed: Wrong password"; fi ;;
+  disconnect) echo "disconnected $2" ;;
+esac
+EOF
+  chmod +x "$d/bin/adb"
+  out=$(D="$d" ADB_REG="$d/reg" TOD_ADB="$d/bin/adb" _stampa_py "$ROOT/share/adb_dati.py" <<'EOF'
+import os
+d = os.environ["D"]
+print(m.presente(), m.collegato(), m.dispositivi()["127.0.0.1:41829"])
+r = [("adb-R5CX._adb-tls-connect._tcp.local", 33, (40001, "android.local")),
+     ("adb-R5CX._adb-tls-pairing._tcp.local", 33, (40555, "android.local")),
+     ("adb-ALTRO._adb-tls-connect._tcp.local", 33, (39999, "altro.local")),
+     ("adb-R5CX._adb-tls-connect._tcp.local", 16, {})]
+s = {"adb-r5cx._adb-tls-connect._tcp.local": "192.168.1.20", "adb-r5cx._adb-tls-pairing._tcp.local": "192.168.1.20",
+     "adb-altro._adb-tls-connect._tcp.local": "192.168.1.30"}
+print(m.porte("192.168.1.20", (r, s)), m.porte("192.168.1.99", (r, s)), m.porte(None, ([], {})))
+print(m.porte_aperte("Host: 127.0.0.1 ()\tPorts: 40001/open/tcp//unknown///, 40555/open/tcp//unknown///"))
+print(m.collega(39999)[0], m.collega(40001)[0], m.collegato())
+print(m.associa(40555, "000000")[0], m.associa(40555, "123456")[0])
+print(m.codice_valido("123 456"), m.codice_valido("12-34-56"), m.codice_valido("12345"), m.codice_valido(None))
+w = {"supplicant_state": "COMPLETED", "ip": "192.168.1.20", "ssid": '"Casa"', "bssid": "02:00:00:00:00:00"}
+print(m.rete_wifi({"wifi": w}), m.rete_wifi({"wifi": dict(w, bssid="AA:BB:CC:00:11:22", ssid="<unknown ssid>")}))
+print(m.rete_wifi({"wifi": {"supplicant_state": "DISCONNECTED", "ip": "0.0.0.0"}}), m.rete_wifi({}))
+f = os.path.join(d, "conf", "reti.json")
+m.segna_mai("ip:192.168.1", f)
+m.segna_mai("ip:10.0.0", f)
+mai = m.reti_mai(f)
+print(sorted(mai), m.reti_mai(os.path.join(d, "manca.json")))
+rete = m.rete_wifi({"wifi": w})
+print(m.da_chiedere(rete, None, set()), m.da_chiedere(rete, "127.0.0.1:1", set()), m.da_chiedere(rete, None, mai),
+      m.da_chiedere(None, None, set()), m.da_chiedere(rete, None, set(), acceso=False))
+open(os.path.join(d, "tod.conf"), "w").write('ADB_CHIEDI="0"\n')
+print(m.conf("ADB_CHIEDI", "1", os.path.join(d, "tod.conf")), m.conf("ALTRO", "x", os.path.join(d, "tod.conf")))
+print("disconnect 127.0.0.1:41829" in open(os.environ["ADB_REG"]).read())
+EOF
+)
+  eq "ADB: collegato, porte nostre, collegamento, associazione, codice, rete, reti da non chiedere" "True None offline
+{'connect': 40001, 'pairing': 40555} {} {}
+[40001, 40555]
+False True 127.0.0.1:40001
+False True
+123456 123456 None None
+{'chiave': 'ip:192.168.1', 'nome': 'Casa', 'ip': '192.168.1.20'} {'chiave': 'bssid:aa:bb:cc:00:11:22', 'nome': None, 'ip': '192.168.1.20'}
+None None
+['ip:10.0.0', 'ip:192.168.1'] set()
+True False False False False
+0 x
+True" "$out"
+  local s
+  s=$(cat "$ROOT/share/adb_dati.py" "$ROOT/share/tod-adb.py")
+  hasnt "nessuna porta aperta da noi (niente adb tcpip)" '"tcpip"' "$s"
+  has "la finestra: avvisi come quelli di sistema" "tod_avviso.come_macos(d, libero=True)" "$s"
+  has "la finestra: le Opzioni sviluppatore al Debug wireless" "android.settings.APPLICATION_DEVELOPMENT_SETTINGS" "$s"
+  has "la finestra: una sola" "fcntl.LOCK_EX | fcntl.LOCK_NB" "$s"
+  s=$(cat "$ROOT/share/tod-phone-status.py")
+  has "il servizio del telefono: rete cambiata → la finestra" '"tod-adb.py"' "$s"
+  has "il servizio del telefono: il Wi-Fi si rilegge appena cambia l'indirizzo" "if n % 8 == 0 or cambiata:" "$s"
+  has "Impostazioni → Avanzate: collega e domanda" 'T("ADB senza fili", "Wireless ADB")' "$(cat "$ROOT/share/tod-settings.py")"
+}
+
 test_gestione_attivita() { # 12 novembre, Pietro: Gestione attività e Cattura di XFCE "hanno l'aspetto Linux": nostre.
   # I dati (share/attivita_dati.py) su un /proc finto: nomi leggibili, processore tra due letture, processi raggruppati
   # sotto l'app della finestra, i pezzi del desktop che non si terminano
@@ -3091,6 +3660,106 @@ EOF
   s=$(cat "$ROOT/share/video/tod-va-chip.c")
   has "aiutante: chi si è collegato (il processo dell'app)" "SO_PEERCRED" "$s"
   has "aiutante: lo stato di ogni video per la Gestione attività" '"%s/stato/%d.json"' "$s"
+  # le app del telefono (15 novembre, Pietro: "mi serve che gestione attività mi permetta di gestire le app android
+  # aperte"): dallo stato del processo a primo piano/background/sospesa, chiuse e di sistema fuori, le nostre mai;
+  # l'aiutante (finto) interrogato riga per riga e riacceso se cade; il .dex in sola lettura e rifatto col sorgente
+  cat >"$d/aiutante.py" <<'EOF'
+import sys
+for i, riga in enumerate(sys.stdin):
+    if i == 1:
+        sys.exit(0)   # la seconda domanda: cade
+    print('{"ok": true, "app": [["com.whatsapp", 10200, 16, 5, 0]]}' if riga.strip() == "stato" else "{}", flush=True)
+EOF
+  printf 'dex finto' >"$d/finto.dex"
+  out=$(AIUTANTE="$d/aiutante.py" DEX="$d/finto.dex" CASA="$d/casa-dex" _stampa_py "$ROOT/share/attivita_dati.py" <<'EOF'
+import os, sys
+righe = [["com.whatsapp", 10200, 16, 5, 0], ["org.telegram", 10300, 2, 9, 1], ["com.spotify", 10400, 4, 7, 0],
+         ["com.chiusa", 10500, 19, 3, 0], ["com.morta", 10600, 20, 3, 1], ["com.android.settings", 1000, 0, 8, 1],
+         ["com.sec.android.app.myfiles", 1000, 0, 8, 0], ["com.termux.x11", 10715, 2, 9, 1], ["senza.voce", 10700, 2, 1, 1],
+         ["rotta"], ["com.paused", 10800, 10, 4, 1]]
+note = {"com.whatsapp", "org.telegram", "com.spotify", "com.chiusa", "com.morta", "com.android.settings",
+        "com.sec.android.app.myfiles", "com.termux.x11", "com.paused"}
+print([(a["pkg"], a["stato"]) for a in m.app_android(righe, note)], m.app_android(None, note))
+print(m.STATI_ANDROID["sospesa"], m.stato_android(-1, 2, False))
+r2, n2 = [["com.sveglia", 10900, 11, 2, 0], ["com.musica", 10901, 5, 2, 0]], {"com.sveglia", "com.musica"}
+print([a["pkg"] for a in m.app_android(r2, n2)], [a["pkg"] for a in m.app_android(r2, n2, {"com.sveglia"})])
+t = m.Telefono([sys.executable, os.environ["AIUTANTE"]])
+print(t.chiedi(), t.chiedi(), t.chiedi()["ok"])   # risponde, cade (None), si riaccende da sé
+t.ferma(); t.ferma()
+print(m.Telefono(["/non/esiste"]).chiedi())
+c = os.environ["CASA"]
+p = m.dex_pronto(os.environ["DEX"], c)
+print(os.path.basename(p), oct(os.stat(p).st_mode & 0o777), open(p).read(), m.dex_pronto("/non/esiste", c))
+open(os.environ["DEX"], "w").write("dex nuovo")
+print(open(m.dex_pronto(os.environ["DEX"], c)).read(), oct(os.stat(p).st_mode & 0o777))
+EOF
+)
+  eq "app del telefono: stati, filtri, aiutante, dex in sola lettura" "[('com.whatsapp', 'sospesa'), ('org.telegram', 'primo_piano'), ('com.spotify', 'background'), ('com.android.settings', 'primo_piano'), ('com.paused', 'primo_piano')] []
+('Sospesa', 'Suspended') None
+['com.musica'] ['com.sveglia', 'com.musica']
+{'ok': True, 'app': [['com.whatsapp', 10200, 16, 5, 0]]} None True
+None
+tod-app-android.dex 0o400 dex finto None
+dex nuovo 0o400" "$out"
+  # il .dex vero: rifatto (share/android/compila.sh) dopo ogni modifica al sorgente
+  eq "il .dex dell'aiutante è quello del sorgente" "$(sha256sum "$ROOT/share/android/AppAndroid.java" | cut -d' ' -f1)" \
+    "$(cat "$ROOT/share/android/tod-app-android.sorgente" 2>/dev/null)"
+  has "il .dex c'è" "dex" "$(head -c 3 "$ROOT/share/android/tod-app-android.dex" 2>/dev/null)"
+  s=$(cat "$ROOT/share/android/AppAndroid.java")
+  has "aiutante: eventi delle attività con l'Accesso ai dati di utilizzo" '"queryEvents", long.class, long.class, String.class' "$s"
+  has "aiutante: stato del processo di ogni app" '"getUidProcessState", int.class, String.class' "$s"
+  has "aiutante: niente permesso → lo dice" '"{\"ok\":false,\"errore\":\"permesso\"}"' "$s"
+  # 15 novembre: queryEvents dà null anche senza eventi nuovi; preso per "permesso", le app sparivano a ogni giro
+  has "aiutante: il permesso si prova con lo stato del nostro processo" "statoDi(mioUid);" "$s"
+  hasnt "aiutante: null da queryEvents non è un permesso negato" "if (!leggiEventi())" "$s"
+  # l'elenco si aggiorna sul posto (Pietro: "le voci sfarfallano"): valori cambiati, righe nuove e sparite, ordine,
+  # e le righe che restano sono le stesse (selezione e righe aperte non si perdono). GTK: il Python di Termux
+  local py=/data/data/com.termux/files/usr/bin/python3
+  if [[ -x $py ]] && "$py" -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null; then
+    out=$(env -u LD_PRELOAD "$py" -c 'import importlib.util as u, sys
+s = u.spec_from_file_location("m", sys.argv[1]); m = u.module_from_spec(s); s.loader.exec_module(m)
+exec(sys.stdin.read())' "$ROOT/share/tod-attivita.py" 2>&1 <<'EOF'
+from gi.repository import Gtk
+class F:
+    sincronizza = m.Finestra.sincronizza
+f = F()
+f.store = Gtk.TreeStore(str, str, str, str, str, str, float, int, int)
+def r(k, nome, figli=()):
+    return (["", nome, "", "", "proc", k, 0.0, 0, 0], list(figli))
+def dump(p=None):
+    out, it = [], f.store.iter_children(p)
+    while it is not None:
+        out.append(f.store.get_value(it, 1) + (f"({dump(it)})" if f.store.iter_has_child(it) else ""))
+        it = f.store.iter_next(it)
+    return " ".join(out)
+f.sincronizza(None, [r("g:a", "A", [r("x", "x1"), r("y", "y1")]), r("g:b", "B", [r("z", "z1")])])
+print(dump())
+y = f.store.get_iter("0:1")
+f.sincronizza(None, [r("g:b", "B", [r("z", "z2")]), r("g:a", "A2", [r("y", "y2"), r("w", "w1")])])
+print(dump(), f.store.get_value(y, 1), f.store.get_path(y).to_string())
+EOF
+)
+    eq "elenco sul posto: valori, nuove, sparite, ordine, stesse righe" "A(x1 y1) B(z1)
+B(z2) A2(y2 w1) y2 1:0" "$out"
+  fi
+  # Termina attività: Forza arresto solo con ADB o Shizuku, 3 senza (la finestra apre la pagina dell'app)
+  out=$(TOD_ROOT=/r bash -c 'source "$1/lib/apps.sh"; log() { echo "LOG $*"; }
+    priv_ready() { return 1; }; priv_sh() { echo "PRIV $*"; }
+    android_app_chiudi com.whatsapp; echo "rc=$?"; android_app_chiudi "a;b"; echo "rc=$?"; android_app_chiudi com.termux.x11; echo "rc=$?"
+    priv_ready() { return 0; }; android_app_chiudi org.telegram; echo "rc=$?"' _ "$ROOT" 2>&1)
+  eq "Forza arresto: con ADB/Shizuku sì, senza 3, nomi strani e il desktop no" "rc=3
+rc=2
+rc=2
+LOG gestione attività: forza arresto di org.telegram
+PRIV am force-stop --user 0 org.telegram
+rc=0" "$out"
+  has "tod _telefono_chiudi" '_telefono_chiudi) android_app_chiudi "$@" || exit $?' "$(cat "$ROOT/tod")"
+  s=$(cat "$ROOT/share/tod-attivita.py")
+  has "Processi: il gruppo delle app del telefono" 'T(f"App del telefono ({n_tel})", f"Phone apps ({n_tel})")' "$s"
+  has "Processi: senza permesso, il link alle impostazioni" "android.settings.USAGE_ACCESS_SETTINGS" "$s"
+  has "Termina attività senza ADB: la pagina dell'app" '["tod", "_telefono_chiudi", pkg]' "$s"
+  has "Passa all'app come il launcher" '"-f", "0x10200000"' "$s"
+  has "nomi e icone anche con le app spente nello Start" "def info_app(pkg, comps=None):" "$(cat "$ROOT/share/tod-android-apps.py")"
   # la Cattura (GTK: il Python di Termux): nome come il telefono, finestre tagliate ai bordi, cartella delle prove
   local py=/data/data/com.termux/files/usr/bin/python3
   if [[ -x $py ]] && "$py" -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null; then
@@ -3132,6 +3801,58 @@ EOF
   has "tasto destro sulla barra: la nostra Gestione attività" '"tod-attivita.py")])' "$(cat "$ROOT/share/tod-barra.py")"
   has "pannello Batteria: la nostra Gestione attività" 'avvia("python3", os.path.join(QUI, "tod-attivita.py"))' "$(cat "$ROOT/share/tod-pannelli.py")"
   has "e le nostre al loro posto" 'desktop_sistema_entries' "$(sed -n '/^desktop_install_entries()/,/^}/p' "$ROOT/lib/desktop.sh")"
+}
+
+test_cattura_trascina() { # 15 novembre, Pietro: "quando faccio uno screen, nei pochi secondi in cui l'anteprima compare di
+  # lato, la possibilità di trascinarla dove voglio ed eventualmente allegarla". Come macOS. La parte senza grafica
+  # (share/cattura_dati.py): il percorso passato è quello vero (le app del container, con e senza proot, vedono /storage e
+  # /data ma non la casa del desktop), i formati offerti, l'icona che segue il puntatore, quando l'anteprima sparisce
+  local d out
+  d=$(mktemp -d)
+  mkdir -p "$d/vero/Screen shot"
+  printf '\x89PNG\r\n\x1a\nresto' >"$d/vero/Screen shot/Scatto è.png"
+  ln -s "$d/vero" "$d/Immagini"
+  out=$(D="$d" _stampa_py "$ROOT/share/cattura_dati.py" <<'EOF'
+import os
+d = os.environ["D"]
+p = d + "/Immagini/Screen shot/Scatto è.png"
+print("uri", m.uri_del_file(p) == "file://" + os.path.realpath(d) + "/vero/Screen%20shot/Scatto%20%C3%A8.png")
+print("container", m.leggibile_dal_container("/storage/emulated/0/DCIM/Screenshots/a.png"),
+      m.leggibile_dal_container("/data/data/com.termux/files/usr/tmp/a.png"), m.leggibile_dal_container("/opt/nessuno/a.png"))
+print("formati", m.BERSAGLI, m.dati_per("text/uri-list", p) == (m.uri_del_file(p) + "\r\n").encode(),
+      m.dati_per("image/png", p)[:4] == b"\x89PNG", m.dati_per("text/plain", p))
+print("icona", m.misura_icona(1600, 900, 160), m.misura_icona(100, 50, 160))
+print("presa", m.punto_presa(150, 73, 300, 260, 146, 160, 90), m.punto_presa(5, 0, 300, 260, 146, 160, 90),
+      m.punto_presa(290, 200, 300, 260, 146, 160, 90))
+print("dentro", m.dentro((5, 5), (0, 0, 10, 10)), m.dentro((10, 5), (0, 0, 10, 10)))
+t = m.Tempi(0)
+print("sola", t.resta(6.9), t.resta(7.1))
+t = m.Tempi(0)
+print("sopra", t.resta(6, True), t.resta(8.5), t.resta(9.1))
+t = m.Tempi(0)
+t.inizio()
+print("trascina", t.resta(100), t.fine(False, 100), t.resta(102.9), t.resta(103.1))
+t = m.Tempi(0)
+t.inizio()
+print("lasciata", t.fine(True, 1), t.resta(1.5), t.resta(1.5, True))
+EOF
+)
+  rm -rf "$d"
+  has "il file col percorso vero (collegamenti risolti, spazi e accenti codificati)" "uri True" "$out"
+  has "leggibile dal container: /storage e /data sì, il resto no" "container True True False" "$out"
+  has "il file come Esplora file (text/uri-list), poi l'immagine (image/png); altro no" "formati ('text/uri-list', 'image/png') True True None" "$out"
+  has "l'icona che segue il puntatore: più piccola, proporzioni giuste" "icona (160, 90) (100, 50)" "$out"
+  has "la si tiene dove la si è presa (la miniatura è centrata nell'area)" "presa (80, 44) (0, 0) (159, 89)" "$out"
+  has "il puntatore sopra l'anteprima" "dentro True False" "$out"
+  has "da sola sparisce dopo 7 s" "sola True False" "$out"
+  has "col puntatore sopra resta, poi 3 s" "sopra True True False" "$out"
+  has "durante il trascinamento resta; annullato, torna per 3 s" "trascina True True True False" "$out"
+  has "trascinamento riuscito: sparisce subito" "lasciata False False False" "$out"
+  local s
+  s=$(cat "$ROOT/share/tod-cattura.py")
+  has "l'anteprima è una sorgente di trascinamento (solo copia)" 'w.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, [], Gdk.DragAction.COPY)' "$s"
+  has "i dati dal modulo senza grafica" 'dati = D.dati_per(formato, self.percorso)' "$s"
+  has "a fine trascinamento si chiude se è riuscito" 'if not self.tempi.fine(not self.fallita, time.monotonic()):' "$s"
 }
 
 test_stampa_conf() { # i filtri di CUPS partono con l'ambiente del modo diretto: PassEnv sta in cups-files.conf. In
@@ -4299,6 +5020,19 @@ test_session_log_cap() { # session.log con un tetto, anche mentre un programma c
   SESSION_LOG_MAX=100000 session_log_cap
   n=$(stat -c %s "$TOD_STATE_DIR/start.log")
   if ((n > 100000)); then echo "  ✘ start.log ancora di $n byte"; return 1; fi
+  # 16 novembre: ogni registro del desktop ha il tetto (virgl, priorità, avvisi...), non solo tre
+  local r
+  for r in virgl priorita avvisi tod; do
+    head -c 300000 /dev/zero | tr '\0' 'x' >"$TOD_STATE_DIR/$r.log"
+  done
+  echo "piccolo" >"$TOD_STATE_DIR/rete.log"
+  SESSION_LOG_MAX=100000 session_log_cap
+  for r in virgl priorita avvisi tod; do
+    n=$(stat -c %s "$TOD_STATE_DIR/$r.log")
+    if ((n > 100000)); then echo "  ✘ $r.log ancora di $n byte"; return 1; fi
+  done
+  eq "un registro piccolo non si tocca" piccolo "$(cat "$TOD_STATE_DIR/rete.log")"
+  has "il server virgl scrive in coda (sennò il taglio lascerebbe un buco)" '>>"$TOD_STATE_DIR/virgl.log"' "$(cat "$ROOT/lib/gpu.sh")"
 }
 
 test_barra_icona_finestra() { # 1° novembre (S20+): app senza voce di menu con l'icona enorme nella barra
@@ -6473,6 +7207,153 @@ test_resize_edges() { # cornice da 1 px elegante, ma si ridimensiona senza mirar
   has "bordo da una riga" 'save(f"left-{sfx}", B, S(8)' "$(cat "$ROOT/share/dexos/dexos-theme.py")"
   has "angoli in basso larghi (sennò l'arrotondamento in alto sparisce)" "cw = R + S(10)" "$(cat "$ROOT/share/dexos/dexos-theme.py")"
   has "niente striscia in alto" "frame_border_top -n -t int -s 0" "$(cat "$ROOT/lib/look.sh")"
+}
+
+test_aggancio_bordi() { # 15 novembre, come Windows 11: metà, quarti, ingrandita, con l'anteprima; mai sotto la barra
+  _fake_xfconf
+  local q=xfconf-query out
+  # come il telefono di Pietro: tile_on_move acceso ma inutile, perché xfwm4 4.20 non aggancia con wrap_windows
+  $q -c xfwm4 -p /general/tile_on_move -n -t bool -s true
+  $q -c xfwm4 -p /general/wrap_windows -n -t bool -s true
+  printf '#!/bin/sh\n' >"$PREFIX/bin/python3"
+  chmod +x "$PREFIX/bin/python3"
+  xfwm_aggancio
+  eq "wrap_windows spento (acceso, xfwm4 non aggancia affatto)" false "$($q -c xfwm4 -p /general/wrap_windows)"
+  eq "aggancio nostro: quello di xfwm4 (senza anteprima) spento" false "$($q -c xfwm4 -p /general/tile_on_move)"
+  conf_set AGGANCIO xfwm4
+  xfwm_aggancio
+  eq "AGGANCIO=xfwm4: quello di xfwm4" true "$($q -c xfwm4 -p /general/tile_on_move)"
+  conf_set AGGANCIO 0
+  xfwm_aggancio
+  eq "AGGANCIO=0: niente aggancio" false "$($q -c xfwm4 -p /general/tile_on_move)"
+  eq "e wrap_windows sempre spento" false "$($q -c xfwm4 -p /general/wrap_windows)"
+  has "configurato a ogni avvio della sessione" "  xfwm_aggancio" "$(cat "$ROOT/lib/session.sh")"
+  has "lo fa il processo dei bordi invisibili" "TOD_AGGANCIO=\$aggancio setsid python3 \"\$TOD_ROOT/share/tod-edges.py\"" \
+    "$(cat "$ROOT/lib/session.sh")"
+  has "tod-edges carica l'aggancio" "import tod_aggancio" "$(cat "$ROOT/share/tod-edges.py")"
+  local py
+  py=$(PATH=${PATH#"$PREFIX/bin:"} command -v python3) || return 0   # quello vero, non il finto qui sopra
+  "$py" -c "import ast; ast.parse(open('$ROOT/share/tod-edges.py').read())"
+  printf 'ACCENTO="#8a5cf5"\nTEMA="scuro"\n' >"$WORK/agg_$$.conf"
+  out=$(cd "$ROOT/share" && "$py" - "$WORK/agg_$$.conf" <<'PY'
+import sys
+import tod_aggancio as A
+M = (0, 0, 1600, 900)
+for p in [(0, 450), (3, 450), (1599, 450), (800, 0), (0, 0), (0, 100), (100, 0), (1599, 0), (0, 899), (1599, 899),
+          (800, 899), (800, 450), (0, 200)]:
+    print("zona", p, A.zona(p[0], p[1], M, 1.125))
+# barra in basso alta 48. xfwm4 a volte rifà l'area di lavoro senza la barra (Barra._verifica_area in
+# tod-barra.py): conta anche la sua richiesta di spazio. Una richiesta senza senso (metà schermo) non conta
+print("area", A.area_lavoro((1600, 900), [0, 0, 1600, 900], [[0, 0, 0, 48, 0, 0, 0, 0, 0, 0, 0, 1599]]))
+print("area giusta", A.area_lavoro((1600, 900), [0, 0, 1600, 852], []))
+print("area strana", A.area_lavoro((1600, 900), None, [[0, 0, 0, 600]]))
+area = (0, 0, 1600, 852)
+for z in A.ZONE:
+    print("posto", z, A.posto(z, area))
+# finestra con la cornice di xfwm4 (bordo 1, titolo 35) e app con l'ombra dentro (_GTK_FRAME_EXTENTS 20)
+print("cliente", A.cliente(A.cornice_per((0, 0, 800, 852), (0, 0, 0, 0)), (1, 1, 35, 1)))
+print("ombra", A.cliente(A.cornice_per((0, 0, 800, 852), (20, 20, 20, 20)), (0, 0, 0, 0)))
+print("staccata", A.staccata((800, 0, 800, 852), (600, 400), (1400, 15)))
+acc, scuro = A.preferenze(sys.argv[1])
+print("preferenze", acc, scuro, hex(A.colori(acc, scuro)["pixel"]))
+print("senza tod.conf", A.preferenze("/nessuno"))
+PY
+)
+  has "bordo sinistro: metà sinistra" "zona (0, 450) sinistra" "$out"
+  has "basta avvicinarsi al bordo" "zona (3, 450) sinistra" "$out"
+  has "bordo destro: metà destra" "zona (1599, 450) destra" "$out"
+  has "bordo in alto: ingrandita" "zona (800, 0) alto" "$out"
+  has "angolo in alto a sinistra" "zona (0, 0) alto-sx" "$out"
+  has "l'angolo è un tratto di bordo (sinistro)" "zona (0, 100) alto-sx" "$out"
+  has "l'angolo è un tratto di bordo (in alto)" "zona (100, 0) alto-sx" "$out"
+  has "angolo in alto a destra" "zona (1599, 0) alto-dx" "$out"
+  has "angolo in basso a sinistra (sopra la barra)" "zona (0, 899) basso-sx" "$out"
+  has "angolo in basso a destra" "zona (1599, 899) basso-dx" "$out"
+  has "in basso fuori dagli angoli niente: c'è la barra" "zona (800, 899) None" "$out"
+  has "in mezzo niente" "zona (800, 450) None" "$out"
+  has "fuori dall'angolo: metà" "zona (0, 200) sinistra" "$out"
+  has "area senza la barra anche se xfwm4 la dimentica" "area (0, 0, 1600, 852)" "$out"
+  has "area di xfwm4 giusta" "area giusta (0, 0, 1600, 852)" "$out"
+  has "richiesta senza senso ignorata" "area strana (0, 0, 1600, 900)" "$out"
+  has "metà sinistra" "posto sinistra (0, 0, 800, 852)" "$out"
+  has "metà destra" "posto destra (800, 0, 800, 852)" "$out"
+  has "ingrandita: tutta l'area" "posto alto (0, 0, 1600, 852)" "$out"
+  has "quarto in alto a sinistra" "posto alto-sx (0, 0, 800, 426)" "$out"
+  has "quarto in alto a destra" "posto alto-dx (800, 0, 800, 426)" "$out"
+  has "quarto in basso a sinistra" "posto basso-sx (0, 426, 800, 426)" "$out"
+  has "quarto in basso a destra, sopra la barra" "posto basso-dx (800, 426, 800, 426)" "$out"
+  has "la cornice di xfwm4 sta dentro il posto" "cliente (1, 35, 798, 816)" "$out"
+  has "l'ombra delle app con la barra propria sta fuori" "ombra (-20, -20, 840, 892)" "$out"
+  has "staccata: misura di prima, puntatore nella stessa proporzione" "staccata (950, 0, 600, 400)" "$out"
+  has "colore d'accento e tema scuro da tod.conf" "preferenze #8a5cf5 True 0x8a5cf5" "$out"
+  has "senza tod.conf: blu di serie, chiaro" "senza tod.conf ('#0067c0', False)" "$out"
+}
+
+test_barra_anteprime() { # 15 novembre, Pietro: niente scritta "ridotta a icona", l'anteprima come Windows 11
+  local b out py
+  b=$(cat "$ROOT/share/tod-barra.py")
+  hasnt "niente più la scritta al posto della finestra ridotta" '"Ridotta a icona"' "$b"
+  has "l'immagine del compositore tenuta finché la finestra è sullo schermo" "XCompositeNameWindowPixmap(self.dpy, c)" "$b"
+  has "rimpicciolita nel server X (XRender), mai la finestra intera in Python" "xr.XRenderComposite(dpy, 1, cur, 0, dst" "$b"
+  has "foto alla sparizione, dopo l'attesa (chiusa o ridotta?)" "GLib.timeout_add(AD.ATTESA_MS, self._dopo_attesa, c)" "$b"
+  has "senza compositore: foto prima di ridurre dalla barra" "self.istantanee.prima_di_ridurre(w.get_xid())" "$b"
+  has "solo le finestre della barra si seguono" "self._segui_finestre(mostrate)" "$b"
+  has "anteprima aperta: si rinfrescano solo le sue finestre" "GLib.timeout_add(AD.VIVA_MS, self._rinfresca)" "$b"
+  has "con le anteprime spente niente istantanee" "self.istantanee.chiudi()" "$b"
+  has "stile dei pannelli: fondo pieno, angoli 18" "background-color: PANNELLO; border: 1px solid BORDO; border-radius: 18px" "$b"
+  has "la finestra attiva nel colore d'accento" ".finestra.attiva { background-color: alpha(ACCENTO" "$b"
+  has "versione scura" 'PANNELLO="#242428", MODULO="#2e2e33"' "$b"
+  has "la ✕ si vede sulla scheda sotto il mouse (in GTK 3 :hover non arriva lì)" ".finestra.sopra button.chiudi { opacity: 1; }" "$b"
+  py=$(command -v python3) || return 0
+  "$py" -c "import ast; ast.parse(open('$ROOT/share/tod-barra.py').read())"
+  out=$(cd "$ROOT/share" && "$py" - <<'PY'
+import anteprime_dati as A
+print("misura", A.misura(1920, 1080, 243, 144), A.misura(300, 200, 243, 144), A.misura(800, 1200, 243, 144), A.misura(0, 5))
+print("passi", A.passi(1920, 1053, 243, 133))
+print("piccola", A.passi(200, 100, 200, 100), "esatta", A.passi(486, 288, 243, 144))
+print("trasformazione", A.trasformazione(2, 2, 10, 3))
+# xfwm4: bordo 1, titolo 45; app con la barra propria: ombra trasparente (_GTK_FRAME_EXTENTS)
+print("cornice", A.ritaglio((722, 506), (1, 45, 720, 460)))
+print("ombra", A.ritaglio((760, 546), (0, 0, 760, 546), (20, 20, 15, 25)))
+print("ombra strana", A.ritaglio((100, 100), (0, 0, 100, 100), (60, 60, 0, 0)))
+print("fuori", A.ritaglio((300, 200), (-10, -10, 400, 400)))
+print("quante", A.quante(6, 257, 7, 1500), A.quante(3, 257, 7, 1500), A.quante(9, 257, 7, 200), A.quante(0, 257, 7, 1500))
+c = A.Cassetto(tetto=300)
+c.metti(1, "uno", 100); c.metti(2, "due", 100); c.metti(3, "tre", 100)
+c.prendi(1)                  # usata da poco: resta
+c.metti(4, "quattro", 100)   # oltre il tetto: via quella usata meno di recente (2)
+print("cassetto", sorted(c.voci), c.peso(), c.prendi(2))
+c.tieni_solo({1, 4})
+print("chiuse", sorted(c.voci))
+k = A.Cornici()
+print("compare", k.mappata(10), k.nominata(10, 501, 800, 600))
+print("spostata", k.cambiata(10, 800, 600), "ridimensionata", k.cambiata(10, 640, 480), k.nominata(10, 502, 640, 480))
+print("sparisce", k.smappata(10), "ridotta", k.dopo_attesa(10, True), k.libera(10))
+k.mappata(11); k.nominata(11, 601, 300, 200)
+print("chiusa", k.smappata(11), k.dopo_attesa(11, False), k.libera(11))
+k.mappata(12); k.nominata(12, 701, 300, 200); k.smappata(12); k.mappata(12)
+print("tornata subito", k.dopo_attesa(12, True), "distrutta", k.distrutta(12), k.rif)
+print("senza compositore", k.smappata(13), k.dopo_attesa(13, True))
+PY
+)
+  has "miniatura nelle proporzioni della finestra" "misura (243, 137) (216, 144) (96, 144) (0, 0)" "$out"
+  has "si dimezza a passi (media di 2×2), l'ultimo passo al più 2 volte" "passi [(960, 527, 2.0, 2.0), (480, 264, 2.0, 2.0), (243, 133, 1.97" "$out"
+  has "finestra piccola: mai ingrandita" "piccola [(200, 100, 1.0, 1.0)]" "$out"
+  has "dimezzata giusta: nessun passo in più" "esatta [(243, 144, 2.0, 2.0)]" "$out"
+  has "matrice di XRender in 16.16" "trasformazione [131072, 0, 655360, 0, 131072, 196608, 0, 0, 65536]" "$out"
+  has "senza la barra del titolo di xfwm4" "cornice (1, 45, 720, 460)" "$out"
+  has "senza l'ombra delle app con la barra propria" "ombra (20, 15, 720, 506)" "$out"
+  has "ombra più grande della finestra: ignorata" "ombra strana (0, 0, 100, 100)" "$out"
+  has "sempre dentro l'immagine" "fuori (0, 0, 300, 200)" "$out"
+  has "le schede che stanno nello schermo" "quante 5 3 1 0" "$out"
+  has "memoria con un tetto: via le usate meno di recente" "cassetto [1, 3, 4] 300 None" "$out"
+  has "le finestre chiuse si buttano" "chiuse [1, 4]" "$out"
+  has "finestra che compare: riferimento all'immagine" "compare nomina None" "$out"
+  has "spostata no, ridimensionata sì (e il vecchio si libera)" "spostata None ridimensionata nomina 501" "$out"
+  has "ridotta a icona: foto e riferimento liberato" "sparisce aspetta ridotta fotografa 502" "$out"
+  has "chiusa: niente foto, riferimento liberato" "chiusa aspetta libera 601" "$out"
+  has "tornata sullo schermo durante l'attesa: niente foto; distrutta: liberato" "tornata subito None distrutta 701 {}" "$out"
+  has "senza riferimento (niente compositore) non si aspetta nulla" "senza compositore None None" "$out"
 }
 
 test_avvisi_macos() { # 10 novembre, Pietro: "niente grafica linux, i popup di sistema in stile macOS"

@@ -132,6 +132,60 @@ def altri_demoni(proc="/proc"):
     return sorted(trovati)
 
 
+def ip_locale():
+    """l'indirizzo con cui il telefono esce verso la rete locale: cambia quando il Wi-Fi si collega o si stacca. Non
+    costa niente (nessun pacchetto parte), a differenza di Termux:API, che si chiede allora subito"""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("224.0.0.251", 5353))
+        return s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
+def adb_finestra():
+    """rete Wi-Fi nuova (o il desktop appena acceso sul Wi-Fi): share/tod-adb.py --rete decide da sé se collegarsi
+    in silenzio, chiedere o non fare niente (15 novembre, Pietro: un'interfaccia per ADB "quando mi collego ad una
+    rete wifi nuova")"""
+    import shutil
+    if shutil.which("adb") is None:
+        return
+    reg = os.path.join(os.environ.get("TOD_TERMUX_HOME") or HOME, ".local/state/tod/adb.log")
+    try:
+        with open(reg, "a") as f:
+            subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tod-adb.py"),
+                              "--rete"], stdin=subprocess.DEVNULL, stdout=f, stderr=f, start_new_session=True)
+    except OSError as e:
+        print(f"tod-phone-status: adb: {e}", file=sys.stderr)
+
+
+def rete_wifi(state):
+    qui = os.path.dirname(os.path.abspath(__file__))
+    if qui not in sys.path:
+        sys.path.insert(1, qui)
+    import adb_dati
+    r = adb_dati.rete_wifi(state)
+    return r["chiave"] if r else None
+
+
+def salva(state):
+    """lo stato per barra e pannelli. Un disco pieno (13 novembre: "No space left on device") non deve fermare il
+    servizio: batteria, rete e notifiche restavano ferme fino al riavvio del desktop. Si riprova al giro dopo."""
+    state["time"] = time.time()
+    tmp = STATE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, STATE)
+        return True
+    except OSError as e:
+        print(f"tod-phone-status: stato non scritto: {e}", file=sys.stderr)
+        return False
+
+
 def daemon():
     # uno solo: quelli delle accensioni di prima (vecchio D-Bus, notifiche perse, letture di Termux:API
     # doppie) si chiudono tutti, non solo quello del file pid (3 novembre: tre insieme)
@@ -143,6 +197,7 @@ def daemon():
     open(PIDFILE, "w").write(str(os.getpid()))
     mio_x = x_id()
     state, n, gone, seen = {}, 0, 0, None
+    locale, rete = ip_locale(), None
     while True:
         if not os.path.exists(NOTIFY_OFF):
             items = api("termux-notification-list", list)
@@ -168,15 +223,23 @@ def daemon():
                 print(f"tod-phone-status: volume: {e}", file=sys.stderr)
         if n % 4 == 0:
             state["battery"] = api("termux-battery-status")
-        if n % 8 == 0:   # la rete cambia meno spesso
+        ora_locale = ip_locale()
+        cambiata = ora_locale != locale   # Wi-Fi collegato o staccato: la rete si rilegge adesso, non al giro dopo
+        locale = ora_locale
+        if n % 8 == 0 or cambiata:   # la rete cambia meno spesso
             state["wifi"] = api("termux-wifi-connectioninfo")
             state["phone"] = api("termux-telephony-deviceinfo")
-        if n % 4 == 0:
-            state["time"] = time.time()
-            tmp = STATE + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(state, f)
-            os.replace(tmp, STATE)
+            try:
+                nuova = rete_wifi(state)
+                if nuova != rete:
+                    rete = nuova
+                    if nuova:
+                        salva(state)   # la finestra legge la rete dal file
+                        adb_finestra()
+            except Exception as e:   # noqa: BLE001 - mai fermare batteria e notifiche per ADB
+                print(f"tod-phone-status: adb: {e}", file=sys.stderr)
+        if n % 4 == 0 or cambiata:
+            salva(state)
             ora_x = x_id()
             if mio_x is None:
                 mio_x = ora_x

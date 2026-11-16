@@ -13,7 +13,8 @@ import re, sys, pathlib
 PREDICATES = {
     "gpu_glitchy", "files_phone_ok", "files_user_valid", "shizuku_ready", "android_apps_ready", "phone_status_ready", "cx_has", "cx_pkg_installed", "cx_is_electron", "look_dark", "look_dexos_ok",
     "step_done", "ui_has_dialog", "x11_running", "sha256_ok", "gpu_vk_ok",
-    "phantom_verify", "virgl_running", "virgl_start", "cx_installed", "x11_app_installed",
+    "phantom_verify", "virgl_running", "virgl_start", "virgl_serve", "session_servizio_vivo", "session_bordi_voluti",
+    "priorita_voluta", "cx_installed", "x11_app_installed",
     "pkg_installed", "pkg_has", "session_running", "have", "ui_yesno", "tui_available", "lingua_active", "phantom_verify_default",
     "bv_wanted", "bv_alive", "usb_bg_running", "tui_quiet", "app_rx", "x11_glamor_da_aggiornare",
     "self_is_install", "x11_glamor_ok", "stampa_on", "stampa_pronta", "rete_on", "rete_pronta",

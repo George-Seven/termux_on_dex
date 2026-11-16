@@ -172,7 +172,7 @@ session_prepare() { # tutto ciò che serve prima del desktop: file, audio, GPU
   if have termux-wake-lock; then termux-wake-lock || true; fi
   audio_start
   gpu_env_export   # (azzera prima eventuali variabili GPU dell'ambiente chiamante)
-  if [[ ${TOD_NEEDS_VIRGL:-0} == 1 || $(conf_get CX_GPU_PROFILE) == virgl ]]; then
+  if [[ ${TOD_NEEDS_VIRGL:-0} == 1 || $(conf_get CX_GPU_PROFILE) == virgl* ]]; then
     virgl_start || warn "$(t virgl_fail)"
   fi
 }
@@ -341,8 +341,11 @@ dev_cli() { # tod sviluppo on|off
 
 session_log_cap() { # registri della sessione con un tetto: un'app che li riempie di errori portava session.log
   # a 265 MB e start.log a 49 MB (23 ottobre; le app aperte da barra e Start ereditano i loro registri)
+  # 16 novembre: tutti i registri, non solo tre. Gli altri (virgl, priorità, avvisi, telefono, rete, stampa, USB,
+  # tod.log...) crescevano senza limite: un errore ripetuto a ogni fotogramma riempie il telefono (il 13 novembre
+  # un registro di prova è arrivato a 62 GB)
   local f max=${SESSION_LOG_MAX:-5242880} n
-  for f in "$TOD_STATE_DIR"/{session,barra,start}.log; do
+  for f in "$TOD_STATE_DIR"/*.log; do
     [[ -f $f ]] || continue
     n=$(stat -c %s "$f" 2>/dev/null || echo 0)
     ((n > max)) || continue
@@ -394,6 +397,120 @@ session_old_daemons() { # i demoni di sessione delle accensioni di prima, chiusi
   done
 }
 
+# --- i servizi del desktop, uno per funzione: li avvia l'hook e li riavvia il guardiano ---------------------------
+session_start_menu() { # lo Start in memoria, nascosto: si apre all'istante
+  [[ -x $PREFIX/bin/tod-start ]] || return 0
+  (setsid "$PREFIX/bin/tod-start" --preload </dev/null >>"$TOD_STATE_DIR/start.log" 2>&1 &)
+}
+
+session_pannelli_start() { # pannelli della barra (notifiche, volume...): in memoria, si aprono all'istante
+  if ! have python3 || [[ ! -x $TOD_ROOT/share/tod-pannello ]]; then return 0; fi
+  (setsid "$TOD_ROOT/share/tod-pannello" --preload </dev/null >>"$TOD_STATE_DIR/session.log" 2>&1 &)
+}
+
+session_bordi_voluti() { [[ $(conf_get BORDI_INVISIBILI 1) == 1 || $(conf_get AGGANCIO 1) == 1 ]]; }
+
+session_bordi_start() { # bordi invisibili e aggancio ai bordi (share/tod-edges.py)
+  local bordi aggancio=0
+  bordi=$(conf_get BORDI_INVISIBILI 1)
+  if [[ $(conf_get AGGANCIO 1) == 1 ]]; then aggancio=1; fi
+  if ! session_bordi_voluti || ! have python3; then return 0; fi
+  (TOD_BORDI=$bordi TOD_AGGANCIO=$aggancio setsid python3 "$TOD_ROOT/share/tod-edges.py" </dev/null \
+    >>"$TOD_STATE_DIR/session.log" 2>&1 &)
+}
+
+session_avvisi_start() { # domande, avvisi e Apri/Salva delle app di Debian (share/tod-avvisi-host.py)
+  if [[ $(conf_get AVVISI_DEBIAN 1) != 1 ]] || ! have python3 || ! cx_installed; then return 0; fi
+  (setsid env TOD_CX_ROOTFS="$(cx_rootfs)" python3 "$TOD_ROOT/share/tod-avvisi-host.py" </dev/null \
+    >>"$TOD_STATE_DIR/avvisi.log" 2>&1 &)
+}
+
+# --- guardiano della sessione (16 novembre) ----------------------------------------------------------------------
+# Solo la barra aveva chi la riaccende (share/tod-barra). Bordi e aggancio, priorità, popup e Apri/Salva delle app di
+# Debian, stato del telefono, Start e pannelli in memoria partivano una volta dall'hook: caduti (un errore di X, la
+# memoria finita) mancavano fino al riavvio del desktop, senza un segno. Ora un solo ciclo leggero, ogni 10 secondi,
+# guarda i loro file pid e riaccende chi è caduto, al più 5 volte a testa per sessione; e il server virgl
+# (virgl_riaccendi). Si riaccende solo ciò che in questa sessione si è visto acceso: un servizio spento apposta o
+# non installato non viene mai avviato da qui.
+# Leggero apposta (gira per tutta la sessione): un giro non avvia nessun processo, legge solo i file pid e
+# /proc/<pid>/cmdline (la prima versione, con pgrep e grep, costava 320 ms a giro: ora meno di 5). Il controllo
+# completo del server X (x11_running: tre pgrep) e di virgl si fa una volta al minuto.
+GUARDIA_SERVIZI=(bordi priorita avvisi telefono start pannelli)
+declare -gA GUARDIA_TABELLA=(   # nome → "file pid (in $TMPDIR)|testo nel comando|funzione che lo avvia|è voluto?"
+  [bordi]="tod-edges.pid|tod-edges|session_bordi_start|session_bordi_voluti"
+  [priorita]="tod-priorita.pid|tod-priorita.py|priorita_start|priorita_voluta"
+  [avvisi]="tod-avvisi.sock.pid|tod-avvisi-host.py|session_avvisi_start|true"
+  [telefono]="tod-phone-status.pid|tod-phone-status.py|phone_status_start|true"
+  [start]="tod-start.pid|tod-start|session_start_menu|true"
+  [pannelli]="tod-pannelli.pid|tod-pannelli.py|session_pannelli_start|true"
+)
+
+session_servizio_vivo() { # session_servizio_vivo filepid testo: il processo del file pid ha quel testo nel comando
+  local p="" riga
+  local -a argv=()
+  [[ -r $1 ]] || return 1
+  read -r p <"$1" || true
+  [[ $p =~ ^[0-9]+$ && -r /proc/$p/cmdline ]] || return 1
+  mapfile -d '' -t argv 2>/dev/null <"/proc/$p/cmdline" || return 1
+  riga="${argv[*]}"
+  [[ $riga == *"$2"* ]]
+}
+
+session_guardia_giro() { # un giro: chi si è visto acceso e non c'è più viene riacceso
+  local s filepid testo avvia voluto
+  if [[ ${GUARDIA_VIRGL:-1} == 1 ]]; then virgl_riaccendi || true; fi
+  for s in "${GUARDIA_SERVIZI[@]}"; do
+    IFS='|' read -r filepid testo avvia voluto <<<"${GUARDIA_TABELLA[$s]}"
+    if session_servizio_vivo "$TMPDIR/$filepid" "$testo"; then
+      GUARDIA_VISTI[$s]=1
+      continue
+    fi
+    if [[ -z ${GUARDIA_VISTI[$s]:-} ]] || ((${GUARDIA_CADUTE[$s]:-0} >= 5)); then continue; fi
+    if ! "$voluto"; then GUARDIA_VISTI[$s]=""; continue; fi   # spento apposta nel frattempo
+    GUARDIA_CADUTE[$s]=$((${GUARDIA_CADUTE[$s]:-0} + 1))
+    log "guardiano: $s non c'è più, lo riaccendo (volta ${GUARDIA_CADUTE[$s]})"
+    "$avvia" || true
+  done
+  return 0
+}
+
+session_guardia() { # tod _guardia: finché il desktop è acceso; uno solo per sessione
+  local lucchetto="$TMPDIR/tod-guardia.pid" vecchio="" mio="" sock n_giri=0 GUARDIA_VIRGL=0
+  local -A GUARDIA_VISTI=() GUARDIA_CADUTE=()
+  if [[ -r $lucchetto ]]; then read -r vecchio <"$lucchetto" || true; fi
+  if [[ $vecchio =~ ^[0-9]+$ && $vecchio != "$$" ]] && session_servizio_vivo "$lucchetto" _guardia; then return 0; fi
+  printf '%s\n' "$$" >"$lucchetto"
+  sock=$(x11_sock)
+  while [[ -S $sock ]]; do
+    mio=""
+    if [[ -r $lucchetto ]]; then read -r mio <"$lucchetto" || true; fi
+    [[ $mio == "$$" ]] || break
+    if ((n_giri % 6 == 0)); then   # una volta al minuto: il server X c'è davvero? virgl serve (il profilo può cambiare)?
+      x11_running || break
+      if virgl_serve; then GUARDIA_VIRGL=1; else GUARDIA_VIRGL=0; fi
+    fi
+    n_giri=$((n_giri + 1))
+    session_guardia_giro
+    sleep "${TOD_GUARDIA_OGNI:-10}"
+  done
+  mio=""
+  if [[ -r $lucchetto ]]; then read -r mio <"$lucchetto" || true; fi
+  if [[ $mio == "$$" ]]; then rm -f "$lucchetto"; fi
+  return 0
+}
+
+session_guardia_start() { # dall'hook di sessione
+  if [[ $(conf_get GUARDIANO 1) != 1 ]]; then return 0; fi
+  (setsid "$PREFIX/bin/tod" _guardia </dev/null >/dev/null 2>&1 &)
+}
+
+session_guardia_stop() {
+  local p
+  p=$(cat "$TMPDIR/tod-guardia.pid" 2>/dev/null) || p=""
+  rm -f "$TMPDIR/tod-guardia.pid"   # senza il suo lucchetto il ciclo esce da sé
+  if [[ $p =~ ^[0-9]+$ ]] && grep -qaF _guardia "/proc/$p/cmdline" 2>/dev/null; then kill "$p" 2>/dev/null || true; fi
+}
+
 session_hook() { # autostart dentro il desktop: DPI per lo schermo attuale, env del container
   local t0=$SECONDS
   session_old_daemons || true
@@ -401,13 +518,8 @@ session_hook() { # autostart dentro il desktop: DPI per lo schermo attuale, env 
   # barra, Start e pannelli per primi, appena si conoscono i DPI (le loro proporzioni): il resto dopo.
   # Prima partivano dopo aspetto e cartelle, e sul S20+ il desktop restava a lungo senza barra
   if have python3 && [[ $(conf_get DE xfce) == xfce ]]; then look_barra_avvia || true; fi
-  if [[ -x $PREFIX/bin/tod-start ]]; then
-    (setsid "$PREFIX/bin/tod-start" --preload </dev/null >>"$TOD_STATE_DIR/start.log" 2>&1 &)
-  fi
-  # pannelli della barra (notifiche, volume...): in memoria, si aprono all'istante
-  if have python3 && [[ -x $TOD_ROOT/share/tod-pannello ]]; then
-    (setsid "$TOD_ROOT/share/tod-pannello" --preload </dev/null >>"$TOD_STATE_DIR/session.log" 2>&1 &)
-  fi
+  session_start_menu || true
+  session_pannelli_start || true
   log "sessione: barra, Start e pannelli avviati dopo $((SECONDS - t0)) s"
   session_log_cap   # barra.log e start.log non si azzerano all'avvio
   session_log_watch
@@ -418,10 +530,10 @@ session_hook() { # autostart dentro il desktop: DPI per lo schermo attuale, env 
   files_rename_css || true
   lingua_ripara || true   # lingua scelta ma traduzione mancante: si installa da sola, in sottofondo
   log "sessione: aspetto e cartelle pronti dopo $((SECONDS - t0)) s"
-  # bordi invisibili per ridimensionare: la cornice disegnata è una riga (share/tod-edges.py)
-  if [[ $(conf_get BORDI_INVISIBILI 1) == 1 ]] && have python3; then
-    (setsid python3 "$TOD_ROOT/share/tod-edges.py" </dev/null >>"$TOD_STATE_DIR/session.log" 2>&1 &)
-  fi
+  # bordi invisibili per ridimensionare (la cornice disegnata è una riga) e aggancio ai bordi con l'anteprima,
+  # come Windows 11: tutti e due in share/tod-edges.py. xfwm_aggancio spegne quello di xfwm4 (senza anteprima)
+  xfwm_aggancio
+  session_bordi_start || true
   # dischi USB (share/usb/tod-usb): servizio che li dà a tod-lkl e li mostra in Esplora file
   if [[ $(conf_get USB_DISCHI 1) == 1 && -x $TOD_TERMUX_HOME/.local/share/tod-usb/tod-lkl ]]; then
     (setsid bash "$TOD_ROOT/share/usb/tod-usb" sorveglia </dev/null >>"$TOD_STATE_DIR/usb.log" 2>&1 &)
@@ -431,10 +543,7 @@ session_hook() { # autostart dentro il desktop: DPI per lo schermo attuale, env 
     (setsid env TOD_CX_ROOTFS="$(cx_rootfs)" bash "$TOD_ROOT/share/tod-open-host" </dev/null \
       >>"$TOD_STATE_DIR/open-host.log" 2>&1 &)
     # domande, avvisi e Apri/Salva delle app di Debian (zenity del container) come gli altri popup (tod-avvisi-host.py)
-    if [[ $(conf_get AVVISI_DEBIAN 1) == 1 ]] && have python3; then
-      (setsid env TOD_CX_ROOTFS="$(cx_rootfs)" python3 "$TOD_ROOT/share/tod-avvisi-host.py" </dev/null \
-        >>"$TOD_STATE_DIR/avvisi.log" 2>&1 &)
-    fi
+    session_avvisi_start || true
     cx_sync_session_env || true
     cx_install_runner || true   # tod-run (e pkexec, se scelto) sempre aggiornati
     cx_sync_look || true
@@ -449,6 +558,8 @@ session_hook() { # autostart dentro il desktop: DPI per lo schermo attuale, env 
   phone_status_start || true
   dev_tools_start || true
   updates_start || true
+  session_guardia_start || true   # i servizi del desktop (e virgl) ripartono se cadono
+  priorita_start || true   # schermo e app attiva in alto, lavori pesanti in basso, memoria (lib/priorita.sh)
   if [[ $(conf_get DE xfce) == xfce ]]; then   # Strumento di cattura e Gestione attività nostri (lib/desktop.sh)
     desktop_sistema_entries || true
     desktop_sistema_scorciatoie || true
@@ -520,6 +631,7 @@ termux_exit() { # dopo lo spegnimento (tod spegni) anche Termux, come "Exit" nel
 
 session_stop() {
   local p
+  session_guardia_stop   # per primo: sennò riaccenderebbe i servizi che qui sotto si chiudono
   # dischi USB: prima i dati scritti sui dischi, poi servizio, macchina e centralino chiusi (sennò
   # sopravvivono alla sessione e si contendono la macchina con quelli della sessione dopo). Mai nei
   # test: agirebbe sui processi veri

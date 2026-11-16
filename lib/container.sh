@@ -457,14 +457,29 @@ cx_profile_env() {
       ;;
     # LIBGL_ALWAYS_SOFTWARE: virpipe è un driver "software" di Mesa (manda i comandi a virgl, cioè alla
     # GPU): senza, Mesa di Debian prova prima i driver via DRI3 e virgl non viene usato
-    virgl) printf '%s\n' LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=virpipe MESA_GL_VERSION_OVERRIDE=4.0 ;;
+    virgl | virgl-angle) printf '%s\n' LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=virpipe MESA_GL_VERSION_OVERRIDE=4.0 ;;
     llvmpipe) echo LIBGL_ALWAYS_SOFTWARE=1 ;;
     *) return 1 ;;
   esac
 }
 
+cx_gpu_disegna() { # cx_gpu_disegna VAR=valore...: 1 solo se nel container il profilo NON disegna
+  local out rc root
+  if [[ ${TOD_GPU_DISEGNO:-1} != 1 ]]; then return 0; fi
+  root=$(cx_rootfs) || return 0
+  [[ -x $root/usr/bin/python3 && -f $TOD_ROOT/share/tod-gl-prova.py ]] || return 0
+  cp -f "$TOD_ROOT/share/tod-gl-prova.py" "$TMPDIR/tod-gl-prova.py" || return 0
+  if out=$(cx_run --raw env "$@" timeout 30 python3 /tmp/tod-gl-prova.py 2>&1 </dev/null); then rc=0; else rc=$?; fi
+  rm -f "$TMPDIR/tod-gl-prova.py"
+  log "cx disegno: rc=$rc $(grep -E '^(TEXTURE|FINESTRA|MOTIVO|ESITO)=' <<<"$out" | tr '\n' ' ')"
+  # solo un "no" detto dalla prova boccia: se non parte (python senza ctypes, proot) il profilo resta
+  if [[ $rc == 1 ]] && grep -q '^ESITO=ko' <<<"$out"; then return 1; fi
+  return 0
+}
+
 cx_gpu_probe() { # sceglie il profilo GPU del container → /etc/tod/gpu.env
-  local p out r best=""
+  local p out r best="" sock_prova
+  sock_prova=$(virgl_prova_sock)
   local -a cands=() envs=()
   if [[ $GPU_FAMILY == adreno && -n $(conf_get CX_MESA_TAG) ]]; then
     # Adreno 8xx: kgsl e zink diretto lasciano blocchi neri in Chromium/Electron (gpu_glitchy);
@@ -475,7 +490,13 @@ cx_gpu_probe() { # sceglie il profilo GPU del container → /etc/tod/gpu.env
       cands+=(kgsl zink)
     fi
   fi
-  if have virgl_test_server_android; then cands+=(virgl); fi
+  if have virgl_test_server_android; then
+    # un solo server virgl per desktop e container: se il desktop usa già virgl il modo è il suo
+    case $(conf_get GPU_PROFILE) in
+      virgl*) cands+=("$(conf_get GPU_PROFILE)") ;;
+      *) cands+=(virgl virgl-angle) ;;
+    esac
+  fi
   cands+=(llvmpipe)
   : >"$TOD_STATE_DIR/cx-gpu-probe.txt"
   local k=0
@@ -483,7 +504,11 @@ cx_gpu_probe() { # sceglie il profilo GPU del container → /etc/tod/gpu.env
     k=$((k + 1))
     progress_note "$((k * 90 / ${#cands[@]}))" "$(t tui_gpu_test "$p")"
     mapfile -t envs < <(cx_profile_env "$p")
-    if [[ $p == virgl ]]; then virgl_start || continue; fi
+    if [[ $p == virgl* ]]; then
+      # server di prova a parte, sul suo socket ($TMPDIR è il /tmp del container): quello del desktop resta com'è
+      virgl_prova_start "$(virgl_modo_di "$p")" || continue
+      envs+=("VTEST_SOCKET_NAME=/tmp/${sock_prova##*/}")
+    fi
     if out=$(cx_run --raw env "${envs[@]}" timeout 30 glxinfo -B 2>&1 </dev/null); then :; else out=""; fi
     r=$(sed -n 's/^[[:space:]]*OpenGL renderer string:[[:space:]]*//p' <<<"$out" | sed -n 1p)
     if [[ -z $r ]]; then
@@ -492,8 +517,15 @@ cx_gpu_probe() { # sceglie il profilo GPU del container → /etc/tod/gpu.env
       out=$(cx_run --raw env "${envs[@]}" timeout -s INT 6 glxgears -info 2>&1 </dev/null) || true
       r=$(sed -n 's/^GL_RENDERER[[:space:]]*=[[:space:]]*//p' <<<"$out" | sed -n 1p)
     fi
-    if [[ $p == virgl ]]; then virgl_stop; fi
     log "cx probe $p: ${r:-KO}"
+    if [[ -n $r ]] && { [[ $p == llvmpipe ]] || [[ ! ${r,,} =~ llvmpipe|softpipe ]]; }; then
+      # il driver risponde: disegna anche? (share/tod-gl-prova.py col python3 del container; vedi gpu_disegna)
+      if [[ $p != llvmpipe ]] && ! cx_gpu_disegna "${envs[@]}"; then
+        log "cx probe $p: il driver risponde ma non disegna: scartato"
+        r=""
+      fi
+    fi
+    virgl_prova_stop
     if [[ -n $r ]] && { [[ $p == llvmpipe ]] || [[ ! ${r,,} =~ llvmpipe|softpipe ]]; }; then
       printf '%s|ok|%s\n' "$p" "$r" >>"$TOD_STATE_DIR/cx-gpu-probe.txt"
       best=$p
@@ -504,6 +536,8 @@ cx_gpu_probe() { # sceglie il profilo GPU del container → /etc/tod/gpu.env
   best=${best:-llvmpipe}
   cx_profile_env "$best" | cx_write /etc/tod/gpu.env 644
   conf_set CX_GPU_PROFILE "$best"
+  # il modo del server virgl lo decide il container solo se il desktop non usa virgl (vedi gpu_write_env)
+  if [[ $best == virgl* && $(conf_get GPU_PROFILE) != virgl* ]]; then conf_set VIRGL_MODO "$(virgl_modo_di "$best")"; fi
 }
 
 cx_gpu_setup() { # passo dell'installer
@@ -827,9 +861,15 @@ cx_cli() { # tod cx install|remove|export|run|shell|update|backup|restore|probe
       ;;
     run)
       if [[ ${1:-} == -- ]]; then shift; fi
-      cx_run "$@"
+      # il codice d'uscita è dell'app (chiusa con un errore, terminata dalla Gestione attività...), non un guasto
+      # di tod: prima ogni app uscita con un codice diverso da 0 lasciava "ERRORE ... Errore inatteso" nel
+      # registro (oltre 200 righe in un mese: i guasti veri non si trovavano più) e sul terminale
+      local rc_app=0
+      cx_run "$@" || rc_app=$?
+      if ((rc_app)); then log "cx run: ${1:-} è uscita con $rc_app"; fi
+      exit "$rc_app"   # exit, non return: un return diverso da 0 farebbe scattare la trappola degli errori in tod
       ;;
-    shell | sh | login) cx_run ;;
+    shell | sh | login) cx_run || true ;;
     update | upgrade) run_step "$(t s_cx_update)" cx_upgrade; diretto_prepara || true ;;
     probe) run_step "$(t s_cxgpu)" x11_with_server cx_gpu_probe && info "GPU container: $(conf_get CX_GPU_PROFILE)" ;;
     backup)

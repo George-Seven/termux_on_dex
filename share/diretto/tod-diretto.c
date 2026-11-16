@@ -373,3 +373,85 @@ long syscall(long nr, long a, long b, long c, long d, long e, long f) {
   }
   return vero(nr, a, b, c, d, e, f);
 }
+
+// --- La frequenza dello schermo per Mesa (16 novembre) ------------------------------------------------------------
+// Chromium ed Electron (ogni app fatta con loro) chiedono a ogni fotogramma la frequenza dello schermo:
+// eglGetMscRateANGLE → glXGetMscRateOML di Mesa → XF86VidModeQueryVersion. A Termux:X11 quell'estensione manca, e
+// a ogni fotogramma Xlib scriveva "extension XFree86-VidModeExtension missing" e Chromium "glXGetMscRateOML
+// failed": 65 coppie di righe al secondo nel registro della sessione (decine di MB l'ora mentre una finestra si
+// muove) e la strada degli errori percorsa di continuo. Qui, solo quando chiede Mesa e solo se l'estensione manca,
+// si risponde con una modalità finta da 60 Hz (TOD_SCHERMO_HZ per un'altra): Mesa ne usa solo la frequenza, ed è
+// la stessa che Chromium assumeva dopo l'errore. Chiunque altro, o un server che l'estensione ce l'ha, passa oltre.
+typedef struct { const char *dli_fname; void *dli_fbase; const char *dli_sname; void *dli_saddr; } TodDlInfo;
+#define TOD_DLINFO TodDlInfo
+void *dlopen(const char *, int);
+int dladdr(const void *, TodDlInfo *);
+char *strstr(const char *, const char *);
+
+typedef struct {
+    unsigned short hdisplay, hsyncstart, hsyncend, htotal, hskew, vdisplay, vsyncstart, vsyncend, vtotal;
+    unsigned int flags;
+    int privsize;
+    int *privato;
+} TodModeLine;
+
+// Le librerie di X le carica Mesa per conto suo (dlopen locale): RTLD_DEFAULT e RTLD_NEXT da qui non le vedono.
+// Si prendono per nome, solo se sono già in memoria (RTLD_LAZY | RTLD_NOLOAD: non si carica mai niente).
+static void *tod_gia_caricata(const char *nome, const char *altro) {
+    void *h = dlopen(nome, 1 | 4);
+    if (!h && altro) h = dlopen(altro, 1 | 4);
+    return h;
+}
+
+static void *tod_vidmode_vera(const char *funzione) {
+    void *f = dlsym(RTLD_NEXT, funzione), *h;
+    if (!f && (h = tod_gia_caricata("libXxf86vm.so.1", "libXxf86vm.so"))) f = dlsym(h, funzione);
+    return f;
+}
+
+static int tod_vidmode_per_mesa(void *dpy, void *chi) {
+    static int manca = -1;   // l'estensione manca? (una domanda al server, la prima volta)
+    TOD_DLINFO chi_e;
+    if (!dladdr(chi, &chi_e) || !chi_e.dli_fname) return 0;
+    if (!strstr(chi_e.dli_fname, "libGLX_mesa") && !strstr(chi_e.dli_fname, "libGL.so")) return 0;
+    if (manca < 0) {
+        void *x11 = tod_gia_caricata("libX11.so.6", "libX11.so");
+        int (*chiedi)(void *, const char *, int *, int *, int *) =
+            x11 ? (int (*)(void *, const char *, int *, int *, int *))dlsym(x11, "XQueryExtension") : 0;
+        int a, b, c;
+        if (!chiedi) return 0;
+        manca = chiedi(dpy, "XFree86-VidModeExtension", &a, &b, &c) ? 0 : 1;
+    }
+    return manca;
+}
+
+int XF86VidModeQueryVersion(void *dpy, int *maggiore, int *minore) {
+    static int (*vero)(void *, int *, int *);
+    if (tod_vidmode_per_mesa(dpy, __builtin_return_address(0))) {
+        if (maggiore) *maggiore = 2;
+        if (minore) *minore = 2;
+        return 1;
+    }
+    if (!vero) vero = (int (*)(void *, int *, int *))tod_vidmode_vera("XF86VidModeQueryVersion");
+    return vero ? vero(dpy, maggiore, minore) : 0;
+}
+
+int XF86VidModeGetModeLine(void *dpy, int schermo, int *orologio, TodModeLine *m) {
+    static int (*vero)(void *, int, int *, TodModeLine *);
+    if (tod_vidmode_per_mesa(dpy, __builtin_return_address(0))) {
+        const char *e = getenv("TOD_SCHERMO_HZ");
+        int hz = 0;
+        while (e && *e >= '0' && *e <= '9') hz = hz * 10 + (*e++ - '0');
+        if (hz < 24 || hz > 480) hz = 60;
+        // frequenza = orologio * 1000 / (htotal * vtotal)
+        if (orologio) *orologio = hz * 1000;
+        if (m) {
+            m->hdisplay = 1000; m->hsyncstart = 1000; m->hsyncend = 1000; m->htotal = 1000; m->hskew = 0;
+            m->vdisplay = 1000; m->vsyncstart = 1000; m->vsyncend = 1000; m->vtotal = 1000;
+            m->flags = 0; m->privsize = 0; m->privato = 0;
+        }
+        return 1;
+    }
+    if (!vero) vero = (int (*)(void *, int, int *, TodModeLine *))tod_vidmode_vera("XF86VidModeGetModeLine");
+    return vero ? vero(dpy, schermo, orologio, m) : 0;
+}
