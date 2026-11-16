@@ -190,7 +190,7 @@ test_gpu_classify() {
   eq "nome con (TM)" 840 "$GPU_ADRENO"
   eq "senza revisione" "" "$GPU_REV"
   # le altre GPU, con un /dev finto (su un telefono Adreno quello vero ha kgsl-3d0)
-  local dev="$WORK/dev_$$"
+  local dev="$WORK/gpuclass_dev_$$"   # (un altro test usa dev_$$ come file)
   mkdir -p "$dev"
   TOD_DEV_DIR=$dev
   gpu_classify "" mali mali MT6989 Mediatek
@@ -3234,7 +3234,8 @@ test_stampa_ricoh_airprint() { # 13 novembre, Pietro: "o ip non valido oppure ch
   # openprinting-ppds presente. (2) "192.168.0.150/ipp" (indirizzo con percorso, senza ipp://) era "non valido"
   command -v python3 >/dev/null || return 0
   local out
-  out=$(TMPDIR="$WORK/sra_tmp" TOD_TERMUX_HOME="$WORK/sra_home" _stampa_py "$ROOT/share/stampa/tod-stampa.py" <<'EOF'
+  # LANGUAGE=it: i messaggi attesi sono in italiano (sul CI, in inglese, il test falliva)
+  out=$(LANGUAGE=it TMPDIR="$WORK/sra_tmp" TOD_TERMUX_HOME="$WORK/sra_home" _stampa_py "$ROOT/share/stampa/tod-stampa.py" <<'EOF'
 R = ["openprinting-ppds:0/ppd/openprinting/Ricoh/PXL/Ricoh-MP_C2011_PXL.ppd Ricoh MP C2011 PXL", "everywhere IPP Everywhere"]
 chieste = []
 class Ris:
@@ -7796,7 +7797,8 @@ PYEOF
   [[ ! -e $zr/usr/local/bin/zenity ]] || { echo "  ✘ AVVISI_DEBIAN=0: il zenity nostro doveva sparire"; return 1; }
   has "il servizio parte con la sessione, sapendo dov'è il container (percorsi di Apri/Salva)" \
     'TOD_CX_ROOTFS="$(cx_rootfs)" python3 "$TOD_ROOT/share/tod-avvisi-host.py"' \
-    "$(sed -n '/^session_hook() {/,/^}/p' "$ROOT/lib/session.sh")"
+    "$(sed -n '/^session_avvisi_start() {/,/^}/p' "$ROOT/lib/session.sh")"
+  has "e l'hook della sessione lo avvia" "session_avvisi_start" "$(sed -n '/^session_hook() {/,/^}/p' "$ROOT/lib/session.sh")"
 }
 
 test_portale_dei_file() { # 11 novembre: le app Electron (Boxy SVG…) mostravano i percorsi del container e non allegavano
