@@ -108,14 +108,35 @@ device_summary() {
   printf '  %-12s %s%s\n' "Termux" "${TERMUX_VER:-?}" "${TERMUX_SRC:+ ($TERMUX_SRC)}"
 }
 
-preflight() { # 0 = ok, 1 = errore bloccante
-  local fatal=0
+# Quanto spazio serve ancora da qui in poi → "minimo consigliato" in MB. Un'installazione nuova con il
+# container arriva a circa 8 GB; chi riprende a metà ha già scaricato quasi tutto e non va fermato.
+preflight_spazio() {
+  if step_done apps; then echo "500 1500"
+  elif step_done cx || [[ $(conf_get CX_ENABLE yes) != yes ]]; then echo "2000 4000"
+  else echo "4000 8000"; fi
+}
+
+preflight_32bit() { # Termux a 32 bit (anche su un telefono a 64): container, dischi e Termux:X11 nostri sono solo arm64
+  local pa=${TOD_PKG_ARCH:-}
+  if [[ -z $pa ]]; then pa=$(dpkg --print-architecture 2>/dev/null) || pa=""; fi
+  [[ $pa == arm || $pa == i686 || $ARCH == armv7* || $ARCH == armv8l || $ARCH == i?86 ]]
+}
+
+preflight() { # 0 = ok, 1 = errore bloccante. Ogni riga dice anche cosa fare: chi si ferma qui non ha altro
+  local fatal=0 serve consigliati
   if [[ $PREFIX != */com.termux/files/usr ]]; then err "$(t pf_not_termux)"; fatal=1; fi
   if [[ $(id -u) == 0 ]]; then err "$(t pf_root)"; fatal=1; fi
-  if [[ $ARCH != aarch64 ]]; then warn "$(t pf_arch "$ARCH")"; fi
+  if preflight_32bit; then err "$(t pf_arch32 "$ARCH")"; fatal=1
+  elif [[ $ARCH != aarch64 ]]; then warn "$(t pf_arch "$ARCH")"; fi
   if [[ $ANDROID_SDK =~ ^[0-9]+$ ]] && (( ANDROID_SDK < 26 )); then err "$(t pf_android)"; fatal=1; fi
-  if [[ $TERMUX_SRC == GOOGLE_PLAY_STORE ]]; then warn "$(t pf_playstore)"; fi
-  if (( FREE_MB < 1500 )); then err "$(t pf_space "$FREE_MB")"; fatal=1
-  elif (( FREE_MB < 4000 )); then warn "$(t pf_space "$FREE_MB")"; fi
+  case $TERMUX_SRC in
+    GOOGLE_PLAY_STORE) warn "$(t pf_playstore)" ;;
+    F_DROID) warn "$(t pf_fdroid)" ;;
+  esac
+  read -r serve consigliati <<<"$(preflight_spazio)"
+  if (( FREE_MB < serve )); then err "$(t pf_space_ko "$FREE_MB" "$serve")"; fatal=1
+  elif (( FREE_MB < consigliati )); then warn "$(t pf_space "$FREE_MB" "$consigliati")"; fi
+  # sotto i 6 GB (dichiarati: il sistema ne vede un po' meno) Android chiude presto i processi in sottofondo
+  if (( RAM_MB > 0 && RAM_MB < 5500 )); then warn "$(t pf_ram "$RAM_MB")"; fi
   return "$fatal"
 }

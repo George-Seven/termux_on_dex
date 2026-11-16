@@ -24,6 +24,14 @@ repo_errore() { # nessun server dei pacchetti di Termux raggiungibile: perché, 
   fi
 }
 
+dico() { # dico "italiano" "english": la lingua del telefono (prima di avere i testi del progetto)
+  local l=""
+  l=$(getprop persist.sys.locale 2>/dev/null) || l=""
+  if [[ -z $l ]]; then l=$(getprop ro.product.locale 2>/dev/null) || l=""; fi
+  if [[ -z $l ]]; then l=${LANG:-}; fi
+  if [[ ${l,,} == it* ]]; then printf '%s\n' "$1"; else printf '%s\n' "$2"; fi
+}
+
 main() {
   local repo=${TOD_REPO_URL:-https://github.com/PietroCav501/termux_on_dex}
   local branch=${TOD_BRANCH:-v2}   # la v2 sta nel ramo v2 (main è ancora la v1)
@@ -35,7 +43,8 @@ main() {
   if [[ ! -t 0 ]] && (exec </dev/tty) 2>/dev/null; then exec </dev/tty; fi
 
   if [[ ${PREFIX:-} != */com.termux/files/usr ]]; then
-    echo "✘ Questo installer va eseguito dentro Termux (F-Droid o GitHub)." >&2
+    dico "✘ Questo installer va eseguito dentro Termux (da GitHub: github.com/termux/termux-app/releases)." \
+      "✘ Run this installer inside Termux (from GitHub: github.com/termux/termux-app/releases)." >&2
     exit 1
   fi
 
@@ -44,7 +53,7 @@ main() {
     here=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
   fi
 
-  echo "• Preparazione di Termux…"
+  dico "• Preparazione di Termux…" "• Preparing Termux…"
   if command -v termux-wake-lock >/dev/null 2>&1; then termux-wake-lock || true; fi
   export DEBIAN_FRONTEND=noninteractive
   local -a apt_flags=(-y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
@@ -66,13 +75,13 @@ main() {
 
   if [[ -n $here && -f $here/tod && -d $here/lib ]]; then
     dest=$here
-    echo "• Uso la copia locale: $dest"
+    dico "• Uso la copia locale: $dest" "• Using the local copy: $dest"
   elif [[ -d $dest/.git ]]; then
-    echo "• Aggiorno $dest"
+    dico "• Aggiorno $dest" "• Updating $dest"
     git -C "$dest" fetch --depth 1 origin "$branch"
     git -C "$dest" reset --hard FETCH_HEAD
   else
-    echo "• Scarico Termux On DeX in $dest"
+    dico "• Scarico Termux On DeX in $dest" "• Downloading Termux On DeX to $dest"
     rm -rf "$dest"
     mkdir -p "$(dirname "$dest")"
     git clone --depth 1 -b "$branch" "$repo" "$dest"
@@ -80,7 +89,7 @@ main() {
 
   chmod 755 "$dest/tod"
   ln -sfn "$dest/tod" "$PREFIX/bin/tod"
-  echo "✔ Comando installato: tod"
+  dico "✔ Comando installato: tod" "✔ Command installed: tod"
   exec "$PREFIX/bin/tod" install "$@"
 }
 

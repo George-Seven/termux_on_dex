@@ -78,6 +78,9 @@ installer_questions() {
 }
 
 installer_question_phantom() {
+  # Il limite dei processi figli ("signal 9") c'è da Android 12; prima non serve, e fino ad Android 10 il
+  # Debug wireless non esiste nemmeno: la domanda porterebbe a una pagina delle impostazioni che non c'è
+  if [[ ${ANDROID_SDK:-} =~ ^[0-9]+$ ]] && (( ANDROID_SDK < 31 )); then conf_set PHANTOM_NOW no; return 0; fi
   if ui_yesno "$(t q_ph_title)" "$(t q_ph_text)" y; then conf_set PHANTOM_NOW yes; else conf_set PHANTOM_NOW no; fi
 }
 

@@ -119,10 +119,19 @@ phantom_verify() {
   [[ $a == false && $b == 2147483647 ]]
 }
 
+phantom_toggle_voce() { # la strada "manuale": l'interruttore nelle Opzioni sviluppatore c'è solo da Android 14
+  local sdk
+  sdk=$(prop ro.build.version.sdk)
+  if [[ $sdk =~ ^[0-9]+$ ]] && (( sdk < 34 )); then return 0; fi
+  printf '%s\n' toggle "$(t ph_m_toggle)"
+}
+
 phantom_fix() {
   local m
+  local -a manuale=()
+  mapfile -t manuale < <(phantom_toggle_voce)
   m=$(ui_menu "$(t ph_title)" "$(t ph_intro)" adb \
-    adb "$(t ph_m_adb)" toggle "$(t ph_m_toggle)" skip "$(t ph_m_skip)") || m=skip
+    adb "$(t ph_m_adb)" "${manuale[@]}" skip "$(t ph_m_skip)") || m=skip
   case $m in
     adb)
       # un Annulla premuto per sbaglio, un codice scaduto, Blocco automatico acceso: si riprova finché
@@ -130,7 +139,7 @@ phantom_fix() {
       while ! { { priv_ready || adb_connect_local; } && phantom_apply && phantom_verify; }; do
         warn "$(t ph_ko)"
         m=$(ui_menu "$(t ph_title)" "$(t ph_fail_text)" retry \
-          retry "$(t ph_m_retry)" toggle "$(t ph_m_toggle)" skip "$(t ph_m_skip)") || m=retry
+          retry "$(t ph_m_retry)" "${manuale[@]}" skip "$(t ph_m_skip)") || m=retry
         case $m in
           retry) continue ;;
           toggle)

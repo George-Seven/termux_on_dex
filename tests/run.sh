@@ -5682,6 +5682,111 @@ test_x11_glamor_nuova_versione() { # la Termux:X11 nuova si propone solo da tod 
   eq "con la Termux:X11 ufficiale: mai" "" "$(self_after)"
 }
 
+_pf_telefono() { # un telefono "buono" per i controlli iniziali: ogni prova ne cambia una cosa sola
+  PREFIX=/data/data/com.termux/files/usr ARCH=aarch64 ANDROID_SDK=34 TERMUX_SRC=GITHUB FREE_MB=20000 RAM_MB=11000
+  TOD_PKG_ARCH=aarch64 TOD_LANG=it
+}
+
+test_preflight_telefoni_diversi() { # 16 novembre: chi arriva con un telefono mai visto deve sapere perché si ferma e cosa fare
+  local out rc
+  _pf_telefono
+  rc=0; out=$(preflight 2>&1) || rc=$?
+  eq "telefono buono: passa" 0 "$rc"
+  eq "telefono buono: nessun avviso" "" "$out"
+  # spazio: un'installazione nuova arriva a 8 GB
+  FREE_MB=3000; rc=0; out=$(preflight 2>&1) || rc=$?
+  eq "3 GB liberi su un'installazione nuova: si ferma subito, non a metà" 1 "$rc"
+  has "dice quanto serve" "almeno 4000" "$out"
+  has "e cosa fare" "Libera spazio" "$out"
+  FREE_MB=6000; rc=0; out=$(preflight 2>&1) || rc=$?
+  eq "6 GB: va avanti" 0 "$rc"
+  has "ma avvisa che può non bastare" "circa 8000" "$out"
+  conf_set CX_ENABLE no
+  FREE_MB=3000; rc=0; out=$(preflight 2>&1) || rc=$?
+  eq "senza container 3 GB bastano per partire" 0 "$rc"
+  conf_set CX_ENABLE yes
+  step_mark cx
+  FREE_MB=3000; rc=0; out=$(preflight 2>&1) || rc=$?
+  eq "chi riprende col container già fatto non viene fermato" 0 "$rc"
+  step_mark apps
+  FREE_MB=700; rc=0; out=$(preflight 2>&1) || rc=$?
+  eq "quasi finito: basta poco" 0 "$rc"
+  # Termux a 32 bit
+  _pf_telefono; step_reset
+  TOD_PKG_ARCH=arm; rc=0; out=$(preflight 2>&1) || rc=$?
+  eq "Termux a 32 bit su un telefono a 64: si ferma" 1 "$rc"
+  has "dice quale file installare" "arm64-v8a" "$out"
+  _pf_telefono; ARCH=armv8l; rc=0; out=$(preflight 2>&1) || rc=$?
+  eq "32 bit visto dal sistema: si ferma" 1 "$rc"
+  _pf_telefono; ARCH=x86_64 TOD_PKG_ARCH=x86_64; rc=0; out=$(preflight 2>&1) || rc=$?
+  eq "x86_64: solo un avviso" 0 "$rc"
+  has "x86_64: l'avviso c'è" "x86_64" "$out"
+  # da dove viene Termux
+  _pf_telefono; TERMUX_SRC=F_DROID; rc=0; out=$(preflight 2>&1) || rc=$?
+  eq "Termux di F-Droid: va avanti" 0 "$rc"
+  has "F-Droid: dice cosa perde" "più lento" "$out"
+  has "F-Droid: e dove prendere l'altro" "github.com/termux/termux-app/releases" "$out"
+  _pf_telefono; TERMUX_SRC=GOOGLE_PLAY_STORE; rc=0; out=$(preflight 2>&1) || rc=$?
+  has "Play Store: mai provato" "Play Store" "$out"
+  # poca memoria
+  _pf_telefono; RAM_MB=3700; rc=0; out=$(preflight 2>&1) || rc=$?
+  eq "4 GB di memoria: va avanti" 0 "$rc"
+  has "ma avvisa" "Memoria: 3700" "$out"
+  _pf_telefono; RAM_MB=0; out=$(preflight 2>&1) || true
+  eq "memoria non letta: nessun avviso a vuoto" "" "$out"
+  # Android troppo vecchio
+  _pf_telefono; ANDROID_SDK=25; rc=0; out=$(preflight 2>&1) || rc=$?
+  eq "Android 7: si ferma" 1 "$rc"
+  # ogni testo c'è in tutte e due le lingue
+  TOD_LANG=en
+  _pf_telefono; TOD_LANG=en FREE_MB=3000; out=$(preflight 2>&1) || true
+  has "in inglese" "Free some space" "$out"
+}
+
+test_phantom_android_vecchio() { # prima di Android 12 il "signal 9" non c'è, e fino al 10 nemmeno il Debug wireless
+  local chiesto="$WORK/pav_$$"
+  ui_yesno() { echo si >>"$chiesto"; return 0; }
+  ANDROID_SDK=29 installer_question_phantom
+  eq "Android 10: nessuna domanda" no "$(conf_get PHANTOM_NOW)"
+  eq "Android 10: davvero non chiesto" "" "$(cat "$chiesto" 2>/dev/null)"
+  ANDROID_SDK=30 installer_question_phantom
+  eq "Android 11: nessuna domanda" "" "$(cat "$chiesto" 2>/dev/null)"
+  ANDROID_SDK=31 installer_question_phantom
+  eq "Android 12: si chiede" yes "$(conf_get PHANTOM_NOW)"
+  ANDROID_SDK="" installer_question_phantom
+  eq "versione non letta: si chiede lo stesso" "$(printf 'si\nsi')" "$(cat "$chiesto")"
+  # l'interruttore manuale delle Opzioni sviluppatore c'è solo da Android 14
+  prop() { echo 33; }
+  eq "Android 13: niente strada manuale nel menu" "" "$(phantom_toggle_voce)"
+  prop() { echo 34; }
+  eq "Android 14: c'è" toggle "$(phantom_toggle_voce | sed -n 1p)"
+  prop() { :; }
+  eq "versione non letta: c'è" toggle "$(phantom_toggle_voce | sed -n 1p)"
+  local visto="$WORK/pav_menu_$$"
+  prop() { echo 33; }
+  ui_menu() { printf '%s\n' "$@" >"$visto"; echo skip; }
+  phantom_fix 2>/dev/null || true
+  hasnt "Android 13: il menu non offre l'interruttore che non esiste" toggle "$(cat "$visto")"
+  has "Android 13: restano ADB e Salta" adb "$(cat "$visto")"
+}
+
+test_install_sh_lingua() { # il primo comando parla la lingua del telefono: chi arriva dall'estero non legge l'italiano
+  local d="$WORK/insl_$$" b="$WORK/insl_$$/bin" out
+  mkdir -p "$b" "$d/script"
+  cp "$ROOT/install.sh" "$d/script/"
+  printf '#!/bin/sh\n[ "$1" = persist.sys.locale ] && echo en-US\nexit 0\n' >"$b/getprop"
+  chmod +x "$b/getprop"
+  out=$(PATH="$b:$PATH" PREFIX=/usr bash "$d/script/install.sh" </dev/null 2>&1) || true
+  has "telefono in inglese: inglese" "Run this installer inside Termux" "$out"
+  hasnt "telefono in inglese: niente italiano" "va eseguito" "$out"
+  printf '#!/bin/sh\n[ "$1" = persist.sys.locale ] && echo it-IT\nexit 0\n' >"$b/getprop"
+  out=$(PATH="$b:$PATH" PREFIX=/usr bash "$d/script/install.sh" </dev/null 2>&1) || true
+  has "telefono in italiano: italiano" "va eseguito dentro Termux" "$out"
+  printf '#!/bin/sh\nexit 1\n' >"$b/getprop"
+  out=$(PATH="$b:$PATH" PREFIX=/usr LANG=C bash "$d/script/install.sh" </dev/null 2>&1) || true
+  has "lingua non letta: inglese" "Run this installer" "$out"
+}
+
 test_install_sh_full_upgrade_first() { # 31 ottobre: "CANNOT LINK EXECUTABLE" su un Termux appena installato
   local d="$WORK/inst_$$" b="$WORK/inst_$$/bin"
   mkdir -p "$d/com.termux/files/usr/bin" "$b" "$d/script"
