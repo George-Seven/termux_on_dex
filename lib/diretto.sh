@@ -149,13 +149,35 @@ diretto_socket_x() { # diretto_socket_x rootfs n → /tmp/.X11-unix/X<n> del con
   ln -sfn "$vero" "$l" 2>/dev/null || true
 }
 
+# Chi segnare se l'avvio cade: per `env VAR=x app ...` è l'app, non env. Segnando env, da lì in poi OGNI app
+# lanciata con env partiva in proot (16 novembre: un programma di prova caduto e /usr/bin/env in diretto-no).
+diretto_chiave() { # diretto_chiave rootfs comando [argomenti...]
+  local root=$1 c=$2 a p
+  shift 2
+  if [[ ${c##*/} == env ]]; then
+    while (($#)); do
+      a=$1
+      shift
+      case $a in
+        -u | --unset | -C | --chdir) if (($#)); then shift; fi ;;
+        -* | *=*) ;;
+        *)
+          if p=$(diretto_trova "$root" "$a"); then printf '%s' "$p"; return 0; fi
+          break ;;
+      esac
+    done
+  fi
+  printf '%s' "$c"
+}
+
 diretto_run() { # diretto_run comando [argomenti] → esce come l'app; 97 = senza proot non si può (usare proot)
-  local root d c real prog line u uid n zona rc=0 t0
+  local root d c real prog line u uid n zona rc=0 t0 chiave
   root=$(cx_rootfs) || return 97
   d=$(diretto_dir)
   diretto_pronto || return 97
   c=$(diretto_trova "$root" "$1") || return 97
-  if [[ -f $(diretto_no_file) ]] && grep -qxF "$c" "$(diretto_no_file)"; then return 97; fi
+  chiave=$(diretto_chiave "$root" "$c" "${@:2}")
+  if [[ -f $(diretto_no_file) ]] && grep -qxF "$chiave" "$(diretto_no_file)"; then return 97; fi
   real=$(cx_resolve "$root" "$c")
   [[ -f $real && -x $real ]] || return 97
   local -a args=("${@:2}")
@@ -281,7 +303,7 @@ diretto_run() { # diretto_run comando [argomenti] → esce come l'app; 97 = senz
         return
       fi
       if ((SECONDS - t0 < DIRETTO_ENTRO)); then
-        diretto_segna "$c" "uscita $rc"
+        diretto_segna "$chiave" "uscita $rc"
         diretto_chiudi_resti "$d/ld.so" "$real"
         return 97
       fi

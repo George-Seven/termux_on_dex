@@ -1274,6 +1274,19 @@ test_diretto_run() { # app di Debian senza proot: programma, script, Electron, r
   rc=0; diretto_run app || rc=$?
   eq "segnato: subito in proot, senza riprovare" "97:" "$rc:$(cat "$o")"
   rm -f "$TOD_STATE_DIR/diretto-no"
+  # lanciata con env: se cade si segna l'app, mai env (16 novembre: con env segnato, ogni app lanciata così
+  # partiva in proot)
+  elf "$r/usr/bin/env"
+  echo 134 >"$WORK/dr_rc_$$"; rc=0; diretto_run env A=1 -u B app uno || rc=$?; rm -f "$WORK/dr_rc_$$"
+  eq "caduta dentro env: in proot" 97 "$rc"
+  eq "segnata l'app, non env" "/usr/bin/app" "$(cat "$TOD_STATE_DIR/diretto-no")"
+  rc=0; diretto_run env C=2 app || rc=$?
+  eq "la stessa app con env: subito in proot" 97 "$rc"
+  rc=0; diretto_run env C=2 python3 || rc=$?
+  eq "un altro programma con env: ancora senza proot" 0 "$rc"
+  eq "env senza programma: resta env" /usr/bin/env "$(diretto_chiave "$r" /usr/bin/env A=1)"
+  : >"$o"
+  rm -f "$TOD_STATE_DIR/diretto-no"
   # cx_run: prima senza proot; 97 → proot; --proot, --raw e la shell sempre in proot
   cx_installed() { return 0; }
   proot-distro() { echo "proot $*" >>"$o"; }
