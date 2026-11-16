@@ -21,7 +21,7 @@ store_pronto() { # flatpak estratto, libreria compilata (e non più vecchia del 
   local s
   s=$(store_dir)
   if [[ -x $s/fp/usr/bin/flatpak && -s $s/bin/tod-nolink.so && -s $s/flatpak/repo/config &&
-    ! $TOD_ROOT/share/store/tod-nolink.c -nt $s/bin/tod-nolink.so ]]; then return 0; fi
+    -s $s/flatpak/repo/flathub.trustedkeys.gpg && ! $TOD_ROOT/share/store/tod-nolink.c -nt $s/bin/tod-nolink.so ]]; then return 0; fi
   return 1
 }
 
@@ -40,13 +40,20 @@ store_fp() { # store_fp argomenti... → il flatpak di Debian, senza proot, sull
   d=$(diretto_dir)
   bus=$(cx_session_bus)
   mkdir -p "$s/casa" "$s/vuota"
+  # GPG (la firma di Flathub): un container nuovo non ce l'ha, quindi arriva tra i pacchetti estratti qui, ma
+  # GnuPG si cerca in /usr/bin, cioè nel container, dove non c'è ("Motore crittografico non valido", S20+,
+  # 16 novembre; sul S26 il container l'aveva già). Con gpgconf.ctl accanto a gpgconf GnuPG si considera
+  # installato lì, e il PATH qui sotto fa trovare quel gpgconf a GPGME.
+  if [[ -x $s/fp/usr/bin/gpgconf && ! -s $s/fp/usr/bin/gpgconf.ctl ]]; then
+    printf 'rootdir = %s\n' "$s/fp/usr" >"$s/fp/usr/bin/gpgconf.ctl"
+  fi
   local -a amb=(
     GLIBC_TUNABLES=glibc.pthread.rseq=0
     FAKECHROOT_BASE="$root" FAKECHROOT_ELFLOADER="$d/ld.so" FAKECHROOT_ELFLOADER_OPT_ARGV0=--argv0
     FAKECHROOT_EXCLUDE_PATH="$DIRETTO_FUORI"
     LD_PRELOAD="$s/bin/tod-nolink.so $d/tod-diretto.so $root$DIRETTO_FC"
     LD_LIBRARY_PATH="$(diretto_librerie "$root" "$d"):$s/fp/usr/lib/aarch64-linux-gnu"
-    PATH=/usr/local/bin:/usr/bin:/bin
+    PATH="$s/fp/usr/bin:/usr/local/bin:/usr/bin:/bin"
     HOME="$s/casa" XDG_CACHE_HOME="$s/cache" XDG_CONFIG_HOME="$s/config" XDG_DATA_HOME="$s/dati"
     TMPDIR="$TMPDIR" LANG="$(store_lingua)" TERM="${TERM:-xterm}"
     GCONV_PATH="$root/usr/lib/aarch64-linux-gnu/gconv"
@@ -87,6 +94,12 @@ store_prepara() { # una volta: flatpak di Debian nella cartella dello Store, la 
       -o "$s/bin/tod-nolink.so.$$" "$TOD_ROOT/share/store/tod-nolink.c" "$root$DIRETTO_LIBC" >>"$TOD_LOG" 2>&1 ||
       die "$(t st_prep_ko "$TOD_LOG")"
     mv -f "$s/bin/tod-nolink.so.$$" "$s/bin/tod-nolink.so"
+  fi
+  # Flathub c'è ma senza la sua chiave (un'aggiunta fallita a metà, quando GPG non si trovava): ogni
+  # scaricamento darebbe "public key not found". Si toglie e si riaggiunge
+  if [[ -s $s/flatpak/repo/config && ! -s $s/flatpak/repo/flathub.trustedkeys.gpg ]] &&
+    grep -q '^\[remote "flathub"\]' "$s/flatpak/repo/config"; then
+    store_fp remote-delete --user --force flathub >>"$TOD_LOG" 2>&1 || true
   fi
   if [[ ! -s $s/flatpak/repo/config ]] || ! grep -q '^\[remote "flathub"\]' "$s/flatpak/repo/config"; then
     store_fp remote-add --user --if-not-exists flathub "$STORE_FLATHUB" >>"$TOD_LOG" 2>&1 ||

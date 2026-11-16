@@ -1477,6 +1477,41 @@ test_store_prepara() { # Store (9 novembre): le estensioni di Flatpak "montate" 
   eq "voce tolta" "" "$(ls "$s/menu")"
 }
 
+test_store_gpg_container_nuovo() { # S20+, 16 novembre: container senza GPG → "Motore crittografico non valido", Store fermo
+  . "$ROOT/lib/store.sh"
+  local sg_s="$WORK/storegpg_$$" sg_r="$WORK/storegpg_root_$$" sg_d="$WORK/storegpg_dir_$$"
+  mkdir -p "$sg_s/fp/usr/bin" "$sg_s/bin" "$sg_s/flatpak/repo" "$sg_r" "$sg_d"
+  TOD_STORE_DIR=$sg_s
+  cx_rootfs() { echo "$sg_r"; }
+  diretto_dir() { echo "$sg_d"; }
+  cx_session_bus() { :; }
+  # il "caricatore": scrive come è stato chiamato flatpak
+  cat >"$sg_d/ld.so" <<'EOF'
+#!/bin/sh
+echo "PATH=$PATH | $*" >>"$HOME/fp_chiamate"
+EOF
+  chmod +x "$sg_d/ld.so"
+  printf '#!/bin/sh\n' >"$sg_s/fp/usr/bin/gpgconf"
+  printf '#!/bin/sh\n' >"$sg_s/fp/usr/bin/flatpak"
+  chmod +x "$sg_s/fp/usr/bin/gpgconf" "$sg_s/fp/usr/bin/flatpak"
+  store_fp search x
+  eq "GnuPG estratto qui si considera installato qui" "rootdir = $sg_s/fp/usr" "$(cat "$sg_s/fp/usr/bin/gpgconf.ctl")"
+  has "GPGME trova il gpgconf estratto" "PATH=$sg_s/fp/usr/bin:" "$(cat "$sg_s/casa/fp_chiamate")"
+  # Flathub aggiunto a metà (senza la chiave): non è "pronto", e la preparazione lo toglie e lo riaggiunge
+  echo x >"$sg_s/bin/tod-nolink.so"
+  printf '[core]\n[remote "flathub"]\nurl=x\n' >"$sg_s/flatpak/repo/config"
+  fails store_pronto
+  cx_installed() { return 0; }
+  diretto_prepara() { return 0; }
+  have() { return 0; }
+  : >"$sg_s/casa/fp_chiamate"
+  store_fp() { echo "$*" >>"$sg_s/casa/fp_chiamate"; if [[ $1 == remote-delete ]]; then printf '[core]\n' >"$sg_s/flatpak/repo/config"; fi; if [[ $1 == remote-add ]]; then printf '[remote "flathub"]\n' >>"$sg_s/flatpak/repo/config"; echo chiave >"$sg_s/flatpak/repo/flathub.trustedkeys.gpg"; fi; }
+  store_prepara
+  has "tolto" "remote-delete --user --force flathub" "$(cat "$sg_s/casa/fp_chiamate")"
+  has "riaggiunto" "remote-add --user --if-not-exists flathub" "$(cat "$sg_s/casa/fp_chiamate")"
+  store_pronto
+}
+
 test_store_lancio() { # Store senza proot (9 novembre, Boxy SVG non si apriva): script #!, percorso vero, zypak
   local s="$WORK/sl_$$" rad vero
   rad="$s/radici/org.prova.App"
