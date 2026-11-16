@@ -634,8 +634,15 @@ test_session_guardia() { # 16 novembre: solo la barra ripartiva da sola; bordi, 
   virgl_riaccendi() { :; }
   # un servizio finto: un processo col nome giusto nel comando, e il suo file pid
   finto() { # finto nome-del-file-pid testo
+    local sg_i
     bash -c 'exec -a "python3 /x/'"$2"'" sleep 30' >/dev/null 2>&1 &
     echo $! >"$TMPDIR/$1"
+    # appena nato il processo ha ancora la riga di comando di chi l'ha creato: si aspetta che abbia la sua
+    # (sul CI, 16 novembre: il controllo subito dopo non lo riconosceva)
+    for sg_i in $(seq 40); do
+      if tr '\0' ' ' <"/proc/$!/cmdline" 2>/dev/null | grep -q "^python3 /x/$2"; then break; fi
+      sleep 0.05
+    done
   }
   session_bordi_start() { echo bordi >>"$avvii"; finto tod-edges.pid tod-edges.py; }
   priorita_start() { echo priorita >>"$avvii"; }
@@ -5744,7 +5751,7 @@ test_preflight_telefoni_diversi() { # 16 novembre: chi arriva con un telefono ma
 }
 
 test_phantom_android_vecchio() { # prima di Android 12 il "signal 9" non c'è, e fino al 10 nemmeno il Debug wireless
-  local chiesto="$WORK/pav_$$"
+  local chiesto="$WORK/phvecchio_$$"
   ui_yesno() { echo si >>"$chiesto"; return 0; }
   ANDROID_SDK=29 installer_question_phantom
   eq "Android 10: nessuna domanda" no "$(conf_get PHANTOM_NOW)"
@@ -5762,7 +5769,7 @@ test_phantom_android_vecchio() { # prima di Android 12 il "signal 9" non c'è, e
   eq "Android 14: c'è" toggle "$(phantom_toggle_voce | sed -n 1p)"
   prop() { :; }
   eq "versione non letta: c'è" toggle "$(phantom_toggle_voce | sed -n 1p)"
-  local visto="$WORK/pav_menu_$$"
+  local visto="$WORK/phvecchio_menu_$$"
   prop() { echo 33; }
   ui_menu() { printf '%s\n' "$@" >"$visto"; echo skip; }
   phantom_fix 2>/dev/null || true
