@@ -117,6 +117,7 @@ You don't need them for normal use:
 tod start | stop | restart | status   the desktop
 tod doctor                            diagnostics (also saved to Download/tod-doctor.txt)
 tod prestazioni                       CPU, memory and temperature for one minute
+tod priorita [stato|misura|on|off]    smooth screen under load (priorities and memory)
 tod update                            update Termux On DeX
 tod menu                              control center
 tod gpu [status|probe|bench]          graphics acceleration

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Bordi invisibili per ridimensionare, come Windows 11.
+"""Bordi invisibili per ridimensionare e aggancio ai bordi, come Windows 11.
 
   tod-edges.py            (lo avvia l'hook di sessione; una sola copia)
+  TOD_BORDI=0             senza bordi invisibili (BORDI_INVISIBILI=0 in tod.conf)
+  TOD_AGGANCIO=0          senza aggancio ai bordi (AGGANCIO in tod.conf; il resto sta in tod_aggancio.py)
 
 xfwm4 ridimensiona solo dove la cornice è disegnata: con un bordo elegante da 1 px bisognerebbe
 mirare al pixel (Pietro: "devo essere iper preciso"), con 4-6 px si vede una cornice. Qui, attorno
@@ -11,12 +13,24 @@ finestra passa a xfwm4 con _NET_WM_MOVERESIZE (lo stesso che usano le app con la
 Niente strisce per finestre ingrandite, a schermo intero, non ridimensionabili, menu e pannelli,
 né per quelle che hanno già i loro bordi invisibili (_GTK_FRAME_EXTENTS: app Electron, app GTK con
 la barra propria). Solo ctypes e libX11.
+
+Aggancio (15 novembre 2026): trascinando una finestra su un bordo dello schermo si aggancia a metà, a un
+quarto o ingrandita, con l'anteprima del posto (share/tod_aggancio.py). Questo processo segue già la
+finestra attiva e la sua cornice, quindi ci sta qui: niente processo in più.
 """
 import ctypes
 import ctypes.util
 import os
+import select
 import signal
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:   # se l'aggancio non si carica, i bordi invisibili funzionano lo stesso
+    import tod_aggancio
+except Exception as err:   # noqa: BLE001
+    print("tod-edges: aggancio non disponibile:", err, file=sys.stderr, flush=True)
+    tod_aggancio = None
 
 PREFIX = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
 TMP = os.environ.get("TMPDIR", os.path.join(PREFIX, "tmp"))
@@ -28,7 +42,7 @@ def dbg(*a):
     if DEBUG:
         print("tod-edges:", *a, file=sys.stderr, flush=True)
 
-ButtonPress, ConfigureNotify, UnmapNotify, MapNotify, PropertyNotify = 4, 22, 18, 19, 28
+ButtonPress, Expose, ConfigureNotify, UnmapNotify, MapNotify, PropertyNotify = 4, 12, 22, 18, 19, 28
 ButtonPressMask, StructureNotifyMask, PropertyChangeMask = 1 << 2, 1 << 17, 1 << 22
 SubstructureNotifyMask, SubstructureRedirectMask = 1 << 19, 1 << 20   # per _NET_WM_MOVERESIZE
 InputOnly, CWOverrideRedirect, CWEventMask, CWCursor = 2, 1 << 9, 1 << 11, 1 << 14
@@ -82,8 +96,8 @@ def load_x11():
 
 
 class Edges:
-    def __init__(self, x, grab):
-        self.x, self.grab = x, grab
+    def __init__(self, x, grab, bordi=True, aggancio=True):
+        self.x, self.grab, self.bordi = x, grab, bordi
         P, U, I, V = ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_uint
         sig = {
             "XOpenDisplay": (P, [ctypes.c_char_p]), "XDefaultRootWindow": (U, [P]),
@@ -101,6 +115,7 @@ class Edges:
                                  ctypes.POINTER(V), ctypes.POINTER(V), ctypes.POINTER(V)]),
             "XSetErrorHandler": (P, [P]),
             "XChangeProperty": (I, [P, U, U, U, I, I, ctypes.POINTER(ctypes.c_long), I]),
+            "XPending": (I, [P]), "XConnectionNumber": (I, [P]),
         }
         for name, (res, args) in sig.items():
             f = getattr(x, name)
@@ -112,12 +127,13 @@ class Edges:
         self._err = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)(lambda d, e: 0)
         x.XSetErrorHandler(ctypes.cast(self._err, ctypes.c_void_p))
         self.root = x.XDefaultRootWindow(self.dpy)
-        if not grab:   # 8 px a 96 dpi, in proporzione con il desktop (Xft.dpi, come il testo)
-            x.XResourceManagerString.restype, x.XResourceManagerString.argtypes = ctypes.c_char_p, [P]
-            res = (x.XResourceManagerString(self.dpy) or b"").decode(errors="replace")
-            dpi = next((float(l.split(":", 1)[1]) for l in res.splitlines()
-                        if l.startswith("Xft.dpi:") and l.split(":", 1)[1].strip().replace(".", "", 1).isdigit()), 96.0)
-            self.grab = grab = max(6, int(round(8 * dpi / 96)))
+        # proporzioni del desktop (Xft.dpi, come il testo)
+        x.XResourceManagerString.restype, x.XResourceManagerString.argtypes = ctypes.c_char_p, [P]
+        res = (x.XResourceManagerString(self.dpy) or b"").decode(errors="replace")
+        self.dpi = next((float(l.split(":", 1)[1]) for l in res.splitlines()
+                         if l.startswith("Xft.dpi:") and l.split(":", 1)[1].strip().replace(".", "", 1).isdigit()), 96.0)
+        if not grab:   # 8 px a 96 dpi
+            self.grab = grab = max(6, int(round(8 * self.dpi / 96)))
         self.atoms = {}
         self.wins = []
         for direction, shape in EDGES:
@@ -131,6 +147,12 @@ class Edges:
         self.target = self.frame = 0
         self.shown = False
         x.XSelectInput(self.dpy, self.root, PropertyChangeMask)
+        self.aggancio = None
+        if aggancio and tod_aggancio:
+            try:
+                self.aggancio = tod_aggancio.Aggancio(self, self.dpi / 96)
+            except Exception as err:   # noqa: BLE001
+                print("tod-edges: aggancio non disponibile:", err, file=sys.stderr, flush=True)
 
     def atom(self, name):
         if name not in self.atoms:
@@ -210,7 +232,9 @@ class Edges:
             if active:
                 self.x.XSelectInput(self.dpy, active, PropertyChangeMask)   # ingrandita, a schermo intero
             self.frame = frame
-        if not self.frame or not self.wanted(self.target):
+            if self.aggancio:
+                self.aggancio.vista(frame)
+        if not self.bordi or not self.frame or not self.wanted(self.target):
             dbg("niente strisce per", hex(self.target))
             self.hide()
             return
@@ -241,13 +265,16 @@ class Edges:
         self.shown = True
         dbg("strisce attorno a", hex(self.target), "cornice", (fx, fy, fw, fh))
 
+    def tocca_radice(self, ora=0):
+        """xfwm4 prende il mouse con l'ora dell'ultimo evento che ha visto: senza questo è più vecchia
+        del nostro clic e il server X rifiuta la presa (il ridimensionamento non partiva). Una
+        proprietà cambiata sulla radice gli fa vedere un evento con l'ora attuale, prima del messaggio."""
+        stamp = (ctypes.c_long * 1)(ora)
+        self.x.XChangeProperty(self.dpy, self.root, self.atom("_TOD_EDGES_TIME"), 6, 32, 0, stamp, 1)
+
     def start_resize(self, ev, direction):
         self.x.XUngrabPointer(self.dpy, 0)
-        # xfwm4 prende il mouse con l'ora dell'ultimo evento che ha visto: senza questo è più vecchia
-        # del nostro clic e il server X rifiuta la presa (il ridimensionamento non partiva). Una
-        # proprietà cambiata sulla radice gli fa vedere un evento con l'ora attuale, prima del messaggio.
-        stamp = (ctypes.c_long * 1)(ev.time)
-        self.x.XChangeProperty(self.dpy, self.root, self.atom("_TOD_EDGES_TIME"), 6, 32, 0, stamp, 1)
+        self.tocca_radice(ev.time)
         msg = XEvent()
         msg.xclient.type = ClientMessage
         msg.xclient.window = self.target
@@ -264,9 +291,23 @@ class Edges:
         ev = XEvent()
         mine = {w: d for w, d in self.wins}
         watched = (self.atom("_NET_ACTIVE_WINDOW"), self.atom("_NET_WM_STATE"), self.atom("_NET_WORKAREA"))
+        fd = self.x.XConnectionNumber(self.dpy)
+        agg = self.aggancio
         while True:
+            # senza trascinamenti si dorme finché arriva un evento X; mentre si trascina, l'aggancio
+            # guarda il puntatore 60 volte al secondo
+            if agg:
+                agg.passo()
+            if not self.x.XPending(self.dpy):
+                attesa = agg.attesa() if agg else None
+                if attesa is None or attesa > 0:
+                    select.select([fd], [], [], attesa)
+                continue
             self.x.XNextEvent(self.dpy, ctypes.byref(ev))
             t, win = ev.type, ev.xany.window
+            if t == Expose and agg:
+                agg.esposta(win)
+                continue
             if t == ButtonPress:
                 dbg("clic su", hex(win), "nostra" if win in mine else "non nostra", ev.xbutton.button)
             if t == ButtonPress and win in mine and ev.xbutton.button == 1:
@@ -280,6 +321,8 @@ class Edges:
             elif t in (ConfigureNotify, MapNotify, UnmapNotify):
                 if field != self.frame:
                     continue
+                if t == ConfigureNotify and agg:
+                    agg.cornice_mossa(self.target, self.frame)
             else:
                 continue
             self.update()
@@ -298,7 +341,8 @@ def main():
     lib = load_x11()
     if not lib:
         return 1
-    Edges(lib, 0).run()
+    Edges(lib, 0, bordi=os.environ.get("TOD_BORDI", "1") != "0",
+          aggancio=os.environ.get("TOD_AGGANCIO", "1") != "0").run()
     return 0
 
 

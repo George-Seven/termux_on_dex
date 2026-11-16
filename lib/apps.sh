@@ -203,6 +203,16 @@ android_apps_sync() { # in sottofondo: solo le app nuove o aggiornate (cache per
   (low_prio setsid python3 "$TOD_ROOT/share/tod-android-apps.py" </dev/null >>"$TOD_STATE_DIR/android-apps.log" 2>&1 &)
 }
 
+android_app_chiudi() { # tod _telefono_chiudi pacchetto: «Forza arresto» per la Gestione attività (15 novembre)
+  # Android lascia chiudere le altre app solo all'utente "shell": serve ADB già collegato o Shizuku. 3 = nessuno dei
+  # due (la Gestione attività apre allora la pagina dell'app nelle impostazioni del telefono), 2 = nome non valido
+  [[ ${1:-} =~ ^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)+$ ]] || return 2
+  if [[ $1 == com.termux || $1 == com.termux.* ]]; then return 2; fi   # il desktop stesso
+  if ! priv_ready; then return 3; fi
+  log "gestione attività: forza arresto di $1"
+  priv_sh am force-stop --user 0 "$1"
+}
+
 android_apps_cli() { # tod telefono [aggiorna|rifai|spento|acceso|notifiche accese|spente]
   case ${1:-aggiorna} in
     aggiorna | sync)

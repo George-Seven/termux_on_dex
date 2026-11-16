@@ -10,7 +10,8 @@ le icone di sistema (quelle delle app, rete, volume, batteria, notifiche, orolog
   tod-barra.py [--replace]
 
 Impostazioni in ~/.config/tod/barra.json (Impostazioni → Barra): app fissate, allineamento, grandezza,
-anteprime.
+anteprime. Le anteprime mostrano l'immagine anche delle finestre ridotte a icona: vedi Istantanee e
+anteprime_dati.py.
 """
 import ctypes
 import ctypes.util
@@ -37,7 +38,16 @@ try:   # GLib 2.86: le funzioni Unix di Gio stanno in GioUnix
 except (ValueError, ImportError):
     DesktopAppInfo = Gio.DesktopAppInfo
 
+try:   # le miniature delle anteprime (pycairo, con PyGObject)
+    import cairo
+except ImportError:
+    cairo = None
+
 QUI = os.path.dirname(os.path.abspath(__file__))
+if QUI not in sys.path:
+    sys.path.insert(0, QUI)
+import anteprime_dati as AD  # noqa: E402
+
 PREFIX = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
 TMP = os.environ.get("TMPDIR", "/tmp")
 CASA = os.environ.get("TOD_TERMUX_HOME", os.path.expanduser("~"))
@@ -133,29 +143,33 @@ CSS = """
   background-color: ACCENTO; color: #ffffff; border-radius: 7px; font-size: 7pt; font-weight: 700;
   min-width: 14px; min-height: 14px; padding: 0 3px;
 }
+/* anteprime come i pannelli di tod-pannelli.py (stile DeX OS approvato: fondi pieni, angoli 18/12, accento) */
 .tod-anteprima { background-color: transparent; }
 .tod-anteprima .root {
-  background-color: PANNELLO; border: 1px solid LINEA; border-radius: 14px; padding: 8px;
-  font-family: Inter, sans-serif; color: TESTO;
+  background-color: PANNELLO; border: 1px solid BORDO; border-radius: 18px; padding: 8px;
+  box-shadow: inset 0 0 0 1px FILO; font-family: Inter, sans-serif; color: TESTO;
 }
 .tod-anteprima.flat .root { border-radius: 0; }
-.tod-anteprima .finestra { border-radius: 10px; padding: 6px; }
-.tod-anteprima .finestra:hover { background-color: PASSAGGIO; }
-.tod-anteprima .finestra.attiva { background-color: alpha(ACCENTO, 0.14); }
+.tod-anteprima .finestra { border-radius: 12px; padding: 6px; border: 1px solid transparent; }
+/* .sopra e non :hover: in GTK 3 il passaggio del mouse non arriva ai riquadri dentro l'EventBox della scheda */
+.tod-anteprima .finestra.sopra { background-color: MODULO; border-color: LINEA; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06); }
+.tod-anteprima .finestra.attiva { background-color: alpha(ACCENTO, 0.12); border-color: alpha(ACCENTO, 0.45); }
+.tod-anteprima .finestra.attiva.sopra { background-color: alpha(ACCENTO, 0.20); }
 .tod-anteprima .titolo { font-size: 9pt; font-weight: 500; }
-.tod-anteprima .miniatura { border-radius: 6px; background-color: LINEA; }
-.tod-anteprima .ridotta { font-size: 8pt; color: TENUE; }
 .tod-anteprima button.chiudi {
   border: none; box-shadow: none; background: transparent; border-radius: 10px; padding: 2px; min-width: 0; min-height: 0;
+  color: TESTO; opacity: 0;
 }
-.tod-anteprima button.chiudi:hover { background-color: #e81123; color: #ffffff; }
+.tod-anteprima .finestra.sopra button.chiudi { opacity: 1; }
+.tod-anteprima button.chiudi:hover { background-color: #c42b1c; color: #ffffff; }
 """
 COLORI = {
     False: dict(FONDO="#f3f4f8", LINEA="rgba(0, 0, 0, 0.08)", TESTO="#1d1d1f", TENUE="#6e6e73",
-                PASSAGGIO="rgba(255, 255, 255, 0.75)", ATTIVA="#ffffff", SPENTO="#8a8a8e", PANNELLO="#f2f2f5"),
+                PASSAGGIO="rgba(255, 255, 255, 0.75)", ATTIVA="#ffffff", SPENTO="#8a8a8e", PANNELLO="#f2f2f5",
+                MODULO="#ffffff", BORDO="rgba(255, 255, 255, 0.65)", FILO="rgba(0, 0, 0, 0.06)"),
     True: dict(FONDO="#202022", LINEA="rgba(255, 255, 255, 0.08)", TESTO="#f5f5f7", TENUE="#a1a1a6",
                PASSAGGIO="rgba(255, 255, 255, 0.07)", ATTIVA="rgba(255, 255, 255, 0.12)", SPENTO="#8e8e93",
-               PANNELLO="#242428"),
+               PANNELLO="#242428", MODULO="#2e2e33", BORDO="rgba(255, 255, 255, 0.12)", FILO="rgba(0, 0, 0, 0.4)"),
 }
 
 
@@ -282,13 +296,18 @@ def _x11():
 # finestre sparite: sulle nostre connessioni l'errore si ignora; quelli di GTK vanno al suo gestore
 # (le sue "trappole" contano gli errori: senza, GTK crede riuscita ogni chiamata fallita)
 _NOSTRE = set()
+_ERRORI = {}   # connessione nostra → codice dell'ultimo errore (le istantanee lo controllano)
 _PRIMA = [None]
 _CHIAVE = threading.Lock()
 _TIPO_GESTORE = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
 
 
 def _errore_x(dpy, ev):
-    if dpy in _NOSTRE or not _PRIMA[0]:
+    if dpy in _NOSTRE:
+        # XErrorEvent: type, display, resourceid, serial, poi error_code (byte 32)
+        _ERRORI[dpy] = ctypes.c_ubyte.from_address(ev + 32).value if ev else 1
+        return 0
+    if not _PRIMA[0]:
         return 0
     return _PRIMA[0](dpy, ev)
 
@@ -482,6 +501,361 @@ class Schermo:
                 GLib.idle_add(self.cambiato)
 
 
+# --- istantanee delle finestre, anche di quelle ridotte a icona ---------------------------------------
+class _XImage(ctypes.Structure):   # l'inizio di XImage: quanto serve
+    _fields_ = [("width", ctypes.c_int), ("height", ctypes.c_int), ("xoffset", ctypes.c_int), ("format", ctypes.c_int),
+                ("data", ctypes.c_void_p), ("byte_order", ctypes.c_int), ("bitmap_unit", ctypes.c_int),
+                ("bitmap_bit_order", ctypes.c_int), ("bitmap_pad", ctypes.c_int), ("depth", ctypes.c_int),
+                ("bytes_per_line", ctypes.c_int), ("bits_per_pixel", ctypes.c_int)]
+
+
+class _Attributi(ctypes.Structure):   # XWindowAttributes
+    _fields_ = [("x", ctypes.c_int), ("y", ctypes.c_int), ("width", ctypes.c_int), ("height", ctypes.c_int),
+                ("border_width", ctypes.c_int), ("depth", ctypes.c_int), ("visual", ctypes.c_void_p),
+                ("root", ctypes.c_ulong), ("classe", ctypes.c_int), ("bit_gravity", ctypes.c_int),
+                ("win_gravity", ctypes.c_int), ("backing_store", ctypes.c_int), ("backing_planes", ctypes.c_ulong),
+                ("backing_pixel", ctypes.c_ulong), ("save_under", ctypes.c_int), ("colormap", ctypes.c_ulong),
+                ("map_installed", ctypes.c_int), ("map_state", ctypes.c_int), ("all_event_masks", ctypes.c_long),
+                ("your_event_mask", ctypes.c_long), ("do_not_propagate_mask", ctypes.c_long),
+                ("override_redirect", ctypes.c_int), ("screen", ctypes.c_void_p)]
+
+
+class _AttrImmagine(ctypes.Structure):   # XRenderPictureAttributes
+    _fields_ = [("repeat", ctypes.c_int), ("alpha_map", ctypes.c_ulong), ("alpha_x_origin", ctypes.c_int),
+                ("alpha_y_origin", ctypes.c_int), ("clip_x_origin", ctypes.c_int), ("clip_y_origin", ctypes.c_int),
+                ("clip_mask", ctypes.c_ulong), ("graphics_exposures", ctypes.c_int), ("subwindow_mode", ctypes.c_int),
+                ("poly_edge", ctypes.c_int), ("poly_mode", ctypes.c_int), ("dither", ctypes.c_ulong),
+                ("component_alpha", ctypes.c_int)]
+
+
+DEBUG_ANTEPRIME = os.environ.get("TOD_ANTEPRIME_DEBUG") == "1"   # nel registro: ogni foto, quanto costa
+VISIBILE = 2       # map_state IsViewable
+RIPETI_BORDO = 2   # RepeatPad: oltre il bordo il filtro ripete l'ultimo pixel (niente orli scuri)
+
+
+class Istantanee:
+    """Le miniature delle finestre per l'anteprima, anche di quelle ridotte a icona, che X non disegna più.
+    Col compositore di xfwm4 ogni finestra ha la sua immagine fuori schermo: finché è sullo schermo se ne tiene un
+    riferimento (XCompositeNameWindowPixmap: la stessa immagine, nessuna copia); quando sparisce (ridotta, mostra
+    desktop, altro spazio di lavoro) l'immagine resta: dopo AD.ATTESA_MS, se la finestra non si è chiusa, se ne fa la
+    miniatura e il riferimento si libera. Le miniature si rimpiccioliscono nel server (XRender, dimezzando a passi):
+    alla barra arrivano pochi KB, mai la finestra intera. Senza compositore si fotografa quello che c'è sullo schermo,
+    solo quando serve (anteprima, riduzione dalla barra). Nessuna cattura continua di tutte le finestre.
+    Tutto nel filo di GTK, su una connessione X propria guardata dal ciclo di GLib."""
+
+    def __init__(self, larg, alt):
+        self.larg, self.alt = larg, alt
+        self.cassetto = AD.Cassetto()
+        self.cornici = AD.Cornici()
+        self.cornice_di, self.cliente_di, self.attese = {}, {}, {}
+        self.dpy, self.composite, self._cm = None, False, (-99.0, False)
+        try:
+            self._apri()
+        except (OSError, AttributeError) as e:
+            log("anteprime senza istantanee:", e)
+            self.dpy = None
+
+    def _apri(self):
+        if cairo is None:
+            raise OSError("manca pycairo")
+        C = ctypes
+        V, U, I, UI = C.c_void_p, C.c_ulong, C.c_int, C.c_uint
+        x = _x11()
+        xr = C.CDLL(C.util.find_library("Xrender") or os.path.join(PREFIX, "lib/libXrender.so"))
+        xc = C.CDLL(C.util.find_library("Xcomposite") or os.path.join(PREFIX, "lib/libXcomposite.so"))
+        x.XQueryTree.argtypes = [V, U, C.POINTER(U), C.POINTER(U), C.POINTER(V), C.POINTER(UI)]
+        x.XTranslateCoordinates.argtypes = [V, U, U, I, I, C.POINTER(I), C.POINTER(I), C.POINTER(U)]
+        x.XGetWindowAttributes.argtypes = [V, U, C.POINTER(_Attributi)]
+        x.XGetSelectionOwner.restype = U
+        x.XGetSelectionOwner.argtypes = [V, U]
+        x.XCreatePixmap.restype = U
+        x.XCreatePixmap.argtypes = [V, U, UI, UI, UI]
+        x.XFreePixmap.argtypes = [V, U]
+        x.XGetImage.restype = C.POINTER(_XImage)
+        x.XGetImage.argtypes = [V, U, I, I, UI, UI, U, I]
+        x.XDestroyImage.argtypes = [C.POINTER(_XImage)]
+        x.XPending.argtypes = [V]
+        x.XConnectionNumber.argtypes = [V]
+        x.XFlush.argtypes = [V]
+        x.XCloseDisplay.argtypes = [V]
+        xr.XRenderQueryExtension.argtypes = [V, C.POINTER(I), C.POINTER(I)]
+        xr.XRenderFindVisualFormat.restype = V
+        xr.XRenderFindVisualFormat.argtypes = [V, V]
+        xr.XRenderFindStandardFormat.restype = V
+        xr.XRenderFindStandardFormat.argtypes = [V, I]
+        xr.XRenderCreatePicture.restype = U
+        xr.XRenderCreatePicture.argtypes = [V, U, V, U, C.POINTER(_AttrImmagine)]
+        xr.XRenderSetPictureTransform.argtypes = [V, U, C.POINTER(I * 9)]
+        xr.XRenderSetPictureFilter.argtypes = [V, U, C.c_char_p, V, I]
+        xr.XRenderComposite.argtypes = [V, I, U, U, U, I, I, I, I, I, I, UI, UI]
+        xr.XRenderFreePicture.argtypes = [V, U]
+        xc.XCompositeQueryExtension.argtypes = [V, C.POINTER(I), C.POINTER(I)]
+        xc.XCompositeNameWindowPixmap.restype = U
+        xc.XCompositeNameWindowPixmap.argtypes = [V, U]
+        self.x, self.xr, self.xc = x, xr, xc
+        dpy = x.XOpenDisplay(None)
+        if not dpy:
+            raise OSError("schermo non raggiungibile")
+        _gestisci_errori(x, dpy)
+        e, b = C.c_int(), C.c_int()
+        if not xr.XRenderQueryExtension(dpy, C.byref(e), C.byref(b)):
+            x.XCloseDisplay(dpy)
+            raise OSError("niente XRender")
+        self.composite = bool(xc.XCompositeQueryExtension(dpy, C.byref(e), C.byref(b)))
+        self.dpy, self.root = dpy, x.XDefaultRootWindow(dpy)
+        self.argb = xr.XRenderFindStandardFormat(dpy, 0)   # PictStandardARGB32
+        self.p = Proprieta.__new__(Proprieta)   # proprietà lette su questa connessione
+        self.p.x, self.p.dpy, self.p.root, self.p._atomi = x, dpy, self.root, {}
+        self._ev = (C.c_long * 24)()
+        x.XSelectInput(dpy, self.root, 1 << 19)   # SubstructureNotify: le cornici compaiono, spariscono, cambiano
+        x.XFlush(dpy)
+        self._guardia = GLib.io_add_watch(GLib.IOChannel.unix_new(x.XConnectionNumber(dpy)), GLib.PRIORITY_DEFAULT,
+                                          GLib.IOCondition.IN, self._eventi)
+
+    def chiudi(self):
+        """anteprime spente dalle Impostazioni: via riferimenti, miniature e connessione"""
+        if self.dpy is None:
+            return
+        for c in list(self.attese):
+            self._annulla(c)
+        for c in list(self.cornici.rif):
+            self._libera(self.cornici.libera(c))
+        GLib.source_remove(self._guardia)
+        _NOSTRE.discard(self.dpy)
+        self.x.XCloseDisplay(self.dpy)
+        self.dpy = None
+        self.cassetto = AD.Cassetto()
+
+    # --- le finestre della barra e i loro eventi
+    def aggiorna(self, xids):
+        """a ogni cambio dell'elenco delle finestre: le nuove si seguono, quelle chiuse si dimenticano"""
+        if self.dpy is None:
+            return
+        vive = set(xids)
+        for xid in [k for k in self.cornice_di if k not in vive]:
+            c = self.cornice_di.pop(xid)
+            self.cliente_di.pop(c, None)
+            self._annulla(c)
+            self._libera(self.cornici.distrutta(c))
+        for xid in vive - set(self.cornice_di):
+            c = self._cornice(xid)
+            if not c or c in self.cliente_di:
+                continue
+            self.cornice_di[xid], self.cliente_di[c] = c, xid
+            a = self._attributi(c)
+            if a is not None and a.map_state == VISIBILE:
+                self.cornici.mappata(c)
+                self._nomina(c, a.width, a.height)
+        self.cassetto.tieni_solo(vive)
+        if DEBUG_ANTEPRIME:
+            log("anteprime: %d finestre, %d riferimenti, %d miniature (%d KB)" % (
+                len(vive), len(self.cornici.rif), len(self.cassetto.voci), self.cassetto.peso() // 1024))
+        self._svuota()
+
+    def _eventi(self, *_a):
+        if self.dpy is None:
+            return False
+        x, ev = self.x, self._ev
+        while x.XPending(self.dpy):
+            x.XNextEvent(self.dpy, ev)
+            tipo, c = ctypes.c_int.from_buffer(ev).value, ev[5]   # la finestra figlia della radice
+            if c not in self.cliente_di:
+                continue   # non è una finestra della barra (menu, suggerimenti, le anteprime stesse)
+            if tipo == 19:   # MapNotify: X le dà un'immagine nuova
+                self._annulla(c)
+                self.cornici.mappata(c)
+                self._nomina(c)
+            elif tipo == 18:   # UnmapNotify: chiusa o ridotta? si vede tra poco
+                if self.cornici.smappata(c) == "aspetta":
+                    self._annulla(c)
+                    self.attese[c] = GLib.timeout_add(AD.ATTESA_MS, self._dopo_attesa, c)
+            elif tipo == 22:   # ConfigureNotify: con una misura nuova l'immagine vecchia non serve più
+                w, h = ev[7] & 0xFFFFFFFF, (ev[7] >> 32) & 0xFFFFFFFF
+                if self.cornici.cambiata(c, w, h) == "nomina":
+                    self._nomina(c, w, h)
+            elif tipo == 17:   # DestroyNotify (anche xfwm4 --replace): si ritrova all'elenco nuovo
+                self._annulla(c)
+                self._libera(self.cornici.distrutta(c))
+                self.cornice_di.pop(self.cliente_di.pop(c, None), None)
+        return True
+
+    def _dopo_attesa(self, c):
+        self.attese.pop(c, None)
+        xid = self.cliente_di.get(c)
+        viva = xid is not None and xid in self.p.interi(self.root, "_NET_CLIENT_LIST")
+        azione = self.cornici.dopo_attesa(c, viva)
+        if azione == "fotografa":
+            pix, w, h = self.cornici.rif[c]
+            a = self._attributi(c)
+            if a is not None:
+                t = time.monotonic()
+                mini = self._riduci(pix, a.visual, self._ritaglio(xid, c, w, h))
+                self._metti(xid, mini)
+                if DEBUG_ANTEPRIME:
+                    log("anteprime: sparita %#x → foto %s in %.1f ms" % (xid, mini is not None, (time.monotonic() - t) * 1000))
+        if azione:
+            self._libera(self.cornici.libera(c))
+        self._svuota()
+        return False
+
+    # --- per l'anteprima
+    def miniatura(self, xid):
+        return self.cassetto.prendi(xid) if self.dpy is not None else None
+
+    def cattura(self, xid):
+        """miniatura nuova di una finestra sullo schermo (pochi ms, il lavoro lo fa il server X); se non è sullo
+        schermo resta quella presa quando è sparita"""
+        if self.dpy is None:
+            return None
+        c = self.cornice_di.get(xid) or self._cornice(xid)
+        a = self._attributi(c) if c else None
+        if a is None or a.map_state != VISIBILE:
+            return self.cassetto.prendi(xid)
+        t = time.monotonic()
+        rit = self._ritaglio(xid, c, a.width, a.height)
+        mini, modo = None, "compositore"
+        if c in self.cliente_di and self._compositore():
+            r = self.cornici.rif.get(c)
+            if r is None or (r[1], r[2]) != (a.width, a.height):
+                self.cornici.mappata(c)
+                self._nomina(c, a.width, a.height)
+                r = self.cornici.rif.get(c)
+            if r is not None:
+                mini = self._riduci(r[0], a.visual, rit)
+        if mini is None:   # senza compositore, o finestra non rediretta (a tutto schermo): quello che c'è sullo schermo
+            mini, modo = self._riduci(c, a.visual, rit, inferiori=True), "schermo"
+        self._metti(xid, mini)
+        if DEBUG_ANTEPRIME:
+            log("anteprime: %#x %dx%d → %s (%s) in %.1f ms, in memoria %d KB" % (
+                xid, rit[2], rit[3], "%dx%d" % (mini.get_width(), mini.get_height()) if mini else "niente", modo,
+                (time.monotonic() - t) * 1000, self.cassetto.peso() // 1024))
+        self._svuota()
+        return mini or self.cassetto.prendi(xid)
+
+    def prima_di_ridurre(self, xid):
+        """la barra sta per ridurre la finestra: senza il riferimento del compositore è l'ultima occasione"""
+        c = self.cornice_di.get(xid)
+        if self.dpy is not None and not (c in self.cornici.rif and self._compositore()):
+            self.cattura(xid)
+
+    # --- X
+    def _compositore(self):
+        """xfwm4 compone (selezione _NET_WM_CM_S0): riletto al più ogni 5 s"""
+        ora = time.monotonic()
+        if self.composite and ora - self._cm[0] > 5:
+            self._cm = (ora, bool(self.x.XGetSelectionOwner(self.dpy, self.p.atomo("_NET_WM_CM_S0"))))
+        return self.composite and self._cm[1]
+
+    def _nomina(self, c, w=None, h=None):
+        if not self._compositore():
+            return
+        if w is None:
+            a = self._attributi(c)
+            if a is None or a.map_state != VISIBILE:
+                return
+            w, h = a.width, a.height
+        pix = self.xc.XCompositeNameWindowPixmap(self.dpy, c)
+        self._libera(self.cornici.nominata(c, pix, w, h))
+        self.x.XFlush(self.dpy)
+
+    def _libera(self, pix):
+        if pix and self.dpy is not None:
+            self.x.XFreePixmap(self.dpy, pix)
+
+    def _annulla(self, c):
+        t = self.attese.pop(c, None)
+        if t:
+            GLib.source_remove(t)
+
+    def _svuota(self):
+        """gli eventi arrivati mentre si aspettava una risposta stanno già in memoria: GLib non li vedrebbe"""
+        self._eventi()
+
+    def _attributi(self, w):
+        a = _Attributi()
+        return a if w and self.x.XGetWindowAttributes(self.dpy, w, ctypes.byref(a)) else None
+
+    def _cornice(self, xid):
+        """la finestra figlia della radice che contiene l'app: la cornice di xfwm4 (o l'app stessa)"""
+        radice, padre, figli, n = ctypes.c_ulong(), ctypes.c_ulong(), ctypes.c_void_p(), ctypes.c_uint()
+        w = xid
+        for _ in range(8):
+            if not self.x.XQueryTree(self.dpy, w, ctypes.byref(radice), ctypes.byref(padre), ctypes.byref(figli),
+                                     ctypes.byref(n)):
+                return 0
+            if figli.value:
+                self.x.XFree(figli)
+            if not padre.value or padre.value == radice.value:
+                return w
+            w = padre.value
+        return 0
+
+    def _ritaglio(self, xid, c, fw, fh):
+        dx, dy, figlio = ctypes.c_int(), ctypes.c_int(), ctypes.c_ulong()
+        if xid != c:
+            self.x.XTranslateCoordinates(self.dpy, xid, c, 0, 0, ctypes.byref(dx), ctypes.byref(dy), ctypes.byref(figlio))
+        a = self._attributi(xid)
+        cw, ch = (a.width, a.height) if a is not None else (fw, fh)
+        ombra = self.p.interi(xid, "_GTK_FRAME_EXTENTS")
+        return AD.ritaglio((fw, fh), (dx.value, dy.value, cw, ch), ombra if len(ombra) == 4 else None)
+
+    def _metti(self, xid, mini):
+        if mini is not None:
+            self.cassetto.metti(xid, mini, mini.get_stride() * mini.get_height())
+
+    def _riduci(self, sorgente, visual, rit, inferiori=False):
+        """la parte `rit` dell'immagine `sorgente`, rimpicciolita nel server X → cairo.ImageSurface (o None)"""
+        rx, ry, rw, rh = rit
+        dw, dh = AD.misura(rw, rh, self.larg, self.alt)
+        x, xr, dpy = self.x, self.xr, self.dpy
+        formato = xr.XRenderFindVisualFormat(dpy, visual)
+        if not dw or not formato or not self.argb:
+            return None
+        _ERRORI.pop(dpy, None)
+        attr = _AttrImmagine(repeat=RIPETI_BORDO, subwindow_mode=1 if inferiori else 0)   # IncludeInferiors
+        cur = xr.XRenderCreatePicture(dpy, sorgente, formato, (1 << 0) | (1 << 8), ctypes.byref(attr))
+        immagini, pixmap, ultimo = [cur], [], 0
+        try:
+            for nw, nh, sx, sy in AD.passi(rw, rh, dw, dh):
+                pm = x.XCreatePixmap(dpy, self.root, nw, nh, 32)
+                dst = xr.XRenderCreatePicture(dpy, pm, self.argb, 1, ctypes.byref(_AttrImmagine(repeat=RIPETI_BORDO)))
+                pixmap.append(pm)
+                immagini.append(dst)
+                xr.XRenderSetPictureTransform(dpy, cur, ctypes.byref((ctypes.c_int * 9)(*AD.trasformazione(sx, sy, rx, ry))))
+                xr.XRenderSetPictureFilter(dpy, cur, b"bilinear", None, 0)
+                xr.XRenderComposite(dpy, 1, cur, 0, dst, 0, 0, 0, 0, 0, 0, nw, nh)   # PictOpSrc
+                cur, rx, ry, ultimo = dst, 0, 0, pm
+            x.XSync(dpy, 0)
+            if _ERRORI.pop(dpy, None):   # finestra sparita, immagine non valida (compositore spento...)
+                return None
+            img = x.XGetImage(dpy, ultimo, 0, 0, dw, dh, ctypes.c_ulong(-1).value, 2)   # ZPixmap
+            if not img:
+                return None
+            try:
+                im = img.contents
+                # 4 byte per pixel, il meno significativo prima: lo stesso ordine di cairo (ARGB premoltiplicato)
+                if im.bits_per_pixel != 32 or im.byte_order != 0 or im.width != dw or im.height != dh:
+                    return None
+                sup = cairo.ImageSurface(cairo.FORMAT_ARGB32, dw, dh)
+                passo, riga, bpl = sup.get_stride(), dw * 4, im.bytes_per_line
+                dati, grezzi = sup.get_data(), ctypes.string_at(im.data, bpl * dh)
+                if passo == bpl:
+                    dati[:] = grezzi
+                else:
+                    for r in range(dh):
+                        dati[r * passo:r * passo + riga] = grezzi[r * bpl:r * bpl + riga]
+                sup.mark_dirty()
+                return sup
+            finally:
+                x.XDestroyImage(img)
+        finally:
+            for i in immagini:
+                xr.XRenderFreePicture(dpy, i)
+            for pm in pixmap:
+                x.XFreePixmap(dpy, pm)
+            x.XFlush(dpy)
+
+
 # --- app e finestre ----------------------------------------------------------------------------
 class Catalogo:
     """dalle finestre (classe WM, eseguibile) alle voci del menu (.desktop)"""
@@ -551,7 +925,21 @@ class Voce:
 
 
 # --- anteprima delle finestre ------------------------------------------------------------------
+def _arrotondato(cr, x, y, w, h, r):
+    r = max(0, min(r, w / 2, h / 2))
+    cr.new_sub_path()
+    cr.arc(x + w - r, y + r, r, -1.5708, 0)
+    cr.arc(x + w - r, y + h - r, r, 0, 1.5708)
+    cr.arc(x + r, y + h - r, r, 1.5708, 3.1416)
+    cr.arc(x + r, y + r, r, 3.1416, 4.7124)
+    cr.close_path()
+
+
 class Anteprima(Gtk.Window):
+    """Come Windows 11: passando sopra un'app aperta, una scheda per finestra con icona, titolo, ✕ (al passaggio) e
+    la miniatura, anche delle finestre ridotte a icona (da Istantanee). Clic = in primo piano; ✕ o clic con la
+    rotellina = chiudi. Mentre è aperta le finestre visibili si rifotografano una volta al secondo, solo quelle."""
+
     def __init__(self, barra):
         super().__init__(type=Gtk.WindowType.POPUP)
         self.set_accept_focus(False)
@@ -567,10 +955,12 @@ class Anteprima(Gtk.Window):
         self.root = Gtk.Box(spacing=px(6))
         self.root.get_style_context().add_class("root")
         self.add(self.root)
-        self.voce, self.dentro, self._chiudi = None, False, 0
+        self.voce, self.pulsante, self.dentro, self._chiudi, self._vivo = None, None, False, 0, 0
+        self.mostrate, self.disegni = [], {}   # xid delle schede; xid → area della miniatura
         self.add_events(Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
         self.connect("enter-notify-event", lambda *a: self._entra())
         self.connect("leave-notify-event", lambda w, e: self._esce(e))
+        self.connect("hide", lambda *a: self._ferma())
 
     def _entra(self):
         self.dentro = True
@@ -594,27 +984,64 @@ class Anteprima(Gtk.Window):
         self._chiudi = 0
         if not self.dentro and not self.barra.sopra_voce(self.voce):
             self.hide()
-            self.voce = None
         return False
 
+    def _ferma(self):
+        self.voce = None
+        self.mostrate = []
+        if self._vivo:
+            GLib.source_remove(self._vivo)
+            self._vivo = 0
+
     def mostra(self, voce, pulsante):
-        self.voce = voce
+        ist = self.barra.istantanee
+        wa = self.barra.area()
+        n = AD.quante(len(voce.finestre), px(AD.LARGHEZZA + 14), px(6), wa.width - 2 * px(MARGINE) - px(18))
+        finestre = voce.finestre[:n]
+        xids = [w.get_xid() for w in finestre]
+        if self.get_visible() and self.voce is not None and self.voce.chiave == voce.chiave and xids == self.mostrate:
+            self.voce, self.pulsante = voce, pulsante   # stesse finestre: niente da rifare
+            return
+        self.voce, self.pulsante, self.mostrate = voce, pulsante, xids
         for c in self.root.get_children():
-            self.root.remove(c)
+            c.destroy()
+        self.disegni = {}
         attiva = self.barra.schermo.get_active_window()
-        for w in voce.finestre[:6]:
+        for w in finestre:
+            if ist is not None and not w.is_minimized():
+                ist.cattura(w.get_xid())   # le ridotte hanno già la loro, presa quando sono sparite
             self.root.pack_start(self.scheda(w, w == attiva), False, False, 0)
         self.root.show_all()
+        self._colloca()
+        self.show()
+        if ist is not None and not self._vivo:
+            self._vivo = GLib.timeout_add(AD.VIVA_MS, self._rinfresca)
+
+    def _colloca(self):
         self.resize(1, 1)
         _m, nat = self.get_preferred_size()
         # sopra l'app, il bordo basso alla stessa distanza dalla barra dei pannelli
-        a = pulsante.get_allocation()
-        ox, _oy = pulsante.get_window().get_origin()[1:]
+        p = self.pulsante
+        if p is None or p.get_window() is None:
+            return
+        a = p.get_allocation()
+        ox, _oy = p.get_window().get_origin()[1:]
         wa = self.barra.area()
         x = ox + a.x + a.width // 2 - nat.width // 2
         x = max(wa.x + px(MARGINE), min(x, wa.x + wa.width - nat.width - px(MARGINE)))
         self.move(x, wa.y + wa.height - nat.height - px(MARGINE))
-        self.show()
+
+    def _rinfresca(self):
+        ist = self.barra.istantanee
+        if not self.get_visible() or self.voce is None or ist is None:
+            self._vivo = 0
+            return False
+        for w in self.voce.finestre:
+            d = self.disegni.get(w.get_xid())
+            if d is not None and not w.is_minimized():
+                ist.cattura(w.get_xid())
+                d.queue_draw()
+        return True
 
     def scheda(self, w, attiva):
         ev = Gtk.EventBox()
@@ -623,59 +1050,109 @@ class Anteprima(Gtk.Window):
         if attiva:
             box.get_style_context().add_class("attiva")
         testa = Gtk.Box(spacing=px(6))
-        pix = w.get_mini_icon()
-        if pix is not None:
-            testa.pack_start(Gtk.Image.new_from_pixbuf(pix.scale_simple(px(16), px(16), GdkPixbuf.InterpType.BILINEAR)),
-                             False, False, 0)
-        tit = Gtk.Label(label=w.get_name() or "", xalign=0)
+        testa.pack_start(self._icona(w, 16), False, False, 0)
+        tit = Gtk.Label(label=w.get_name() or (self.voce.nome if self.voce else ""), xalign=0)
         tit.get_style_context().add_class("titolo")
         tit.set_ellipsize(Pango.EllipsizeMode.END)
-        tit.set_max_width_chars(22)
+        tit.set_max_width_chars(1)   # la larghezza la dà la miniatura: il titolo si accorcia, non allarga la scheda
+        tit.set_hexpand(True)
         testa.pack_start(tit, True, True, 0)
         x = Gtk.Button()
         x.get_style_context().add_class("chiudi")
+        x.set_tooltip_text(T("Chiudi", "Close"))
         img = Gtk.Image.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
         img.set_pixel_size(px(12))
         x.add(img)
-        x.connect("clicked", lambda *_: (messaggio_wm(w.get_xid(), "_NET_CLOSE_WINDOW", 0, 2), self.hide()))
+        x.connect("clicked", lambda *_: self._chiudi_finestra(w, ev))
         testa.pack_end(x, False, False, 0)
         box.pack_start(testa, False, False, 0)
         box.pack_start(self.miniatura(w), False, False, 0)
         ev.add(box)
-        ev.connect("button-release-event", lambda *_: (self.barra.attiva(w), self.hide()) and False)
+        ev.add_events(Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+        sc = box.get_style_context()
+        ev.connect("enter-notify-event", lambda *_: sc.add_class("sopra"))
+        # verso la ✕ (finestra figlia) arriva un "leave" INFERIOR: si è ancora sopra la scheda
+        ev.connect("leave-notify-event", lambda _w, e: e.detail != Gdk.NotifyType.INFERIOR and sc.remove_class("sopra"))
+        ev.connect("button-release-event", lambda _e, e: self._clic(w, ev, e))
         return ev
 
+    def _clic(self, w, scheda, e):
+        if e.button == 1:
+            self.barra.attiva(w)
+            self.hide()
+        elif e.button == 2:
+            self._chiudi_finestra(w, scheda)
+        return True
+
+    def _chiudi_finestra(self, w, scheda):
+        messaggio_wm(w.get_xid(), "_NET_CLOSE_WINDOW", 0, 2)
+        self.disegni.pop(w.get_xid(), None)
+        if w.get_xid() in self.mostrate:
+            self.mostrate.remove(w.get_xid())
+        scheda.destroy()
+        if not self.root.get_children():
+            self.hide()
+        else:
+            self._colloca()
+
+    def _pixbuf_icona(self, w, lato):
+        """l'icona della finestra, sennò quella dell'app nel menu, sennò quella generica"""
+        pb = w.get_icon(lato)
+        if pb is not None:
+            return pb
+        tema = Gtk.IconTheme.get_default()
+        g = self.voce.info.get_icon() if self.voce is not None and self.voce.info is not None else None
+        try:
+            i = tema.lookup_by_gicon(g, lato, Gtk.IconLookupFlags.FORCE_SIZE) if g is not None else None
+            i = i or tema.lookup_icon("application-x-executable", lato, Gtk.IconLookupFlags.FORCE_SIZE)
+            return i.load_icon() if i is not None else None
+        except GLib.Error:
+            return None
+
+    def _icona(self, w, lato):
+        pb = self._pixbuf_icona(w, px(lato))
+        return Gtk.Image.new_from_pixbuf(pb) if pb is not None else Gtk.Image()
+
     def miniatura(self, w):
-        larg, alt = px(200), px(118)
-        if not w.is_minimized():
-            try:
-                gw = GdkX11.X11Window.foreign_new_for_display(Gdk.Display.get_default(), w.get_xid())
-                _x, _y, ww, wh = w.get_client_window_geometry()
-                pb = Gdk.pixbuf_get_from_window(gw, 0, 0, ww, wh) if gw is not None and ww > 0 and wh > 0 else None
-            except (TypeError, GLib.Error):
-                pb = None
-            if pb is not None:
-                k = min(larg / pb.get_width(), alt / pb.get_height())
-                img = Gtk.Image.new_from_pixbuf(pb.scale_simple(max(1, int(pb.get_width() * k)), max(1, int(pb.get_height() * k)),
-                                                                GdkPixbuf.InterpType.BILINEAR))
-                img.set_size_request(larg, alt)
-                return img
-        # ridotta a icona (o non leggibile): l'icona grande dell'app al posto del contenuto
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=px(4))
-        box.get_style_context().add_class("miniatura")
-        box.set_size_request(larg, alt)
-        pix = w.get_icon()
-        img = Gtk.Image.new_from_pixbuf(pix.scale_simple(px(48), px(48), GdkPixbuf.InterpType.BILINEAR)) if pix else Gtk.Image()
-        img.set_vexpand(True)
-        img.set_valign(Gtk.Align.END)
-        box.pack_start(img, True, True, 0)
-        if w.is_minimized():
-            l = Gtk.Label(label=T("Ridotta a icona", "Minimized"))
-            l.get_style_context().add_class("ridotta")
-            l.set_vexpand(True)
-            l.set_valign(Gtk.Align.START)
-            box.pack_start(l, True, True, 0)
-        return box
+        larg, alt = px(AD.LARGHEZZA), px(AD.ALTEZZA)
+        icona = self._pixbuf_icona(w, px(48))
+        if cairo is None:   # senza pycairo: solo l'icona dell'app
+            img = Gtk.Image.new_from_pixbuf(icona) if icona is not None else Gtk.Image()
+            img.set_size_request(larg, alt)
+            return img
+        area = Gtk.DrawingArea()
+        area.set_size_request(larg, alt)
+        area.connect("draw", self._disegna, w.get_xid(), icona)
+        self.disegni[w.get_xid()] = area
+        return area
+
+    def _disegna(self, area, cr, xid, icona):
+        W, H = area.get_allocated_width(), area.get_allocated_height()
+        ist = self.barra.istantanee
+        mini = ist.miniatura(xid) if ist is not None else None
+        sc = scuro()
+        r = px(8)
+        if mini is not None:
+            mw, mh = mini.get_width(), mini.get_height()
+            x0, y0 = (W - mw) // 2, (H - mh) // 2
+            cr.save()
+            _arrotondato(cr, x0, y0, mw, mh, r)
+            cr.clip()
+            cr.set_source_surface(mini, x0, y0)
+            cr.paint()
+            cr.restore()
+            _arrotondato(cr, x0 + 0.5, y0 + 0.5, mw - 1, mh - 1, r)
+            cr.set_source_rgba(*((1, 1, 1, 0.10) if sc else (0, 0, 0, 0.08)))
+            cr.set_line_width(1)
+            cr.stroke()
+        else:   # finestra mai vista sullo schermo (ridotta prima che la barra partisse): l'icona dell'app, niente scritte
+            _arrotondato(cr, 0, 0, W, H, r)
+            cr.set_source_rgba(*((1, 1, 1, 0.06) if sc else (0, 0, 0, 0.05)))
+            cr.fill()
+            if icona is not None:
+                Gdk.cairo_set_source_pixbuf(cr, icona, (W - icona.get_width()) // 2, (H - icona.get_height()) // 2)
+                cr.paint()
+        return False
 
 
 # --- area di notifica (XEmbed): le icone che le app mettono nel "vassoio" (es. le app Electron) ------------
@@ -1115,6 +1592,8 @@ class Barra(Gtk.Window):
 
         self.catalogo = Catalogo()
         self.anteprima = Anteprima(self)
+        self.istantanee = None   # nasce con le anteprime accese (rifai_ora)
+        self._attesa_anteprima = 0
         self.pulsanti = {}      # chiave → pulsante
         self.voci = []
         self.trascinata = None
@@ -1214,7 +1693,7 @@ class Barra(Gtk.Window):
 
     def rifai_ora(self):
         self._rifai_id = 0
-        voci, per_chiave = [], {}
+        voci, per_chiave, mostrate = [], {}, []
         for ident in self.conf["fissate"]:
             info = self.catalogo.info(ident)
             if info is not None and ident not in per_chiave:
@@ -1231,9 +1710,29 @@ class Barra(Gtk.Window):
                 per_chiave[chiave] = Voce(chiave, info)
                 voci.append(per_chiave[chiave])
             per_chiave[chiave].finestre.append(w)
+            mostrate.append(w.get_xid())
         self.voci = voci
         self.disegna()
+        self._segui_finestre(mostrate)
         return False
+
+    def _segui_finestre(self, xids):
+        """le istantanee per le anteprime: solo delle finestre della barra, e solo con le anteprime accese"""
+        if self.conf.get("anteprime", True):
+            if self.istantanee is None:
+                self.istantanee = Istantanee(px(AD.LARGHEZZA), px(AD.ALTEZZA))
+            self.istantanee.aggiorna(xids)
+        elif self.istantanee is not None:
+            self.istantanee.chiudi()
+            self.istantanee = None
+        # anteprima aperta: si rifà se le finestre di quell'app sono cambiate (una chiusa, una nuova)
+        a = self.anteprima
+        if a.get_visible() and a.voce is not None:
+            ev = self.pulsanti.get(a.voce.chiave)
+            if ev is None or not ev.voce.finestre or not self.conf.get("anteprime", True):
+                a.hide()
+            else:
+                a.mostra(ev.voce, ev)
 
     def disegna(self):
         """i pulsanti restano gli stessi (distruggerli a ogni cambio di finestra mandava GTK in crash):
@@ -1298,7 +1797,7 @@ class Barra(Gtk.Window):
         ev.add_events(Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
         ev.connect("button-release-event", self._clic_app)
         ev.connect("enter-notify-event", lambda w, e: self._sopra(w))
-        ev.connect("leave-notify-event", lambda w, e: self.anteprima.chiudi_tra(300))
+        ev.connect("leave-notify-event", lambda w, e: (self._annulla_anteprima(), self.anteprima.chiudi_tra(300)))
         # trascinare (tenendo premuto) per riordinare; si possono lasciare qui anche app dallo Start o dal desktop
         ev.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, [BERSAGLIO[0]], Gdk.DragAction.MOVE)
         ev.connect("drag-begin", self._inizio_trascina)
@@ -1340,12 +1839,23 @@ class Barra(Gtk.Window):
         if w.voce.finestre and self.conf.get("anteprime", True) and self.trascinata is None:
             self.anteprima.annulla_chiusura()
             chiave = w.voce.chiave
-            GLib.timeout_add(350, lambda: self._mostra_anteprima(chiave) and False)
+            # già aperta (si passa da un'app all'altra): quasi subito, come Windows 11
+            attesa = 80 if self.anteprima.get_visible() else 350
+            self._annulla_anteprima()
+            self._attesa_anteprima = GLib.timeout_add(attesa, self._mostra_anteprima, chiave)
+
+    def _annulla_anteprima(self):
+        """l'anteprima che stava per comparire non compare più (uscito dal pulsante, o clic)"""
+        if self._attesa_anteprima:
+            GLib.source_remove(self._attesa_anteprima)
+            self._attesa_anteprima = 0
 
     def _mostra_anteprima(self, chiave):
+        self._attesa_anteprima = 0
         ev = self.pulsanti.get(chiave)   # il pulsante di adesso (le finestre possono essere cambiate)
         if ev is not None and ev.get_window() is not None and ev.voce.finestre and self.sopra_voce(ev.voce):
             self.anteprima.mostra(ev.voce, ev)
+        return False
 
     # clic
     def attiva(self, w):
@@ -1364,6 +1874,7 @@ class Barra(Gtk.Window):
 
     def _clic_app(self, ev, e):
         v = ev.voce
+        self._annulla_anteprima()
         if e.button == 2:
             self.avvia(v)
         elif e.button == 3:
@@ -1374,6 +1885,8 @@ class Barra(Gtk.Window):
             elif len(v.finestre) == 1:
                 w = v.finestre[0]
                 if w == self.schermo.get_active_window() and not w.is_minimized():
+                    if self.istantanee is not None:
+                        self.istantanee.prima_di_ridurre(w.get_xid())
                     messaggio_wm(w.get_xid(), "WM_CHANGE_STATE", 3)   # IconicState: ridotta a icona
                 else:
                     self.attiva(w)

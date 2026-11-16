@@ -669,6 +669,31 @@ def finestra_password(Gtk, nome, utente, dominio, errore):
     return out
 
 
+def ferma_orfani(proc="/proc"):
+    """I tod-smb di un servizio ucciso senza SIGTERM (13 novembre: riavvio forzato del telefono, poi del desktop) restano
+    vivi, ognuno nel suo gruppo, e il servizio nuovo ne avvia altri sulle stesse prese: due copie per PC, Esplora file
+    appeso. Si riconoscono per argomenti esatti (programma e cartella di lavoro), mai per testo nella riga di comando."""
+    smb, run = os.fsencode(SMB), os.fsencode(RUN)
+    fermati = 0
+    for p in os.listdir(proc):
+        if not p.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc, p, "cmdline"), "rb") as f:
+                a = f.read().split(b"\0")
+        except OSError:
+            continue
+        if len(a) > 1 and a[0] == smb and a[1] == run:
+            try:
+                os.killpg(int(p), signal.SIGTERM)   # avviati con start_new_session: il gruppo = il pid
+                fermati += 1
+            except OSError:
+                pass
+    if fermati:
+        log(f"chiusi {fermati} tod-smb rimasti da prima")
+    return fermati
+
+
 def sorveglia():
     os.makedirs(RUN, exist_ok=True)
     os.chmod(RUN, 0o700)
@@ -679,6 +704,7 @@ def sorveglia():
         return 0
     with open(os.path.join(RUN, "sorveglia.pid"), "w") as f:
         f.write(str(os.getpid()))
+    ferma_orfani()
     srv = Servizio()
     Gtk = GLib = None
     try:

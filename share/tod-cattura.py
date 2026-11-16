@@ -4,7 +4,8 @@
 Pietro: lo strumento di XFCE "ha l'aspetto Linux". Stamp ferma lo schermo, lo oscura e mostra in alto una barretta:
 Rettangolo (si trascina), Finestra (si sceglie con un clic), Schermo intero; Esc annulla. Lo scatto va negli appunti e
 nella cartella degli screenshot del telefono (DCIM/Screenshots, la stessa della Galleria di Android e della nostra app
-Foto); in basso a destra un'anteprima come su macOS: un clic la apre in Foto.
+Foto); in basso a destra un'anteprima come su macOS: un clic la apre in Foto, e si trascina (15 novembre) in Esplora file,
+sulla scrivania, in una chat o nel campo "allega" di un'app, anche di Debian (vedi share/cattura_dati.py).
 
   tod-cattura.py                 la barretta (Stamp, Win+Maiusc+S)
   tod-cattura.py --finestra      subito la finestra attiva (Alt+Stamp)
@@ -16,7 +17,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "media"))
+import cattura_dati as D  # noqa: E402
 import comune as C  # noqa: E402
 from comune import Gdk, GdkPixbuf, GLib, Gtk, px, T  # noqa: E402
 
@@ -317,11 +320,14 @@ class Sovrapposta(Gtk.Window):
 
 
 class Anteprima(Gtk.Window):
-    """in basso a destra, come macOS: la miniatura, "Copiato negli appunti", Apri e Mostra nella cartella"""
+    """in basso a destra, come macOS: la miniatura (clic = Foto, si trascina dove si vuole), "Copiato negli appunti",
+    Apri e Mostra nella cartella"""
 
     def __init__(self, percorso, pb, chiusa):
         super().__init__(type=Gtk.WindowType.POPUP)
-        self.percorso, self.chiusa, self.sopra = percorso, chiusa, False
+        self.percorso, self.chiusa = percorso, chiusa
+        self.tempi = D.Tempi(time.monotonic())
+        self.presa, self.trascinata, self.fallita = (0, 0), False, False
         trasparente(self)
         scheda = C.classe(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=px(8)), "cattura-anteprima")
         for m in ("top", "bottom", "start", "end"):
@@ -330,10 +336,14 @@ class Anteprima(Gtk.Window):
         sc = min(lato / pb.get_width(), px(160) / pb.get_height(), 1.0)
         mini = pb.scale_simple(max(1, int(pb.get_width() * sc)), max(1, int(pb.get_height() * sc)),
                                GdkPixbuf.InterpType.BILINEAR)
+        self.mini = mini
         ev = Gtk.EventBox()
         ev.add(C.classe(Gtk.Image.new_from_pixbuf(mini), "immagine"))
-        ev.set_tooltip_text(T("Apri in Foto", "Open in Photos"))
-        ev.connect("button-release-event", lambda *_: (self.apri(), True)[1])
+        ev.set_tooltip_text(T("Clic: apri in Foto. Trascinala in una cartella, una chat o un'app",
+                              "Click to open in Photos. Drag it to a folder, a chat or an app"))
+        ev.connect("button-press-event", self.premuta)
+        ev.connect("button-release-event", self.lasciata)
+        self.trascinabile(ev)
         scheda.pack_start(ev, False, False, 0)
         testa = Gtk.Box(spacing=px(6))
         v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=px(1))
@@ -354,15 +364,14 @@ class Anteprima(Gtk.Window):
         scheda.pack_start(pulsanti, False, False, 0)
         fuori = Gtk.EventBox()
         fuori.add(scheda)
-        fuori.connect("enter-notify-event", lambda *_: setattr(self, "sopra", True))
-        fuori.connect("leave-notify-event", lambda *_: setattr(self, "sopra", False))
+        # (prima c'era anche leave-notify: passando su un pulsante l'anteprima credeva il puntatore uscito)
+        fuori.connect("enter-notify-event", lambda *_: self.tempi.sopra(time.monotonic()))
         self.add(fuori)
         # (una finestra POPUP non ha gravità: la posizione si calcola dalla misura vera, appena la si conosce)
         self.connect("size-allocate", lambda _w, al: self.posiziona(al.width, al.height))
         _m, nat = fuori.get_preferred_size()
         self.posiziona(nat.width, nat.height)
         self.show_all()
-        self.scade = time.monotonic() + 7
         GLib.timeout_add(500, self.controlla)
 
     def posiziona(self, w, h):
@@ -374,12 +383,88 @@ class Anteprima(Gtk.Window):
             self.move(*pos)
 
     def controlla(self):
-        if self.sopra:   # il puntatore sopra: resta, come su macOS
-            self.scade = time.monotonic() + 3
-        if time.monotonic() >= self.scade:
-            self.chiudi()
+        """resta col puntatore sopra e durante il trascinamento, come su macOS"""
+        if not self.get_visible():
             return False
+        if self.tempi.resta(time.monotonic(), self.puntatore_sopra()):
+            return True
+        self.chiudi()
+        return False
+
+    def puntatore_sopra(self):
+        gw = self.get_window()
+        if gw is None:
+            return False
+        _s, x, y = Gdk.Display.get_default().get_default_seat().get_pointer().get_position()
+        return D.dentro((x, y), (*gw.get_root_origin(), gw.get_width(), gw.get_height()))
+
+    # --- trascinamento: il file dove lo si lascia (Esplora file, scrivania, chat, "allega" delle app) -----------
+    def trascinabile(self, w):
+        bersagli = Gtk.TargetList.new([])
+        for i, f in enumerate(D.BERSAGLI):
+            bersagli.add(Gdk.Atom.intern(f, False), 0, i)
+        # solo COPIA: lo screenshot resta anche nella Galleria del telefono (nelle cartelle ne arriva una copia)
+        w.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, [], Gdk.DragAction.COPY)
+        w.drag_source_set_target_list(bersagli)
+        w.connect("drag-begin", self.trascina_inizio)
+        w.connect("drag-data-get", self.trascina_dati)
+        w.connect("drag-failed", self.trascina_fallito)
+        w.connect("drag-end", self.trascina_fine)
+
+    def premuta(self, _w, ev):
+        self.presa, self.trascinata = (ev.x, ev.y), False
+        return False   # il trascinamento parte da qui (gestore di GTK)
+
+    def lasciata(self, _w, ev):
+        if ev.button == 1 and not self.trascinata:
+            self.apri()
         return True
+
+    def icona(self, w_area):
+        """la miniatura più piccola, ad angoli tondi, che segue il puntatore dal punto in cui la si è presa"""
+        import cairo
+        mw, mh = self.mini.get_width(), self.mini.get_height()
+        w, h = D.misura_icona(mw, mh, px(160))
+        s = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
+        cr = cairo.Context(s)
+        C.rettangolo_tondo(cr, 0, 0, w, h, px(6))
+        cr.clip()
+        Gdk.cairo_set_source_pixbuf(cr, self.mini.scale_simple(w, h, GdkPixbuf.InterpType.BILINEAR), 0, 0)
+        cr.paint()
+        cr.reset_clip()
+        C.rettangolo_tondo(cr, 0.5, 0.5, w - 1, h - 1, px(6))
+        cr.set_source_rgba(0, 0, 0, 0.22)
+        cr.set_line_width(1)
+        cr.stroke()
+        hx, hy = D.punto_presa(*self.presa, w_area, mw, mh, w, h)
+        s.set_device_offset(-hx, -hy)
+        return s
+
+    def trascina_inizio(self, w, ctx):
+        self.trascinata, self.fallita = True, False
+        self.tempi.inizio()
+        Gtk.drag_set_icon_surface(ctx, self.icona(w.get_allocated_width()))
+        Gtk.Widget.set_opacity(self, 0.55)   # la miniatura "è in mano": l'anteprima resta, più tenue
+
+    def trascina_dati(self, _w, _ctx, sel, _info, _ora):
+        formato = sel.get_target().name()
+        try:
+            dati = D.dati_per(formato, self.percorso)
+        except OSError as e:
+            print(f"tod-cattura: {e}", file=sys.stderr)
+            return
+        if dati is not None:
+            sel.set(sel.get_target(), 8, dati)
+            print(f"tod-cattura: trascinata come {formato}", file=sys.stderr)
+
+    def trascina_fallito(self, _w, _ctx, _esito):
+        self.fallita = True
+        return False   # GTK riporta la miniatura al suo posto
+
+    def trascina_fine(self, _w, _ctx):
+        Gtk.Widget.set_opacity(self, 1.0)
+        if not self.tempi.fine(not self.fallita, time.monotonic()):
+            self.chiudi()
 
     def apri(self):
         foto = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media", "tod-foto.py")

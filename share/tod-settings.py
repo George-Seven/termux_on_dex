@@ -2449,6 +2449,24 @@ class Settings(Gtk.Window):
             self.row(T("Centro di controllo", "Control center"),
                      self.button(T("Apri", "Open"), lambda: spawn(["xfce4-terminal", "-x", TOD, "menu"])),
                      T("Profilo GPU, benchmark, DPI e diagnostica.", "GPU profile, benchmark, DPI and diagnostics."))])
+        # ADB senza fili (15 novembre): la finestra di collegamento (share/tod-adb.py) e la domanda sulle reti Wi-Fi;
+        # riaccenderla dimentica anche le reti "non su questa rete"
+        def chiedi_adb(on):
+            conf_set("ADB_CHIEDI", "1" if on else "0")
+            if on:
+                try:
+                    os.unlink(os.path.join(HOME, ".config/tod/adb-reti.json"))
+                except OSError:
+                    pass
+        self.group(box, T("ADB senza fili", "Wireless ADB"), [
+            self.row(T("Collega ADB", "Connect ADB"),
+                     self.button(T("Collega…", "Connect…"), lambda: spawn([sys.executable, os.path.join(HERE, "tod-adb.py")])),
+                     T("Per chiudere le app del telefono dalla Gestione attività. Serve il Debug wireless di Android.",
+                       "To close phone apps from Task Manager. It needs Android's Wireless debugging.")),
+            self.row(T("Chiedi quando ti colleghi a un Wi-Fi", "Ask when you join a Wi-Fi network"),
+                     self.switch(conf_get("ADB_CHIEDI", "1") != "0", chiedi_adb),
+                     T("Riaccenderla chiede di nuovo anche sulle reti scelte con «Non su questa rete».",
+                       "Turning it back on also asks again on networks set to “Not on this network”."))])
         self.group(box, T("Sviluppo", "Development"), [
             self.row(T("Modalità sviluppo", "Developer mode"),
                      self.switch(conf_get("SVILUPPO", "0") == "1", lambda on: tod("sviluppo", "on" if on else "off")),

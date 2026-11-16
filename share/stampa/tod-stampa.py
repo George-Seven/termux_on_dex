@@ -529,7 +529,13 @@ def scegli_ppd(righe, formati=()):
 def driver_per(device_id, formati=(), modello=""):
     """Il driver di una stampante senza IPP Everywhere, dall'ID IEEE 1284 (MFG, MDL, CMD) o dal nome del modello:
     quello che CUPS propone tra i driver installati, sennò quello generico per PostScript o PCL. "" = nessuno."""
-    for cerca_con in (("--device-id", device_id), ("--make-and-model", modello)):
+    # 13 novembre: la Ricoh di Pietro si presenta come "RICOH MP C2011 AirPrint" e CUPS, con quel suffisso, non trova
+    # nulla ("client-error-not-found"); senza, i suoi tre PPD. Si prova il nome com'è e poi senza le parole di protocollo.
+    pulito = re.sub(r"\s+(AirPrint|IPP Everywhere|IPP|series|\[[^\]]*\])(?=\s|$)", "", modello, flags=re.I).strip()
+    prove = [("--device-id", device_id), ("--make-and-model", modello)]
+    if pulito and pulito != modello:
+        prove.append(("--make-and-model", pulito))
+    for cerca_con in prove:
         if not cerca_con[1] or (cerca_con[0] == "--device-id" and "MDL" not in cerca_con[1].upper()):
             continue
         r = cups("lpinfo", cerca_con[0], cerca_con[1], "-m", timeout=90)
@@ -847,6 +853,8 @@ def modello_per(st):
 def aggiungi_indirizzo(db, testo, descr=""):
     """Una stampante con il suo indirizzo (o un URI completo). → "" o il motivo, in parole per l'utente."""
     t = testo.strip()
+    if "://" not in t and "/" in t:   # "192.168.0.150/ipp" (13 novembre, Pietro): indirizzo con percorso, senza ipp://
+        t = "ipp://" + t
     if re.match(r"^(socket|lpd|https?)://", t):   # chi scrive un URI così sa cosa vuole
         st = {"uri": t, "modello": descr or re.sub(r"^\w+://([^/:]+).*", r"\1", t), "senza_driver": True, "tipo": "uri"}
     else:

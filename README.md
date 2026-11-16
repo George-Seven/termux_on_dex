@@ -113,6 +113,7 @@ Per l'uso normale non servono:
 tod start | stop | restart | status   il desktop
 tod doctor                            diagnosi (salva anche Download/tod-doctor.txt)
 tod prestazioni                       processore, memoria e calore per un minuto
+tod priorita [stato|misura|on|off]    schermo fluido anche sotto sforzo (priorità e memoria)
 tod update                            aggiorna Termux On DeX
 tod menu                              centro di controllo
 tod gpu [status|probe|bench]          accelerazione grafica

@@ -483,6 +483,56 @@ def spente():
     return False
 
 
+def fai_icona(pkg, png):
+    """nome e icona PNG dall'APK → (nome, "app" | "lettera"), o None se l'APK non si trova"""
+    paths = apk_paths(pkg)
+    if not paths:
+        return None
+    apk = Apk(paths[0], paths[1:])
+    label, icon = apk.badging()
+    label = label or pkg.split(".")[-1]
+    svg = icon_svg(apk, icon) if icon else None
+    ok = bool(svg) and render(svg, png)
+    if not ok:
+        render(letter_svg(label), png)
+    return label, "app" if ok else "lettera"
+
+
+def info_app(pkg, comps=None):
+    """(nome, icona PNG, componente da avviare) di un'app del telefono, o None se non si apre dal launcher. Per la
+    Gestione attività (15 novembre): vale anche con le app spente nello Start (ANDROID_APPS=0), niente voce di menu.
+    Dalla cache se c'è (anche di una versione vecchia: il nome cambia di rado), sennò dall'APK, e si mette in cache."""
+    comp = (comps if comps is not None else launcher_activities()).get(pkg)
+    if comp is None:
+        return None
+    png = os.path.join(ICONS, f"{pkg}.png")
+    try:
+        cache = json.load(open(CACHE))
+    except (OSError, ValueError):
+        cache = {}
+    c = cache.get(pkg, {})
+    if c.get("label") and os.path.exists(png):
+        return c["label"], png, comp
+    os.makedirs(ICONS, exist_ok=True)
+    fatto = fai_icona(pkg, png)
+    if fatto is None:
+        return None
+    try:   # riletta: il generatore dello Start può averla scritta nel frattempo
+        cache = json.load(open(CACHE))
+    except (OSError, ValueError):
+        cache = {}
+    cache[pkg] = {"key": f"{versions().get(pkg, '?')}|{comp}", "label": fatto[0], "icon": fatto[1]}
+    try:
+        os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+        tmp = f"{CACHE}.{os.getpid()}"
+        with open(tmp, "w") as f:
+            json.dump(cache, f, indent=1)
+        os.replace(tmp, CACHE)
+    except OSError:
+        pass
+    return fatto[0], png, comp
+
+
 def togli_tutte():
     for f in os.listdir(APPS):
         if f.startswith("tod-android-") and f.endswith(".desktop"):
@@ -523,19 +573,13 @@ def main():
         if (not force and c.get("key") == key and c.get("icon") == "app"   # le lettere si riprovano
                 and os.path.exists(entry) and os.path.exists(png)):
             continue
-        paths = apk_paths(pkg)
-        if not paths:
+        fatto = fai_icona(pkg, png)
+        if fatto is None:
             continue
-        apk = Apk(paths[0], paths[1:])
-        label, icon = apk.badging()
-        label = label or pkg.split(".")[-1]
-        svg = icon_svg(apk, icon) if icon else None
-        ok = bool(svg) and render(svg, png)
-        if not ok:
-            render(letter_svg(label), png)
+        label, tipo = fatto
         with open(entry, "w") as f:
             f.write(desktop_entry(pkg, comp, label, png))
-        cache[pkg] = {"key": key, "label": label, "icon": "app" if ok else "lettera"}
+        cache[pkg] = {"key": key, "label": label, "icon": tipo}
         done += 1
         print(f"{pkg}: {label} ({cache[pkg]['icon']})", flush=True)
     # app disinstallate: via le loro voci

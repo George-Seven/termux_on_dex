@@ -20,6 +20,7 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(1, os.path.dirname(os.path.abspath(__file__)))   # wsd.py, caricato quando serve
 import scoperta  # noqa: E402
 
 PREFIX = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
@@ -165,6 +166,9 @@ def analizza_capacita(xml):
 
 
 def capacita(url, attesa=10):
+    if url.startswith("wsd+"):   # scanner WSD ("Scanner di rete" di Windows): share/stampa/wsd.py
+        import wsd
+        return wsd.capacita(url, attesa)
     try:
         cod, _, dati = richiesta("GET", url + "/ScannerCapabilities", attesa=attesa)
     except (OSError, http.client.HTTPException) as e:
@@ -238,6 +242,12 @@ def cerca(attesa=2.0, rete=True):
         trovati += scanner_da(record, sorgenti)
         ip_noti = {s.get("ip") for s in trovati}
         trovati += [s for s in scanner_delle_stampanti() if s["ip"] not in ip_noti]
+        ip_noti = {s.get("ip") for s in trovati}
+        try:   # WSD solo per chi non ha eSCL (la stessa macchina con tutti e due: eSCL, più semplice e collaudato)
+            import wsd
+            trovati += [s for s in wsd.cerca(attesa) if s["ip"] not in ip_noti]
+        except Exception as e:   # (uno scanner che risponde male non deve togliere gli altri dall'elenco)
+            print(f"wsd: {type(e).__name__}: {e}", file=sys.stderr)
     trovati += scanner_usb()
     visti = {s["url"] for s in trovati} | {s["chiave"] for s in trovati}
     for m in carica_conf()["manuali"]:
@@ -318,11 +328,20 @@ def aggiungi_indirizzo(testo):
         conf["manuali"] = [m for m in conf["manuali"] if m.get("url") != url] + [voce]
         salva_conf(conf)
         return dict(voce, dove="indirizzo", ip=ip)
+    host = urllib.parse.urlsplit(testo if "://" in testo else "//" + testo.strip()).hostname or ""
+    import wsd   # senza eSCL: è uno scanner WSD? (risponde solo alla ricerca multicast, come per Windows)
+    voce = next((s for s in wsd.cerca(3.0) if s["ip"] == host), None)
+    if voce:
+        conf = carica_conf()
+        conf["manuali"] = [m for m in conf["manuali"] if m.get("url") != voce["url"]] + \
+            [{"chiave": voce["chiave"], "nome": voce["nome"], "url": voce["url"]}]
+        salva_conf(conf)
+        return dict(voce, dove="indirizzo")
     if not risponde_qualcuno(testo):
         raise Errore(T(f"Nessun dispositivo risponde a «{testo.strip()}». Controlla che sia acceso e sulla stessa rete Wi-Fi.",
                        f"No device answers at “{testo.strip()}”. Check that it is on and on the same Wi-Fi network."))
-    raise Errore(T(f"Il dispositivo a «{testo.strip()}» risponde, ma non offre la scansione in rete (AirScan/eSCL).",
-                   f"The device at “{testo.strip()}” answers, but offers no network scanning (AirScan/eSCL)."))
+    raise Errore(T(f"Il dispositivo a «{testo.strip()}» risponde, ma non offre la scansione in rete (AirScan/eSCL o WSD).",
+                   f"The device at “{testo.strip()}” answers, but offers no network scanning (AirScan/eSCL or WSD)."))
 
 
 def togli(chiave):
@@ -384,6 +403,10 @@ def scansiona(url, xml, pagina, annulla=None, una_sola=False, pausa=1.0, attesa=
     """Un lavoro: POST ScanJobs, poi una pagina dopo l'altra (PAGINA(dati) per ognuna) finché lo scanner dice
     che sono finite (dal vetro una sola: UNA_SOLA). 503 = si sta scaldando o è occupato: si riprova. Alla
     fine il lavoro si cancella (DELETE: alcuni scanner sennò restano occupati). Quante pagine; Errore se nessuna."""
+    if url.startswith("wsd+"):
+        import wsd
+        return wsd.scansiona(url, xml, pagina, annulla, una_sola, pausa, attesa, tentativi)
+
     def chiedi(metodo, u, corpo=None, quanto=30):
         try:
             return richiesta(metodo, u, corpo, quanto)

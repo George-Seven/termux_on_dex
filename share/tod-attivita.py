@@ -8,10 +8,16 @@ Pietro: Cattura schermo e Gestione attività di XFCE "hanno l'aspetto Linux": le
   Prestazioni  processore e memoria negli ultimi due minuti, e il chip video (13 novembre: come "Video Decode" della GPU
                in Windows): chi lo usa, formato, fotogrammi al secondo, totali della sessione; nei Processi l'app che lo
                sta usando ha accanto "chip video".
-I dati: share/attivita_dati.py (senza grafica). Android mostra solo i processi del desktop, non le app del telefono.
+I dati: share/attivita_dati.py (senza grafica). Android mostra a Termux solo i processi del desktop.
+App del telefono (15 novembre, Pietro: "mi serve che gestione attività mi permetta di gestire le app android aperte"):
+un gruppo a parte nei Processi, dall'aiutante share/android/AppAndroid.java (serve l'"Accesso ai dati di utilizzo"
+per Termux: se manca, una riga e un link lo aprono). Stato (in primo piano, in background, sospesa), doppio clic =
+passa all'app, "Termina attività" = Forza arresto con ADB o Shizuku, sennò la pagina dell'app nelle impostazioni del
+telefono (Android non lascia chiudere le altre app da sé). Processore e memoria di quelle app Android non li dice.
 """
 import os
 import signal
+import subprocess
 import sys
 import threading
 
@@ -27,14 +33,30 @@ OGNI = 2   # secondi tra un aggiornamento e l'altro
 STORIA = 60   # punti dei grafici (due minuti)
 
 
-def pannelli():
-    """Catalogo delle app, finestre aperte e chiusura: le stesse funzioni del pannello Batteria (tod-pannelli.py)."""
+def modulo(nome, file):
     import importlib.util
-    spec = importlib.util.spec_from_file_location("tod_pannelli", os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                                                                "tod-pannelli.py"))
+    spec = importlib.util.spec_from_file_location(nome, os.path.join(os.path.dirname(os.path.abspath(__file__)), file))
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
+
+
+def pannelli():
+    """Catalogo delle app, finestre aperte e chiusura: le stesse funzioni del pannello Batteria (tod-pannelli.py)."""
+    return modulo("tod_pannelli", "tod-pannelli.py")
+
+
+PREFIX = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
+
+
+def am(*argomenti):
+    """am start di Termux (in DeX la schermata si apre in una finestra) → l'uscita, per capire se Android l'ha aperta"""
+    try:
+        r = subprocess.run([os.path.join(PREFIX, "bin/am"), "start", "--user", "0", *argomenti], capture_output=True,
+                           text=True, timeout=20, stdin=subprocess.DEVNULL)
+        return r.stdout + r.stderr
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"Error: {e}"
 
 
 CSS = """
@@ -102,6 +124,7 @@ class Finestra(Gtk.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title=T("Gestione attività", "Task Manager"))
         C.imposta_scala()
+        self.alta = px(24)   # tutte le righe alte uguali (15 novembre: alcune erano il doppio delle altre e cambiavano)
         w, h = px(980), px(660)
         mon = Gdk.Display.get_default().get_primary_monitor() or Gdk.Display.get_default().get_monitor(0)
         if mon:
@@ -122,6 +145,12 @@ class Finestra(Gtk.ApplicationWindow):
         self.storia_cpu, self.storia_mem, self.storia_chip = [], [], []
         self.chip_prima, self.chip_ora, self.chip_app = None, 0.0, set()
         self._in_lettura = False
+        # le app del telefono: l'aiutante resta acceso finché la finestra è aperta (avviarlo costa ~1 s)
+        self.telefono = D.Telefono()
+        self.tel_stato, self.tel_app = "assente", []   # assente | permesso | ok | errore
+        self.tel_info = {}       # pacchetto → (nome, icona PNG, componente) o None (non si apre dal launcher)
+        self._AA = None          # tod-android-apps.py, caricato alla prima app del telefono
+        self._icone = {}
         radice = Gtk.Box()
         self.add(radice)
         self.nav = C.Nav(self.scegli, larga=220)
@@ -135,7 +164,10 @@ class Finestra(Gtk.ApplicationWindow):
         self.pagine.add_named(self.costruisci_processi(), "processi")
         self.pagine.add_named(self.costruisci_prestazioni(), "prestazioni")
         self.connect("key-press-event", self.tasto)
-        self.connect("destroy", lambda *_: GLib.source_remove(self._giro))
+        self._chiusa = False
+        self.connect("delete-event", lambda *_: (self.hide(), False)[1])   # sparisce subito, il resto dopo
+        self.connect("destroy", lambda *_: (setattr(self, "_chiusa", True), GLib.source_remove(self._giro),
+                                            self.telefono.ferma()))
         self.show_all()
         self.scegli("processi")
         self._giro = GLib.timeout_add_seconds(OGNI, self.leggi)
@@ -172,17 +204,24 @@ class Finestra(Gtk.ApplicationWindow):
         self.store = Gtk.TreeStore(str, str, str, str, str, str, float, int, int)
         self.vista = Gtk.TreeView(model=self.store, headers_visible=True, enable_search=False)
         self.vista.get_selection().connect("changed", self.selezione)
-        self.vista.connect("row-expanded", lambda _v, it, _p: self.aperte.add(self.store[it][5]))
-        self.vista.connect("row-collapsed", lambda _v, it, _p: self.aperte.discard(self.store[it][5]))
+        # le righe aperte dall'utente; non quelle che GTK chiude da sé mentre si aggiorna (un'app rimasta con un
+        # processo solo perde le righe figlie e si chiude)
+        self._in_sinc = False
+        self.vista.connect("row-expanded", lambda _v, it, _p: self._in_sinc or self.aperte.add(self.store[it][5]))
+        self.vista.connect("row-collapsed", lambda _v, it, _p: self._in_sinc or self.aperte.discard(self.store[it][5]))
+        self.vista.connect("row-activated", self.attivata)
+        self.vista.connect("button-press-event", self.clic)
         c = Gtk.TreeViewColumn(T("Nome", "Name"))
         c.set_expand(True)
         ri = Gtk.CellRendererPixbuf()
         ri.set_property("stock-size", Gtk.IconSize.SMALL_TOOLBAR)
         ri.set_padding(px(4), 0)
+        ri.set_fixed_size(-1, self.alta)
         c.pack_start(ri, False)
-        c.add_attribute(ri, "icon-name", 0)
+        c.set_cell_data_func(ri, self._icona_cella)
         rt = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END)
         rt.set_padding(px(6), px(2))
+        rt.set_fixed_size(-1, self.alta)
         c.pack_start(rt, True)
         c.add_attribute(rt, "text", 1)
         c.set_cell_data_func(rt, self._nome_cella)
@@ -196,16 +235,40 @@ class Finestra(Gtk.ApplicationWindow):
         sw.set_margin_start(px(12))
         sw.set_margin_end(px(12))
         v.pack_start(sw, True, True, 0)
-        nota = C.etichetta(T("Qui ci sono le app e i servizi del desktop. Le app del telefono le gestisce Android.",
-                             "This shows desktop apps and services. Phone apps are managed by Android."), "att-nota")
-        for m, n in (("start", 24), ("top", 8), ("bottom", 12)):
-            getattr(nota, f"set_margin_{m}")(px(n))
-        v.pack_start(nota, False, False, 0)
+        self.nota = C.etichetta("", "att-nota", ellissi=False)
+        self.nota.set_line_wrap(True)
+        self.nota.connect("activate-link", lambda _l, uri: (self.info_android("com.termux") if uri == "termux"
+                                                            else self.apri_permesso(), True)[1])
+        self.metti_nota()
+        for m, n in (("start", 24), ("end", 24), ("top", 8), ("bottom", 12)):
+            getattr(self.nota, f"set_margin_{m}")(px(n))
+        v.pack_start(self.nota, False, False, 0)
         return v
+
+    def metti_nota(self):
+        if self.tel_stato == "permesso":
+            # Termux installato da file (GitHub, F-Droid): Android blocca l'interruttore come "impostazione con
+            # restrizioni" (15 novembre, sul telefono di Pietro) finché non lo si consente dalla pagina di Termux
+            self.nota.set_markup(T("Per vedere anche le app del telefono, Termux ha bisogno dell'«Accesso ai dati di "
+                                   "utilizzo»: <a href=\"permesso\">consentilo nelle impostazioni del telefono</a>. "
+                                   "Se Android lo nega («impostazioni con restrizioni»): <a href=\"termux\">Info app di "
+                                   "Termux</a> → ⋮ in alto a destra → «Consenti impostazioni con restrizioni», poi riprova.",
+                                   "To also show phone apps, Termux needs “Usage access”: "
+                                   "<a href=\"permesso\">allow it in the phone settings</a>. If Android refuses "
+                                   "(“restricted settings”): <a href=\"termux\">Termux app info</a> → ⋮ at the top "
+                                   "right → “Allow restricted settings”, then try again."))
+        elif self.tel_stato == "ok":
+            self.nota.set_text(T("App del telefono: doppio clic per passare all'app. Android non dice quanto processore e "
+                                 "memoria usano.", "Phone apps: double-click to switch to the app. Android doesn't tell "
+                                 "how much CPU and memory they use."))
+        else:
+            self.nota.set_text(T("Qui ci sono le app e i servizi del desktop. Le app del telefono le gestisce Android.",
+                                 "This shows desktop apps and services. Phone apps are managed by Android."))
 
     def colonna_numero(self, titolo, testo, valore, chiave, pieno):
         r = Gtk.CellRendererText(xalign=1.0)
         r.set_padding(px(14), px(2))
+        r.set_fixed_size(-1, self.alta)
         c = Gtk.TreeViewColumn(titolo, r, text=testo)
         c.set_min_width(px(130))
         c.set_alignment(1.0)
@@ -215,13 +278,25 @@ class Finestra(Gtk.ApplicationWindow):
         self.vista.append_column(c)
         return c
 
+    def _icona_cella(self, _c, cella, modello, it, _d):
+        """nomi del tema e file (le icone delle app del telefono sono PNG fatte dal generatore dello Start)"""
+        s = modello[it][0]
+        g = self._icone.get(s) if s else None
+        if s and g is None:
+            try:
+                g = Gio.Icon.new_for_string(s)
+            except GLib.Error:
+                g = Gio.ThemedIcon.new("application-x-executable")
+            self._icone[s] = g
+        cella.set_property("gicon", g)
+
     def _nome_cella(self, _c, cella, modello, it, _d):
         cella.set_property("weight", 600 if modello[it][4] == "gruppo" else 400)
 
     def _numero_cella(self, _c, cella, modello, it, dati):
         """come Windows: lo sfondo del numero si colora di più quanto più consuma (qui nell'accento)"""
         i, pieno = dati
-        if modello[it][4] == "gruppo":
+        if modello[it][4] in ("gruppo", "android", "permesso"):   # Android non dice quanto consumano
             cella.set_property("cell-background-set", False)
             return
         quota = min(1.0, modello[it][i] / pieno)
@@ -245,6 +320,7 @@ class Finestra(Gtk.ApplicationWindow):
 
         def lavoro():
             chip = ([], (0, 0)), ("in_preparazione", "")
+            tel = None
             try:
                 camp = D.Campione()
                 fin = self.P.finestre_aperte()
@@ -252,12 +328,51 @@ class Finestra(Gtk.ApplicationWindow):
             except Exception as e:   # noqa: BLE001 - un giro andato storto non chiude la finestra
                 print(f"tod-attivita: {type(e).__name__}: {e}", file=sys.stderr)
                 camp, fin = None, []
-            GLib.idle_add(lambda: self.letto(camp, fin, chip) and False)
+            try:
+                tel = self.telefono.chiedi()
+                if tel and tel.get("ok"):
+                    self.conosci([r[0] for r in tel.get("app", []) if r])
+            except Exception as e:   # noqa: BLE001 - senza le app del telefono la finestra resta utile
+                print(f"tod-attivita: telefono: {type(e).__name__}: {e}", file=sys.stderr)
+            GLib.idle_add(lambda: self.letto(camp, fin, chip, tel) and False)
         threading.Thread(target=lavoro, daemon=True).start()
         return True
 
-    def letto(self, camp, fin, chip=(([], (0, 0)), ("in_preparazione", ""))):
+    def conosci(self, pacchetti):
+        """nome, icona e componente delle app del telefono mai viste in questa sessione (dal filo di lettura: la prima
+        volta per un'app senza icona in cache servono aapt2 e rsvg-convert, qualche secondo)"""
+        nuovi = [p for p in pacchetti if p not in self.tel_info and not p.startswith(D.NOSTRE)]
+        if not nuovi:
+            return
+        if self._AA is None:
+            self._AA = modulo("tod_android_apps", "tod-android-apps.py")
+        comps = self._AA.launcher_activities()
+        for p in nuovi:
+            try:
+                self.tel_info[p] = self._AA.info_app(p, comps)
+            except Exception as e:   # noqa: BLE001 - un APK strano non ferma le altre
+                print(f"tod-attivita: {p}: {type(e).__name__}: {e}", file=sys.stderr)
+                self.tel_info[p] = None
+
+    def letto(self, camp, fin, chip=(([], (0, 0)), ("in_preparazione", "")), tel=None):
         self._in_lettura = False
+        if self._chiusa:   # un giro finito dopo la chiusura
+            return
+        if tel is None:
+            stato = "assente"
+        elif tel.get("ok"):
+            stato = "ok"
+            self.tel_app = D.app_android(tel.get("app"), {p for p, i in self.tel_info.items() if i},
+                                         {a["pkg"] for a in self.tel_app})
+        else:
+            stato = "permesso" if tel.get("errore") == "permesso" else "errore"
+            if stato == "errore" and self.tel_stato != "errore":
+                print(f"tod-attivita: telefono: {tel.get('errore')}", file=sys.stderr)
+        if stato != "ok":
+            self.tel_app = []
+        if stato != self.tel_stato:
+            self.tel_stato = stato
+            self.metti_nota()
         if camp is None:
             return
         uso = D.cpu(self.prima, camp)
@@ -313,56 +428,117 @@ class Finestra(Gtk.ApplicationWindow):
                 continue
             voci_bg.append({"nome": nome, "icona": "application-x-executable", "chiave": f"pid:{p}", "pid": p, "figli": [],
                             "cpu": uso.get(p, 0.0), "kb": pr.kb})
+        voci_tel = []
+        for a in self.tel_app:
+            info = self.tel_info.get(a["pkg"])
+            if not info:
+                continue
+            nome = info[0] + "  ·  " + T(*D.STATI_ANDROID[a["stato"]])
+            if f and f not in nome.lower() and f not in a["pkg"].lower():
+                continue
+            voci_tel.append({"nome": nome, "icona": info[1], "chiave": "android:" + a["pkg"], "pid": 0, "figli": [],
+                             "cpu": 0.0, "kb": 0, "ultimo": a["ultimo"], "tipo": "android"})
+        if self.tel_stato == "permesso" and not f:
+            voci_tel.append({"nome": T("Consenti l'«Accesso ai dati di utilizzo» per vederle (doppio clic)",
+                                       "Allow “Usage access” to see them (double-click)"),
+                             "icona": "dialog-information-symbolic", "chiave": "permesso", "pid": 0, "figli": [],
+                             "cpu": 0.0, "kb": 0, "tipo": "permesso"})
         for elenco in (voci_app, voci_bg):
             elenco.sort(key=self.chiave_ordine, reverse=self.discendente)
-        scelta = self.scelta
-        adj = self.vista.get_parent().get_vadjustment() if self.vista.get_parent() else None
-        pos = adj.get_value() if adj else 0
-        self.vista.freeze_child_notify()
-        self.store.clear()
-        da_scegliere = None
+        # processore e memoria non si sanno: per nome, sennò la più usata di recente in cima
+        voci_tel.sort(key=(lambda v: v["nome"].lower()) if self.ordine == "nome" else (lambda v: -v.get("ultimo", 0)),
+                      reverse=self.ordine == "nome" and self.discendente)
+        n_tel = sum(1 for v in voci_tel if v["tipo"] == "android")
+        t_tel = (T("App del telefono", "Phone apps") if self.tel_stato == "permesso"
+                 else T(f"App del telefono ({n_tel})", f"Phone apps ({n_tel})"))
+        albero = []   # [(valori della riga, [figli])]
         for titolo, elenco, chiave in ((T(f"App ({len(voci_app)})", f"Apps ({len(voci_app)})"), voci_app, "g:app"),
+                                       (t_tel, voci_tel, "g:android"),
                                        (T(f"Processi in background ({len(voci_bg)})",
                                           f"Background processes ({len(voci_bg)})"), voci_bg, "g:bg")):
             if not elenco:
                 continue
-            g = self.store.append(None, ["", titolo, "", "", "gruppo", chiave, 0.0, 0, 0])
+            righe = []
             for v in elenco:
-                it = self.store.append(g, [v["icona"], v["nome"], D.percento(v["cpu"], IT), D.dimensione(v["kb"], IT),
-                                           "app" if v["figli"] else "proc", v["chiave"], v["cpu"], v["kb"], v["pid"]])
-                if v["chiave"] == scelta:
-                    da_scegliere = it
-                for x in sorted(v["figli"], key=lambda x: -x["kb"]) if len(v["figli"]) > 1 else []:
-                    ci = self.store.append(it, ["", x["nome"], D.percento(x["cpu"], IT), D.dimensione(x["kb"], IT),
-                                                "proc", f"pid:{x['pid']}", x["cpu"], x["kb"], x["pid"]])
-                    if f"pid:{x['pid']}" == scelta:
-                        da_scegliere = ci
-        self.vista.thaw_child_notify()
-        for riga in self.store:   # i gruppi sempre aperti, le app come le aveva lasciate l'utente
-            self.vista.expand_row(riga.path, False)
-            for r in riga.iterchildren():
-                if r[5] in self.aperte:
-                    self.vista.expand_row(r.path, False)
-        if da_scegliere is not None:
-            self.vista.get_selection().select_iter(da_scegliere)
-        if adj:
-            GLib.idle_add(lambda: adj.set_value(pos) and False)
-        self.c_cpu.set_title(T("Processore", "CPU") + "\n" + D.percento(sum(uso.values()), IT))
+                if "tipo" in v:   # app del telefono: i numeri Android non li dà
+                    vuoto = "—" if v["tipo"] == "android" else ""
+                    righe.append(([v["icona"], v["nome"], vuoto, vuoto, v["tipo"], v["chiave"], 0.0, 0, 0], []))
+                    continue
+                figli = [(["", x["nome"], D.percento(x["cpu"], IT), D.dimensione(x["kb"], IT), "proc", f"pid:{x['pid']}",
+                           x["cpu"], x["kb"], x["pid"]], [])
+                         for x in (sorted(v["figli"], key=lambda x: -x["kb"]) if len(v["figli"]) > 1 else [])]
+                righe.append(([v["icona"], v["nome"], D.percento(v["cpu"], IT), D.dimensione(v["kb"], IT),
+                               "app" if v["figli"] else "proc", v["chiave"], v["cpu"], v["kb"], v["pid"]], figli))
+            albero.append((["", titolo, "", "", "gruppo", chiave, 0.0, 0, 0], righe))
+        # sul posto, non svuotando e riempiendo (15 novembre, Pietro: "le voci sfarfallano"): restano selezione,
+        # posizione dello scorrimento e righe aperte, e GTK ridisegna solo i numeri cambiati
+        self._in_sinc = True
+        try:
+            self.sincronizza(None, albero)
+            for riga in self.store:   # i gruppi sempre aperti, le app come le aveva lasciate l'utente
+                if not self.vista.row_expanded(riga.path):
+                    self.vista.expand_row(riga.path, False)
+                for r in riga.iterchildren():
+                    if r[5] in self.aperte and self.store.iter_has_child(r.iter) and not self.vista.row_expanded(r.path):
+                        self.vista.expand_row(r.path, False)
+        finally:
+            self._in_sinc = False
         usata = camp.mem_totale - camp.mem_libera
-        self.c_mem.set_title(T("Memoria", "Memory") + "\n" + (D.percento(usata * 100 / camp.mem_totale, IT)
-                                                              if camp.mem_totale else ""))
+        for c, t in ((self.c_cpu, T("Processore", "CPU") + "\n" + D.percento(sum(uso.values()), IT)),
+                     (self.c_mem, T("Memoria", "Memory") + "\n" + (D.percento(usata * 100 / camp.mem_totale, IT)
+                                                                   if camp.mem_totale else ""))):
+            if c.get_title() != t:   # un titolo nuovo rifà l'intestazione: solo se cambia
+                c.set_title(t)
+
+    def sincronizza(self, genitore, righe):
+        """i figli di GENITORE (None = la radice) diventano RIGHE [(valori, figli)], riconosciute dalla chiave
+        (colonna 5): quelle che restano si aggiornano solo nei valori cambiati, le nuove si aggiungono, le sparite si
+        tolgono, poi si rimettono nell'ordine voluto. Gli iter di un TreeStore restano validi tra una modifica e l'altra."""
+        esistenti = {}
+        it = self.store.iter_children(genitore)
+        while it is not None:
+            esistenti[self.store.get_value(it, 5)] = it
+            it = self.store.iter_next(it)
+        volute = []
+        for valori, figli in righe:
+            it = esistenti.pop(valori[5], None)
+            if it is None:
+                it = self.store.append(genitore, valori)
+            else:
+                vecchi = self.store[it]
+                cambiati = [x for i, v in enumerate(valori) if vecchi[i] != v for x in (i, v)]
+                if cambiati:
+                    self.store.set(it, *cambiati)
+            volute.append(it)
+            self.sincronizza(it, figli)
+        for it in esistenti.values():
+            self.store.remove(it)
+        posto = [self.store.get_path(it).get_indices()[-1] for it in volute]
+        if posto != list(range(len(posto))):   # reorder() in PyGObject non c'è: una riga dietro l'altra
+            prima = None
+            for it in volute:
+                self.store.move_after(it, prima)   # None = in cima
+                prima = it
 
     def selezione(self, sel):
         modello, it = sel.get_selected()
         if it is None or modello[it][4] == "gruppo":
             self.scelta = None
             self.b_termina.set_sensitive(False)
+            self.b_termina.set_tooltip_text(None)
             return
         self.scelta = modello[it][5]
         self.b_termina.set_sensitive(not self.da_non_terminare(modello[it]))
+        self.b_termina.set_tooltip_text(T("Con ADB o Shizuku la chiude subito (Forza arresto); senza, si apre la sua pagina "
+                                          "nelle impostazioni del telefono: tocca «Forza arresto».",
+                                          "With ADB or Shizuku it is closed right away (Force stop); without, its page "
+                                          "in the phone settings opens: tap “Force stop”.")
+                                        if modello[it][4] == "android" else None)
 
     def da_non_terminare(self, riga):
-        if self.ultimo is None:
+        if riga[4] == "android":
+            return False
+        if self.ultimo is None or riga[4] == "permesso":
             return True
         camp = self.ultimo[0]
         if riga[4] == "app":
@@ -370,11 +546,90 @@ class Finestra(Gtk.ApplicationWindow):
         p = camp.processi.get(riga[8])
         return p is None or D.protetto(p)
 
+    # --- app del telefono ---------------------------------------------------------------------------------------------
+    def in_filo(self, lavoro):
+        threading.Thread(target=lavoro, daemon=True).start()
+
+    def passa_a(self, pkg):
+        """come dal launcher: l'app già aperta torna davanti (in DeX la sua finestra), senza aprirne un'altra"""
+        info = self.tel_info.get(pkg)
+        if info:
+            self.in_filo(lambda: am("-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER",
+                                    "-f", "0x10200000", "-n", info[2]))   # NEW_TASK | RESET_TASK_IF_NEEDED
+
+    def info_android(self, pkg):
+        self.in_filo(lambda: am("-a", "android.settings.APPLICATION_DETAILS_SETTINGS", "-d", f"package:{pkg}"))
+
+    def apri_permesso(self):
+        """Impostazioni → Accesso ai dati di utilizzo, direttamente sull'interruttore di Termux se il telefono lo fa"""
+        def lavoro():
+            if "Error" in am("-a", "android.settings.USAGE_ACCESS_SETTINGS", "-d", "package:com.termux"):
+                am("-a", "android.settings.USAGE_ACCESS_SETTINGS")
+        self.in_filo(lavoro)
+
+    def termina_android(self, pkg):
+        """Forza arresto con ADB o Shizuku (tod _telefono_chiudi); senza, Android lo lascia fare solo dalle sue
+        impostazioni: si apre la pagina dell'app (un tocco su «Forza arresto»)"""
+        def lavoro():
+            try:
+                rc = subprocess.run(["tod", "_telefono_chiudi", pkg], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, timeout=60).returncode
+            except (OSError, subprocess.SubprocessError):
+                rc = 1
+            if rc == 0:
+                GLib.timeout_add(500, lambda: self.leggi() and False)
+            else:
+                am("-a", "android.settings.APPLICATION_DETAILS_SETTINGS", "-d", f"package:{pkg}")
+        self.in_filo(lavoro)
+
+    def attivata(self, _v, percorso, _c):
+        riga = self.store[percorso]
+        if riga[4] == "android":
+            self.passa_a(riga[5][len("android:"):])
+        elif riga[4] == "permesso":
+            self.apri_permesso()
+
+    def clic(self, _v, ev):
+        """tasto destro: le azioni della riga (per le app del telefono anche Passa all'app e Informazioni)"""
+        if ev.type != Gdk.EventType.BUTTON_PRESS or ev.button != 3:
+            return False
+        r = self.vista.get_path_at_pos(int(ev.x), int(ev.y))
+        if r is None:
+            return False
+        self.vista.get_selection().select_path(r[0])
+        riga = self.store[r[0]]
+        if riga[4] in ("gruppo", "permesso"):
+            return True
+        menu = Gtk.Menu()
+
+        def voce(testo, azione, attiva=True):
+            m = Gtk.MenuItem(label=testo)
+            m.set_sensitive(attiva)
+            m.connect("activate", lambda *_: azione())
+            menu.append(m)
+        if riga[4] == "android":
+            pkg = riga[5][len("android:"):]
+            voce(T("Passa all'app", "Switch to"), lambda: self.passa_a(pkg))
+            voce(T("Termina attività", "End task"), self.termina)
+            voce(T("Informazioni sull'app", "App info"), lambda: self.info_android(pkg))
+        else:
+            voce(T("Termina attività", "End task"), self.termina, not self.da_non_terminare(riga))
+        menu.show_all()
+        menu.attach_to_widget(self.vista, None)
+        menu.connect("selection-done", lambda m: GLib.idle_add(m.destroy))
+        menu.popup_at_pointer(ev)
+        return True
+
     # --- termina ----------------------------------------------------------------------------------------------------
     def termina(self):
         sel = self.vista.get_selection()
         modello, it = sel.get_selected()
-        if it is None or self.ultimo is None or self.da_non_terminare(modello[it]):
+        if it is None or self.da_non_terminare(modello[it]):
+            return
+        if modello[it][4] == "android":
+            self.termina_android(modello[it][5][len("android:"):])
+            return
+        if self.ultimo is None:
             return
         camp, _uso, app, _resto = self.ultimo
         riga = list(modello[it])

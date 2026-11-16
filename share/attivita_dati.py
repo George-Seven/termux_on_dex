@@ -10,8 +10,13 @@ percentuale del totale dei core (come la colonna CPU di Windows).
   nome_processo(argv, comm)      un nome leggibile (le app di Debian partono con ld.so --argv0 NOME)
   protetto(proc)                 vero per i pezzi del desktop che non si possono terminare
   chip_video(), chip_stato()     il video col chip (lib/videochip.sh): video in corso, totali, acceso/spento e perché
+  Telefono(), app_android()      le app del telefono aperte (share/android/AppAndroid.java), con l'"Accesso ai dati di
+                                 utilizzo" dato a Termux
 """
+import json
 import os
+import select
+import subprocess
 import time
 
 PROC = os.environ.get("TOD_ATTIVITA_PROC", "/proc")
@@ -214,7 +219,6 @@ CODEC = {"h264": "H.264", "vp9": "VP9", "hevc": "HEVC", "av1": "AV1"}
 def chip_video(cartella=CHIP_DIR, ora=None):
     """([video in corso], (video della sessione, fotogrammi della sessione)). Un video in corso:
     {pid (processo dell'app), codec, w, h, fotogrammi, inizio, agg}; quelli fermi da più di 5 s non contano."""
-    import json
     ora = time.time() if ora is None else ora
     attivi = []
     try:
@@ -280,3 +284,137 @@ def chip_stato(casa=None, tmp=None):
         pass
     return "in_preparazione", ""
 
+
+
+# --- le app del telefono (15 novembre, Pietro: "mi serve che gestione attività mi permetta di gestire le app android
+# aperte"). Android non mostra a Termux i loro processi; con l'"Accesso ai dati di utilizzo" dato a Termux l'aiutante
+# share/android/AppAndroid.java (app_process, utente di Termux) dice quali sono aperte e in che stato. Processore e
+# memoria di quelle app Android non li dà: solo lo stato.
+ANDROID_DEX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "android", "tod-app-android.dex")
+NOSTRE = ("com.termux",)   # Termux, Termux:X11, Termux:API: il desktop stesso, non si mostra né si chiude
+PRIMA_APP = 10000          # Process.FIRST_APPLICATION_UID: sotto ci sono gli uid condivisi di sistema
+STATI_ANDROID = {"primo_piano": ("In primo piano", "Foreground"), "background": ("In background", "Background"),
+                 "sospesa": ("Sospesa", "Suspended")}
+
+
+def stato_android(uid, stato, visibile, prima=False):
+    """dallo stato del processo (ActivityManager.PROCESS_STATE_*) a "primo_piano" | "background" | "sospesa", o None
+    se l'app non è aperta: 19 = processo in cache senza finestre (chiusa dalle recenti), 20 = nessun processo.
+    Le app con l'uid condiviso di sistema (Impostazioni gira come "system", sempre vivo) contano solo se visibili.
+    6-11, 13, 14 (un servizio, una notifica ricevuta, un lavoro in sottofondo) non dicono se l'app ha finestre: resta
+    com'era (PRIMA = era già nell'elenco), così un'app chiusa che si sveglia un attimo non compare e scompare."""
+    if uid < PRIMA_APP:
+        return "primo_piano" if visibile else None
+    if stato >= 19:
+        return None
+    if visibile or stato <= 3 or stato == 12:   # persistente, in primo piano, legata a chi è in primo piano, schermo spento
+        return "primo_piano"
+    if stato >= 16:   # in cache con le sue finestre o nelle recenti: Android la tiene ferma (congelata)
+        return "sospesa"
+    if stato in (4, 5, 15):   # servizio in primo piano (musica, navigatore: ha la sua notifica), l'app di prima
+        return "background"
+    return "background" if prima else None
+
+
+def app_android(righe, note, prima=()):
+    """righe dell'aiutante [[pacchetto, uid, stato, ultimo evento in ms, visibile]] → [{pkg, stato, ultimo}] delle app
+    aperte, solo quelle in NOTE (che si avviano dal launcher: niente finestrelle di sistema), non le nostre. PRIMA: i
+    pacchetti dell'elenco precedente"""
+    out = []
+    for r in righe or []:
+        try:
+            pkg, uid, stato, ultimo, vis = str(r[0]), int(r[1]), int(r[2]), int(r[3]), bool(r[4])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if pkg not in note or pkg.startswith(NOSTRE):
+            continue
+        s = stato_android(uid, stato, vis, pkg in prima)
+        if s:
+            out.append({"pkg": pkg, "stato": s, "ultimo": ultimo})
+    return out
+
+
+def dex_pronto(sorgente=ANDROID_DEX, cartella=None):
+    """la copia in sola lettura del .dex (da Android 14 app_process rifiuta i dex scrivibili) → percorso, o None"""
+    cartella = cartella or os.path.join(os.environ.get("TOD_TERMUX_HOME") or os.path.expanduser("~"),
+                                        ".local/share/tod-android")
+    try:
+        with open(sorgente, "rb") as f:
+            dati = f.read()
+    except OSError:
+        return None
+    dest = os.path.join(cartella, "tod-app-android.dex")
+    try:
+        with open(dest, "rb") as f:
+            if f.read() == dati:
+                return dest
+    except OSError:
+        pass
+    try:
+        os.makedirs(cartella, exist_ok=True)
+        tmp = f"{dest}.{os.getpid()}"
+        with open(tmp, "wb") as f:
+            f.write(dati)
+        os.chmod(tmp, 0o400)
+        os.replace(tmp, dest)
+        return dest
+    except OSError:
+        return None
+
+
+class Telefono:
+    """l'aiutante acceso finché la Gestione attività è aperta (avviarlo costa ~1 s): "stato" → una riga JSON.
+    chiedi() → {"ok": True, "app": [...]} | {"ok": False, "errore": "permesso" | ...} | None (aiutante assente o muto)"""
+
+    def __init__(self, comando=None, env=None):
+        finto = os.environ.get("TOD_ATTIVITA_TELEFONO")   # per le prove a vista: un aiutante finto
+        if comando is None and finto:
+            import shlex
+            comando = shlex.split(finto)
+        self.comando, self.env, self.p = comando, env, None
+
+    def _avvia(self):
+        if self.comando is not None:
+            cmd, env = self.comando, self.env
+        else:
+            dex = dex_pronto()
+            if dex is None or not os.path.exists("/system/bin/app_process"):
+                return False
+            # come "am" di Termux: senza i moduli del desktop (LD_PRELOAD) dentro il Java di Android
+            env = {k: v for k, v in os.environ.items() if k not in ("LD_PRELOAD", "LD_LIBRARY_PATH")}
+            env["CLASSPATH"] = dex
+            cmd = ["/system/bin/app_process", "-Xnoimage-dex2oat", "/", "com.termuxondex.AppAndroid"]
+        try:
+            self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                      env=env, start_new_session=True)
+        except OSError:
+            self.p = None
+            return False
+        return True
+
+    def chiedi(self, attesa=10.0):
+        if self.p is None or self.p.poll() is not None:
+            if not self._avvia():
+                return None
+        try:
+            self.p.stdin.write(b"stato\n")
+            self.p.stdin.flush()
+            pronto, _, _ = select.select([self.p.stdout], [], [], attesa)
+            riga = self.p.stdout.readline() if pronto else b""
+            if not riga:
+                raise OSError("l'aiutante non risponde")
+            return json.loads(riga)
+        except (OSError, ValueError):
+            self.ferma()
+            return None
+
+    def ferma(self):
+        """subito: l'aiutante non ha niente da salvare (alla chiusura della finestra non si aspetta Java che finisce)"""
+        p, self.p = self.p, None
+        if p is None:
+            return
+        try:
+            p.kill()
+            p.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            pass

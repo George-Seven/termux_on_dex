@@ -454,6 +454,25 @@ xfwm_shadows() { # ombre morbide come macOS: finestre e menu sì, barra delle ap
   done
 }
 
+# Aggancio ai bordi come Windows 11 (15 novembre 2026): bordo sinistro/destro = metà schermo, angoli = un quarto,
+# in alto = ingrandita, con l'anteprima del posto. Lo fa share/tod-edges.py (share/tod_aggancio.py), a ogni
+# sessione. xfwm4 4.20 ha il suo (tile_on_move), ma aggancia a metà trascinamento e senza anteprima: resta come
+# ripiego (AGGANCIO=xfwm4, o senza python3). wrap_windows va spento sempre: acceso, xfwm4 non aggancia affatto
+# (il telefono di Pietro aveva tile_on_move e wrap_windows accesi: niente aggancio) e, con più spazi di lavoro,
+# un bordo porterebbe la finestra in un altro spazio. AGGANCIO=0 lo spegne.
+xfwm_aggancio() {
+  have xfconf-query || return 0
+  local modo
+  modo=$(conf_get AGGANCIO 1)
+  if [[ $modo == 1 ]] && ! have python3; then modo=xfwm4; fi
+  xfconf-query -c xfwm4 -p /general/wrap_windows -n -t bool -s false || true
+  if [[ $modo == xfwm4 ]]; then
+    xfconf-query -c xfwm4 -p /general/tile_on_move -n -t bool -s true || true
+  else
+    xfconf-query -c xfwm4 -p /general/tile_on_move -n -t bool -s false || true
+  fi
+}
+
 xfce_first_run() { # ritocchi una tantum, eseguiti dentro la sessione
   have xfconf-query || return 0
   local comp=true k
