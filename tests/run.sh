@@ -602,6 +602,73 @@ EOF
   kill "$altro" 2>/dev/null || true
 }
 
+test_venus_server_nostro() { # telefoni senza Adreno: il server grafico nostro (Vulkan) al posto di quello di Termux
+  command -v python3 >/dev/null || return 0
+  _virgl_finto
+  local d r="$WORK/venus_$$" giusta
+  d=$(venus_dir)
+  eq "senza i file: il server di Termux" virgl_test_server_android "$(virgl_comando)"
+  eq "senza release (impronta vuota) l'installazione non fa niente" "" "$(VENUS_SHA256="" GPU_FAMILY=mali venus_install 2>&1)"
+  fails venus_pronto
+  # l'archivio accanto al progetto, con l'impronta giusta: installato senza internet
+  mkdir -p "$r/pacco/bin" "$r/pacco/lib" "$r/pacco/libexec" "$r/dist"
+  cat >"$r/pacco/bin/virgl_test_server" <<'EOF'
+#!/bin/sh
+echo "$* | $RENDER_SERVER_EXEC_PATH | $LD_LIBRARY_PATH" >>"$HOME/venus_args"
+if [ -f "$HOME/venus_rotto" ]; then exit 1; fi
+sleep 20 >/dev/null 2>&1
+EOF
+  echo x >"$r/pacco/lib/libvirglrenderer.so"
+  echo x >"$r/pacco/lib/libepoxy.so"
+  echo x >"$r/pacco/libexec/virgl_render_server"
+  tar -cJf "$r/dist/tod-venus-aarch64.tar.xz" -C "$r/pacco" bin lib libexec
+  giusta=$(sha256sum "$r/dist/tod-venus-aarch64.tar.xz" | cut -d' ' -f1)
+  net_download() { [[ -f $2 ]]; }
+  cx_installed() { return 1; }
+  if (TOD_ROOT=$r VENUS_SHA256=0000 GPU_FAMILY=mali venus_install) 2>/dev/null; then eq "impronta sbagliata: rifiutato" no si; fi
+  fails venus_pronto
+  eq "su Adreno non si installa" no "$(TOD_ROOT=$r VENUS_SHA256=$giusta GPU_FAMILY=adreno venus_install; venus_pronto && echo si || echo no)"
+  TOD_ROOT=$r VENUS_SHA256=$giusta GPU_FAMILY=mali venus_install
+  venus_pronto
+  eq "eseguibile" si "$([[ -x $d/bin/virgl_test_server ]] && echo si || echo no)"
+  eq "il Vulkan di Android, non quello di Termux" /system/lib64/libvulkan.so "$(readlink "$d/lib/libvulkan.so.1")"
+  # da qui il server è il nostro, con --venus e i suoi percorsi
+  has "comando col server nostro" "$d/bin/virgl_test_server" "$(virgl_comando)"
+  conf_set VIRGL_MODO ""
+  virgl_start
+  eq "è il server (stesso nome di processo)" virgl_test_serv "$(cat "/proc/$(virgl_pid)/comm")"
+  has "parte con Venus e trova il suo aiutante" "--venus | $d/libexec/virgl_render_server | $d/lib" "$(cat "$HOME/venus_args")"
+  eq "le app possono ricevere il Vulkan" si "$([[ -f $TMPDIR/tod-virgl.venus ]] && echo si || echo no)"
+  virgl_stop
+  eq "spento: niente Vulkan alle app" no "$([[ -f $TMPDIR/tod-virgl.venus ]] && echo si || echo no)"
+  # server di prova: lo stesso programma, sul suo socket
+  : >"$HOME/venus_args"
+  virgl_prova_start "" || true
+  virgl_prova_stop
+  has "anche le prove col server nostro" "--venus --socket-path $TMPDIR/tod-virgl-prova.sock" "$(cat "$HOME/venus_args")"
+  # il nostro non parte su questo telefono: torna quello di Termux, e l'OpenGL resta
+  : >"$HOME/venus_rotto"
+  : >"$HOME/virgl_args"
+  virgl_start
+  virgl_running
+  eq "ripiego sul server di Termux" 1 "$(wc -l <"$HOME/virgl_args" | tr -d ' ')"
+  eq "senza il nostro niente Vulkan alle app" no "$([[ -f $TMPDIR/tod-virgl.venus ]] && echo si || echo no)"
+  has "nel registro" "torno a quello di Termux" "$(cat "$TOD_LOG")"
+  virgl_stop
+  rm -f "$HOME/venus_rotto"
+  VENUS_SALTA=""
+  # spento dall'utente
+  conf_set VENUS 0
+  eq "VENUS=0: il server di Termux" virgl_test_server_android "$(virgl_comando)"
+  conf_set VENUS 1
+  # le variabili per le app: socket col percorso vero, presentazione con la copia
+  has "driver virtio" "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/virtio_icd.json" "$(cx_venus_env /x/s)"
+  has "socket vero" "VTEST_SOCKET_NAME=/x/s" "$(cx_venus_env /x/s)"
+  has "copia del fotogramma (niente DRI3 senza Adreno)" "MESA_VK_WSI_DEBUG=sw" "$(cx_venus_env /x/s)"
+  has "senza proot: solo col server nostro acceso" 'vulkan.env && -f $TMPDIR/tod-virgl.venus' "$(cat "$ROOT/lib/diretto.sh")"
+  has "in proot: solo col server nostro acceso" '[ -f /tmp/tod-virgl.venus ]' "$(cat "$ROOT/lib/container.sh")"
+}
+
 test_virgl_riaccendi() { # senza Adreno tutto l'OpenGL passa da virgl: se cade lo si riaccende
   local fatti="$WORK/vs_fatti_$$"
   : >"$fatti"

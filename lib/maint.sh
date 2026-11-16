@@ -114,6 +114,8 @@ self_after() { # tod _self_after: con il codice nuovo, i file che dipendono da l
   desktop_install_entries || true
   # dischi USB: i file di tod-lkl della versione nuova
   if usb_on && ! usb_lkl_ok; then usb_install || warn "$(t s_usb)"; fi
+  # telefoni senza Adreno: il server grafico nostro, che dà anche Vulkan (non fa niente se c'è già o non serve)
+  venus_install || warn "$(t venus_no)"
   # la Rete in Esplora file: Samba e tod-smb (rete_start lo ricompila se cambia)
   if rete_on && ! rete_pronta; then rete_install || warn "$(t s_rete)"; fi
   # video col chip nelle app Chromium/Electron: libva e i pezzi compilati (lib/videochip.sh)
@@ -158,6 +160,7 @@ tod_update() { # tod update [--senza-codice]
   desktop_install_entries || true
   # dischi USB: i file di tod-lkl della versione nuova (e, una volta, via la vecchia macchina QEMU)
   if usb_on && { ! usb_lkl_ok || [[ -f $(usb_data)/disco.img ]]; }; then run_step "$(t s_usb)" usb_install || warn "$(t s_usb)"; fi
+  venus_install || warn "$(t venus_no)"
   if (( reprobe )); then run_step "$(t s_gpu_probe)" gpu_reprobe || warn "$(t gpu_none)"; fi
   ok "$(t up_done)"
   x11_glamor_aggiorna || true   # per ultima: installare la Termux:X11 chiude Termux

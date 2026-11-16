@@ -127,6 +127,106 @@ gpu_write_env() { # gpu_write_env profilo
 # ----------------------------------------------------------------------------
 VIRGL_NOME=virgl_test_serv   # il nome del processo come lo dà il kernel (15 lettere)
 
+# ----------------------------------------------------------------------------
+#  Venus: il Vulkan del telefono per le app del container, sui telefoni senza Adreno (16 novembre)
+#
+#  Il server virgl sa passare anche Vulkan (--venus), ma nel pacchetto virglrenderer-android di Termux la
+#  parte per Android è rimasta fuori dalla compilazione: sul Mali si ferma alla prima immagine. Il nostro
+#  (share/venus: stessi sorgenti e stesse modifiche di Termux, più la parte per Android accesa) regge
+#  insieme OpenGL e Vulkan, quindi prende il posto dell'altro. Si scarica dalla release venus-N del
+#  progetto in ~/.local/share/tod-venus; finché VENUS_SHA256 è vuoto (nessuna release) non succede niente.
+#  Le app ricevono il Vulkan (/etc/tod/vulkan.env del container) solo dopo una prova vera (cx_venus_prova)
+#  e solo mentre il server nostro è acceso ($TMPDIR/tod-virgl.venus). VENUS=0 spegne tutto.
+# ----------------------------------------------------------------------------
+VENUS_VERSIONE=1
+VENUS_SHA256=c41973461ea6665a6f3e026c4c13064e01e1155141af8000090524fe1e9875a6
+VENUS_URL=${TOD_VENUS_URL:-"https://github.com/PietroCav501/termux_on_dex/releases/download/venus-$VENUS_VERSIONE/tod-venus-aarch64.tar.xz"}
+VENUS_FILE="bin/virgl_test_server lib/libvirglrenderer.so lib/libepoxy.so libexec/virgl_render_server"
+
+venus_on() { [[ $(conf_get VENUS 1) == 1 ]]; }
+
+venus_dir() { printf '%s/.local/share/tod-venus' "${TOD_TERMUX_HOME:-$HOME}"; }
+
+venus_pronto() { # i file del server nostro ci sono e sono di questa versione
+  local d f
+  d=$(venus_dir)
+  for f in $VENUS_FILE; do [[ -s $d/$f ]] || return 1; done
+  [[ $(cat "$d/versione" 2>/dev/null) == "$VENUS_VERSIONE" ]]
+}
+
+venus_scarica() { # l'archivio della release, controllato con l'impronta scritta qui
+  local d a t f
+  d=$(venus_dir)
+  a="$TOD_CACHE_DIR/tod-venus-$VENUS_VERSIONE.tar.xz"
+  # già accanto al progetto (portato a mano, prima della release): si usa quello, se l'impronta torna
+  if [[ ! -f $a && -f $TOD_ROOT/dist/tod-venus-aarch64.tar.xz ]] && sha256_ok "$TOD_ROOT/dist/tod-venus-aarch64.tar.xz" "$VENUS_SHA256"; then
+    mkdir -p "$TOD_CACHE_DIR"
+    cp -f "$TOD_ROOT/dist/tod-venus-aarch64.tar.xz" "$a"
+  fi
+  net_download "$VENUS_URL" "$a" "$VENUS_SHA256" || return 1
+  mkdir -p "${d%/*}"
+  t=$(mktemp -d "$d.XXXXXX") || return 1
+  if ! tar -xJf "$a" -C "$t"; then rm -rf "$t"; return 1; fi
+  for f in $VENUS_FILE; do [[ -s $t/$f ]] || { rm -rf "$t"; return 1; }; done
+  chmod 755 "$t/bin/virgl_test_server" "$t/libexec/virgl_render_server"
+  # il Vulkan di Android, non il caricatore di Termux (che lì troverebbe solo i driver di Mesa)
+  ln -sf /system/lib64/libvulkan.so "$t/lib/libvulkan.so"
+  ln -sf /system/lib64/libvulkan.so "$t/lib/libvulkan.so.1"
+  echo "$VENUS_VERSIONE" >"$t/versione"
+  rm -rf "$d"
+  mv "$t" "$d"
+}
+
+venus_install() { # passo dell'installazione e di ogni aggiornamento: solo senza Adreno, solo se c'è una release
+  venus_on || return 0
+  [[ -n $VENUS_SHA256 ]] || return 0
+  if [[ -z ${GPU_FAMILY:-} ]]; then detect_device; fi
+  if [[ $GPU_FAMILY == adreno ]]; then return 0; fi
+  if ! venus_pronto; then
+    venus_scarica || return 1
+    log "venus: server grafico nostro installato (versione $VENUS_VERSIONE)"
+  fi
+  # il Vulkan nel container: deciso da una prova vera, su un server a parte
+  if cx_installed; then x11_with_server cx_venus_prova || true; fi
+  return 0
+}
+
+venus_passo() { # per l'installazione guidata: senza Venus il desktop va lo stesso
+  venus_install || warn "$(t venus_no)"
+}
+
+virgl_comando() { # il server da lanciare, un pezzo per riga: il nostro (con Venus) se c'è, sennò quello di Termux
+  local d
+  d=$(venus_dir)
+  if [[ -z ${VENUS_SALTA:-} ]] && venus_on && venus_pronto; then
+    printf '%s\n' env "LD_LIBRARY_PATH=$d/lib" "RENDER_SERVER_EXEC_PATH=$d/libexec/virgl_render_server" \
+      "$d/bin/virgl_test_server" --venus
+  else
+    echo virgl_test_server_android
+  fi
+}
+
+venus_cli() { # tod venus [stato|prepara|on|off]
+  case ${1:-stato} in
+    on | si | sì) conf_set VENUS 1 ;;
+    off | no)
+      conf_set VENUS 0
+      if cx_installed; then rm -f "$(cx_rootfs)/etc/tod/vulkan.env"; fi
+      ;;
+    prepara)
+      conf_set VENUS 1
+      [[ -n $VENUS_SHA256 ]] || die "$(t venus_no_release)"
+      venus_install || die "$(t venus_no)"
+      ;;
+    stato | status) ;;
+    *) die "tod venus stato|prepara|on|off" ;;
+  esac
+  local s v
+  if ! venus_on; then s=$(t venus_spento); elif venus_pronto; then s=$(t venus_pronto); else s=$(t venus_assente); fi
+  if cx_installed && [[ -f $(cx_rootfs)/etc/tod/vulkan.env ]]; then v=$(t venus_cx_si); else v=$(t venus_cx_no); fi
+  ok "$(t venus_stato "$s" "$v")"
+}
+
 virgl_modo_di() { # profilo → opzione del server ("" = OpenGL ES di sistema)
   case $1 in
     virgl-angle) echo angle-vulkan ;;
@@ -175,13 +275,14 @@ virgl_start() { # virgl_start [modo]: senza argomento il modo scelto dalla prova
     if [[ ! -f $TMPDIR/tod-virgl.modo || $(cat "$TMPDIR/tod-virgl.modo" 2>/dev/null) == "$modo" ]]; then return 0; fi
     virgl_stop
   fi
-  local -a arg=() avvio=(nohup)
+  local -a arg=() avvio=(nohup) srv=()
+  mapfile -t srv < <(virgl_comando)
   if [[ -n $modo ]]; then arg=("--$modo"); fi
   # nuova sessione di processo, come il server X: chiudere la scheda di Termux non lo spegne
   if have setsid; then avvio=(setsid nohup); fi
   # azzerato e poi aperto in coda (>>): così session_log_cap può accorciarlo mentre il server scrive
   : >"$TOD_STATE_DIR/virgl.log"
-  "${avvio[@]}" virgl_test_server_android "${arg[@]}" >>"$TOD_STATE_DIR/virgl.log" 2>&1 </dev/null &
+  "${avvio[@]}" "${srv[@]}" "${arg[@]}" >>"$TOD_STATE_DIR/virgl.log" 2>&1 </dev/null &
   p=$!
   printf '%s\n' "$p" >"$TMPDIR/tod-virgl.pid"
   printf '%s\n' "$modo" >"$TMPDIR/tod-virgl.modo"
@@ -191,9 +292,20 @@ virgl_start() { # virgl_start [modo]: senza argomento il modo scelto dalla prova
     p=$(virgl_pids | sort -n | tail -n 1)
     if [[ -n $p ]]; then printf '%s\n' "$p" >"$TMPDIR/tod-virgl.pid"; fi
   fi
-  if virgl_running; then return 0; fi
+  if virgl_running; then
+    # col server nostro le app del container ricevono anche il Vulkan (diretto_run, tod-run)
+    if ((${#srv[@]} > 1)); then : >"$TMPDIR/tod-virgl.venus"; else rm -f "$TMPDIR/tod-virgl.venus"; fi
+    return 0
+  fi
   log "virgl: il server non è partito (modo: ${modo:-sistema}): $(tail -n 3 "$TOD_STATE_DIR/virgl.log" 2>/dev/null | tr '\n' ' ')"
-  rm -f "$TMPDIR/tod-virgl.pid" "$TMPDIR/tod-virgl.modo"
+  rm -f "$TMPDIR/tod-virgl.pid" "$TMPDIR/tod-virgl.modo" "$TMPDIR/tod-virgl.venus"
+  # il server nostro non parte su questo telefono: quello di Termux, com'era prima (l'OpenGL prima di tutto)
+  if ((${#srv[@]} > 1)); then
+    log "venus: il server nostro non parte: torno a quello di Termux"
+    VENUS_SALTA=1
+    virgl_start "$modo"
+    return
+  fi
   return 1
 }
 
@@ -201,7 +313,7 @@ virgl_stop() {
   local p
   if p=$(virgl_pid); then kill "$p" 2>/dev/null || true; fi
   for p in $(virgl_pids); do kill "$p" 2>/dev/null || true; done   # anche i figli e i server di prima
-  rm -f "$TMPDIR/tod-virgl.pid" "$TMPDIR/tod-virgl.modo"
+  rm -f "$TMPDIR/tod-virgl.pid" "$TMPDIR/tod-virgl.modo" "$TMPDIR/tod-virgl.venus"
 }
 
 # Le prove dei profili: un server a parte, su un socket suo. Quello del desktop non si tocca mai.
@@ -210,11 +322,12 @@ virgl_prova_sock() { printf '%s/tod-virgl-prova.sock' "$TMPDIR"; }
 virgl_prova_start() { # virgl_prova_start [modo] → 0 se il server di prova risponde
   have virgl_test_server_android || return 1
   local i sock
-  local -a arg=()
+  local -a arg=() srv=()
+  mapfile -t srv < <(virgl_comando)
   sock=$(virgl_prova_sock)
   virgl_prova_stop
   if [[ -n ${1:-} ]]; then arg=("--$1"); fi
-  nohup virgl_test_server_android "${arg[@]}" --socket-path "$sock" >"$TOD_STATE_DIR/virgl-prova.log" 2>&1 </dev/null &
+  nohup "${srv[@]}" "${arg[@]}" --socket-path "$sock" >"$TOD_STATE_DIR/virgl-prova.log" 2>&1 </dev/null &
   VIRGL_PROVA_PID=$!
   for ((i = 0; i < 20; i++)); do
     if [[ -S $sock ]]; then return 0; fi

@@ -64,6 +64,7 @@ tod_main() {
     rete | network) rete_cli "$@" ;;
     videochip | video-chip) videochip_cli "$@" ;;
     diretto) diretto_cli "$@" ;;
+    venus) venus_cli "$@" ;;
     foto | photos) media_apri tod-foto.py "$@" ;;
     video) media_apri tod-lettore.py --video "$@" ;;
     musica | music) media_apri tod-lettore.py --musica "$@" ;;

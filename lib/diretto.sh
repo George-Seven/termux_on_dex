@@ -266,6 +266,13 @@ diretto_run() { # diretto_run comando [argomenti] → esce come l'app; 97 = senz
       case $l in DISPLAY=* | PULSE_SERVER=*) ;; [A-Za-z_]*=*) amb+=("$l") ;; esac
     done <"$root/etc/tod/$f.env"
   done
+  # Vulkan del telefono sui telefoni senza Adreno (Venus, lib/gpu.sh): solo mentre il server nostro è acceso,
+  # sennò le app cercherebbero un Vulkan che non risponde
+  if [[ -f $root/etc/tod/vulkan.env && -f $TMPDIR/tod-virgl.venus ]]; then
+    while IFS= read -r l; do
+      case $l in [A-Za-z_]*=*) amb+=("$l") ;; esac
+    done <"$root/etc/tod/vulkan.env"
+  fi
   if [[ -n $va_pre ]]; then amb+=("${va_amb[@]}"); fi
   # il socket di X per intero: /tmp per l'app è quello del container, e il nome resta sotto i 108 caratteri
   amb+=(DISPLAY="$TMPDIR/.X11-unix/X${n:-0}")

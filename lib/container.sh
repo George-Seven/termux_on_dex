@@ -178,6 +178,8 @@ if [ "${1:-}" = "--raw" ]; then
 elif [ -f "$E/gpu.env" ]; then
   set -a; . "$E/gpu.env"; set +a
 fi
+# Vulkan del telefono (Venus): solo mentre il server grafico nostro è acceso
+if [ -f "$E/vulkan.env" ] && [ -f /tmp/tod-virgl.venus ]; then set -a; . "$E/vulkan.env"; set +a; fi
 export DISPLAY="${DISPLAY:-:0}" PULSE_SERVER="${PULSE_SERVER:-127.0.0.1}"
 export NO_AT_BRIDGE=1 MOZ_FAKE_NO_SANDBOX=1
 # gli AppImage chiedono FUSE, che in proot non c'è: si estraggono e partono lo stesso
@@ -461,6 +463,38 @@ cx_profile_env() {
     llvmpipe) echo LIBGL_ALWAYS_SOFTWARE=1 ;;
     *) return 1 ;;
   esac
+}
+
+# Venus (lib/gpu.sh): le variabili che danno alle app del container il Vulkan del telefono. Il socket col
+# percorso vero: senza proot /tmp per l'app è quello del container. La presentazione con la copia del
+# fotogramma (sw): senza Adreno il server X non ha la via diretta (DRI3) e la swapchain non si crea.
+cx_venus_env() { # cx_venus_env socket
+  printf '%s\n' VN_DEBUG=vtest VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/virtio_icd.json MESA_VK_WSI_DEBUG=sw \
+    "VTEST_SOCKET_NAME=$1"
+}
+
+cx_venus_prova() { # il Vulkan si accende solo se un cubo vero arriva a schermo, col server nostro su un socket a parte
+  local root out rc=0
+  local -a envs=()
+  root=$(cx_rootfs) || return 1
+  rm -f "$root/etc/tod/vulkan.env"
+  if ! venus_on || ! venus_pronto; then return 1; fi
+  if [[ ! -f $root/usr/share/vulkan/icd.d/virtio_icd.json || ! -x $root/usr/bin/vkcube ]]; then
+    log "cx venus: nel container manca il driver virtio o vkcube: niente Vulkan"
+    return 1
+  fi
+  virgl_prova_start "" || return 1
+  mapfile -t envs < <(cx_venus_env "$(virgl_prova_sock)")
+  out=$(cx_run --raw env "${envs[@]}" timeout 30 vkcube --c 20 2>&1 </dev/null) || rc=$?
+  virgl_prova_stop
+  log "cx venus: rc=$rc $(grep -m1 'Selected GPU' <<<"$out" || true)"
+  if [[ $rc == 0 && $out == *Venus* ]]; then
+    cx_venus_env "$TMPDIR/.virgl_test" | cx_write /etc/tod/vulkan.env 644
+    conf_set CX_VENUS 1
+    return 0
+  fi
+  conf_set CX_VENUS 0
+  return 1
 }
 
 cx_gpu_disegna() { # cx_gpu_disegna VAR=valore...: 1 solo se nel container il profilo NON disegna
