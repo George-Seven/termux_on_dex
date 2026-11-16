@@ -9,9 +9,11 @@ La base è Termux con Termux:X11 e XFCE, e quasi tutto gira direttamente su Andr
 proot. Le app che Termux non ha arrivano da un container Debian, ma partono anche loro senza
 proot. Il nome viene dal vecchio *Linux on DeX* di Samsung, che non esiste più.
 
-È ancora una alpha. L'ho provato su un Galaxy S26 Ultra (Snapdragon, GPU Adreno) e su un
-Galaxy S20+ (Exynos, GPU Mali); dovrebbe andare su qualsiasi Android 8 o successivo a 64 bit.
-Se qualcosa non funziona apri una issue e allega il file che crea `tod doctor`.
+**È ancora una alpha.** Ha girato solo su due telefoni, un Galaxy S26 Ultra (Snapdragon,
+GPU Adreno) e un Galaxy S20+ (Exynos, GPU Mali). Dovrebbe andare su qualsiasi Android 8 o
+successivo a 64 bit, ma su altri telefoni ci si possono aspettare problemi: non installarlo
+su un Termux che non puoi permetterti di rifare. Se qualcosa non funziona apri una issue e
+allega il file che crea `tod doctor`.
 
 ![Il desktop con il menu Start](docs/screenshots/start-menu.jpg)
 
@@ -32,14 +34,20 @@ chiamata al sistema. Qui proot serve quasi solo per installare i pacchetti.
   li legge il kernel Linux vero, compilato come libreria ([LKL](https://github.com/lkl/linux))
   e avviato dentro Termux. ext4, exFAT, FAT e NTFS in lettura e scrittura; per le app sono
   cartelle normali in `/media/usb`.
+- I video li decodifica il chip del telefono (MediaCodec), senza root: nel lettore video e
+  in ogni app Chromium o Electron, con un driver VA-API (H.264 e VP9). Un video 1080p costa
+  1,2 secondi di processore ogni 20 di riproduzione invece di 3,1. Il desktop prima prova il
+  telefono; dove il kernel non lo permette quelle app restano sul processore.
 - Termux:X11 con la composizione delle finestre sulla GPU (glamor), mentre la versione
-  ufficiale la fa con il processore. Le modifiche sono in `x11/`, l'APK e i sorgenti nelle
-  release. Si installa da sola con Termux da GitHub.
+  ufficiale la fa con il processore (solo su Adreno). Le modifiche sono in `x11/`, l'APK e i
+  sorgenti nelle release. Si installa da sola con Termux da GitHub.
 - Un solo `apt` per Termux e Debian: `sudo apt install gimp` prende il pacchetto di Termux
   se c'è, altrimenti quello di Debian, e ogni app è installata una volta sola.
 - Il telefono dentro il desktop: le app Android nello Start con le loro icone, e batteria,
   rete e notifiche del telefono nella barra.
-- Il driver della GPU lo sceglie l'installazione con una prova vera sul telefono.
+- Il driver della GPU lo sceglie l'installazione disegnando una scena vera con ognuno e
+  rileggendo i punti. I telefoni senza Adreno (Mali, Xclipse, PowerVR) usano il driver del
+  telefono attraverso virgl; provato su un Mali-G77 vero.
 
 ![PhotoCraft e CADCraft, app di Debian, aperte senza proot](docs/screenshots/craft-apps.jpg)
 
@@ -80,14 +88,26 @@ Opzioni sviluppatore.
 - Tema, icone, puntatore e sfondi propri (DeX OS), chiari o scuri, nel colore che scegli.
 - Menu Start, barra delle applicazioni con le anteprime delle finestre, pannelli per
   notifiche, volume, calendario, batteria, memoria e rete.
-- Impostazioni e aggiornamenti dei pacchetti con una finestra propria.
+- Le finestre si agganciano ai bordi e agli angoli dello schermo, con l'anteprima del posto.
+- Avvisi di sistema e finestra Apri/Salva nello stile di macOS.
+- Impostazioni e aggiornamenti dei pacchetti con una finestra propria: aspetto, schermo,
+  suono, archiviazione (cosa occupa spazio tra Termux, Debian e Android), lingue e
+  scorciatoie della tastiera, mouse, app predefinite.
 - Esplora file con le cartelle del telefono: Documenti, Download, Immagini, Musica, Video.
+- I PC Windows e i NAS della rete come cartelle normali in `/media/rete`, per tutte le app.
+- Stampanti Wi-Fi e USB, trovate da sole in rete, con la coda di stampa nelle Impostazioni.
+  Scanner eSCL/AirScan e WSD.
+- Foto, un lettore video e un lettore musicale.
+- Cattura dello schermo (Stamp, o Win+Maiusc+3/4/5) e Gestione attività con processore e
+  memoria per app; con l'Accesso ai dati di utilizzo elenca anche le app Android del telefono.
+- Uno store di app da Flathub (`tod store`), avviate fuori dalla sandbox di Flatpak.
+- Un guardiano che riaccende i servizi del desktop se Android ne chiude uno.
 - Chiavette e schede in Esplora file con l'espulsione, un programma per formattarle, e dal
   terminale `lsblk`, `fdisk` e `mkfs`.
 - Doppio clic su un file `.deb` per installarlo, come i `.pkg` sul Mac: l'installer capisce
   da solo se va in Termux o in Debian.
-- Le app Android si aprono in una finestra di DeX; per batteria, rete e notifiche del
-  telefono serve Termux:API, che l'installazione mette da sola.
+- Le app Android si aprono in una finestra di DeX; per batteria, rete, notifiche e volume
+  del telefono serve Termux:API, che l'installazione mette da sola.
 - Desktop in italiano (anche XFCE, che su Termux di solito resta in inglese), Firefox e
   LibreOffice.
 
@@ -97,8 +117,13 @@ Opzioni sviluppatore.
 
 ## Limiti
 
-- GPU Mali (Exynos, MediaTek): OpenGL passa da virgl, ma per Vulkan non c'è un driver
-  accelerato senza root e le app Vulkan girano sul processore. Sulle Adreno c'è Turnip.
+- Telefoni senza GPU Adreno (Mali, Xclipse, PowerVR): OpenGL passa da virgl, ma per Vulkan
+  non c'è ancora un driver accelerato senza root e le app Vulkan girano sul processore; anche
+  il server X compone con il processore. Sulle Adreno c'è Turnip.
+- Non ancora provati dal vero: stampanti USB, scanner veri (solo simulati), telefoni non
+  Samsung. I Mac rifiutano la password delle cartelle di rete. L'aggancio delle finestre e
+  le anteprime delle finestre ridotte a icona sono nuovi.
+- Video col chip: HEVC e AV1 nelle app Chromium/Electron restano sul processore.
 - La prima volta che colleghi una chiavetta Android chiede il permesso.
 - La rete la gestisce Android: per cambiare Wi-Fi si aprono le sue impostazioni dal
   pannello. Il nome della rete si vede solo con la Posizione accesa.
@@ -121,6 +146,9 @@ tod display [auto|<dpi>]              grandezza di testo e icone
 tod phantom                           collega ADB per il "signal 9"
 tod cx pkexec off                     le app di Debian non chiedono più la password di amministratore
 tod telefono [aggiorna|spento|acceso] le app del telefono nello Start
+tod stampa | tod scanner | tod rete   stampanti, scanner, computer in rete
+tod videochip [stato|on|off]          video decodificati dal chip del telefono
+tod store                             app da Flathub
 tod uninstall                         toglie tutto
 ```
 

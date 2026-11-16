@@ -10,9 +10,11 @@ Android, without proot. Apps that Termux doesn't have come from a Debian contain
 start without proot too. The name comes from Samsung's old *Linux on DeX*, which no longer
 exists.
 
-It's still an alpha. I've tested it on a Galaxy S26 Ultra (Snapdragon, Adreno GPU) and a
-Galaxy S20+ (Exynos, Mali GPU); it should work on any 64-bit Android 8 or later. If
-something doesn't work, open an issue and attach the file that `tod doctor` creates.
+**It's still an alpha.** It has only run on two phones, a Galaxy S26 Ultra (Snapdragon,
+Adreno GPU) and a Galaxy S20+ (Exynos, Mali GPU). It should work on any 64-bit Android 8 or
+later, but expect problems on other devices, and don't install it on a Termux setup you
+can't afford to redo. If something doesn't work, open an issue and attach the file that
+`tod doctor` creates.
 
 ![The desktop with the Start menu](docs/screenshots/start-menu.jpg)
 
@@ -36,14 +38,20 @@ call. Here proot is used for little more than installing packages.
   here they're read by the real Linux kernel, built as a library
   ([LKL](https://github.com/lkl/linux)) and running inside Termux. ext4, exFAT, FAT and NTFS,
   read and write; apps see them as normal folders in `/media/usb`.
+- Video decoded by the phone's chip (MediaCodec), without root: in the built-in video
+  player, and in every Chromium or Electron app through a VA-API driver (H.264 and VP9). A
+  1080p video takes 1.2 seconds of CPU per 20 seconds of playback instead of 3.1. The desktop
+  tests the phone first; where the kernel can't do it, those apps keep using the CPU.
 - Termux:X11 compositing windows on the GPU (glamor), where the official build does it on
-  the CPU. The changes are in `x11/`, the APK and sources in the releases. It's installed
-  automatically with Termux from GitHub.
+  the CPU (Adreno only). The changes are in `x11/`, the APK and sources in the releases.
+  It's installed automatically with Termux from GitHub.
 - One `apt` for Termux and Debian: `sudo apt install gimp` takes the Termux package if
   there is one, otherwise the Debian one, and each app is installed only once.
 - The phone inside the desktop: Android apps in the Start menu with their icons, and the
   phone's battery, network and notifications in the taskbar.
-- The installer picks the GPU driver by actually testing it on the phone.
+- The installer picks the GPU driver by drawing a real scene with each one and reading
+  the pixels back. Phones without Adreno (Mali, Xclipse, PowerVR) use the phone's own
+  driver through virgl; checked on a real Mali-G77.
 
 ![PhotoCraft and CADCraft, Debian apps, running without proot](docs/screenshots/craft-apps.jpg)
 
@@ -85,14 +93,26 @@ process restrictions" in Developer options.
   pick.
 - Start menu, a taskbar with window previews, and panels for notifications, volume,
   calendar, battery, memory and network.
-- Settings and package updates in their own windows.
+- Windows snap to the edges and corners of the screen, with a preview of where they'll go.
+- System dialogs and the Open/Save window in the style of macOS.
+- Settings and package updates in their own windows: appearance, display, sound, storage
+  (what takes space across Termux, Debian and Android), keyboard layouts and shortcuts,
+  mouse, default apps.
 - A file manager with the phone's folders: Documents, Downloads, Pictures, Music, Videos.
+- Windows PCs and NAS shares as normal folders in `/media/rete`, for every app.
+- Printers over Wi-Fi and USB, found on the network by themselves, with the print queue in
+  Settings. Scanners over eSCL/AirScan and WSD.
+- Photos, a video player and a music player.
+- A screenshot tool (Print, or Win+Shift+3/4/5) and a Task Manager with CPU and memory per
+  app; with Usage access it lists the phone's Android apps too.
+- An app store from Flathub (`tod store`), with the apps started outside Flatpak's sandbox.
+- A watchdog that restarts the desktop's own services if Android closes one.
 - USB sticks and cards in the file manager with eject, a tool to format them, and `lsblk`,
   `fdisk` and `mkfs` in the terminal.
 - Double-click a `.deb` file to install it, like a `.pkg` on a Mac: the installer works out
   whether it goes to Termux or Debian.
-- Android apps open in a DeX window; the phone's battery, network and notifications need
-  Termux:API, which the installer sets up.
+- Android apps open in a DeX window; the phone's battery, network, notifications and media
+  volume need Termux:API, which the installer sets up.
 - Firefox and LibreOffice.
 
 ![File manager with the phone's folders, and Settings](docs/screenshots/files-settings.jpg)
@@ -101,8 +121,13 @@ process restrictions" in Developer options.
 
 ## Known limits
 
-- Mali GPUs (Exynos, MediaTek): OpenGL goes through virgl, but there's no accelerated
-  Vulkan driver without root, so Vulkan apps run on the CPU. Adreno GPUs get Turnip.
+- Phones without an Adreno GPU (Mali, Xclipse, PowerVR): OpenGL goes through virgl, but
+  there's no accelerated Vulkan driver without root yet, so Vulkan apps run on the CPU, and
+  the X server composites on the CPU. Adreno GPUs get Turnip.
+- Not tested on real hardware yet: USB printers, real scanners (only simulated ones), phones
+  that aren't Samsung. Macs refuse the password for network folders. Window snapping and
+  the taskbar previews of minimized windows are new.
+- Hardware video: HEVC and AV1 in Chromium/Electron apps still use the CPU.
 - The first time you plug in a USB stick, Android asks for permission.
 - Android handles the network: to change Wi-Fi, the panel opens the phone's settings. The
   network name only shows with Location turned on.
@@ -125,6 +150,9 @@ tod display [auto|<dpi>]              text and icon size
 tod phantom                           connect ADB for the "signal 9" fix
 tod cx pkexec off                     Debian apps stop asking for the admin password
 tod telefono [aggiorna|spento|acceso] the phone's apps in the Start menu
+tod stampa | tod scanner | tod rete   printers, scanners, computers on the network
+tod videochip [stato|on|off]          video decoded by the phone's chip
+tod store                             apps from Flathub
 tod uninstall                         remove everything
 ```
 
