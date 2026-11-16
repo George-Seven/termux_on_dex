@@ -147,9 +147,10 @@ venus_on() { [[ $(conf_get VENUS 1) == 1 ]]; }
 
 venus_dir() { printf '%s/.local/share/tod-venus' "${TOD_TERMUX_HOME:-$HOME}"; }
 
-venus_pronto() { # i file del server nostro ci sono e sono di questa versione
+venus_pronto() { # i file del server nostro ci sono, sono di questa versione e la prova non l'ha bocciato
   local d f
   d=$(venus_dir)
+  if [[ -f $d/guasto ]]; then return 1; fi
   for f in $VENUS_FILE; do [[ -s $d/$f ]] || return 1; done
   [[ $(cat "$d/versione" 2>/dev/null) == "$VENUS_VERSIONE" ]]
 }
@@ -169,12 +170,40 @@ venus_scarica() { # l'archivio della release, controllato con l'impronta scritta
   if ! tar -xJf "$a" -C "$t"; then rm -rf "$t"; return 1; fi
   for f in $VENUS_FILE; do [[ -s $t/$f ]] || { rm -rf "$t"; return 1; }; done
   chmod 755 "$t/bin/virgl_test_server" "$t/libexec/virgl_render_server"
-  # il Vulkan di Android, non il caricatore di Termux (che lì troverebbe solo i driver di Mesa)
-  ln -sf /system/lib64/libvulkan.so "$t/lib/libvulkan.so"
-  ln -sf /system/lib64/libvulkan.so "$t/lib/libvulkan.so.1"
   echo "$VENUS_VERSIONE" >"$t/versione"
   rm -rf "$d"
   mv "$t" "$d"
+  venus_collega
+}
+
+# Il server deve usare la grafica di ANDROID. I nomi che cerca (libEGL.so, libGLESv2.so, libvulkan.so) nella
+# sua cartella, che virgl_comando mette per prima: senza, il caricatore trova prima quelle di Termux, cioè Mesa,
+# e tutto l'OpenGL del desktop finisce disegnato dal processore (S20+, 16 novembre: "virgl (LLVMPIPE)" e schermo
+# nero all'avvio). A ogni avvio, così si aggiusta da sola anche un'installazione fatta prima di questa correzione.
+venus_collega() {
+  local d n
+  d=$(venus_dir)
+  [[ -d $d/lib ]] || return 0
+  for n in libEGL.so libGLESv2.so libvulkan.so libvulkan.so.1; do
+    if [[ $(readlink "$d/lib/$n" 2>/dev/null) != "/system/lib64/${n%.1}" ]]; then
+      ln -sf "/system/lib64/${n%.1}" "$d/lib/$n" 2>/dev/null || true
+    fi
+  done
+  return 0
+}
+
+# Prima di fidarsi: col server nostro l'OpenGL deve arrivare dal chip e disegnare (la stessa prova dei profili:
+# server a parte, glxinfo, triangolo). Se no si segna "guasto" e resta il server di Termux, com'era prima.
+venus_verifica() {
+  local d r
+  d=$(venus_dir)
+  if r=$(gpu_probe_one virgl); then
+    log "venus: OpenGL col server nostro: $r"
+    return 0
+  fi
+  log "venus: col server nostro l'OpenGL non arriva dal chip (${r:-niente}): resta il server di Termux"
+  echo "$VENUS_VERSIONE" >"$d/guasto"
+  return 1
 }
 
 venus_install() { # passo dell'installazione e di ogni aggiornamento: solo senza Adreno, solo se c'è una release
@@ -182,9 +211,12 @@ venus_install() { # passo dell'installazione e di ogni aggiornamento: solo senza
   [[ -n $VENUS_SHA256 ]] || return 0
   if [[ -z ${GPU_FAMILY:-} ]]; then detect_device; fi
   if [[ $GPU_FAMILY == adreno ]]; then return 0; fi
+  # già scaricato e bocciato dalla prova su questo telefono: non si riprova a ogni aggiornamento
+  if [[ $(cat "$(venus_dir)/guasto" 2>/dev/null) == "$VENUS_VERSIONE" ]]; then return 0; fi
   if ! venus_pronto; then
     venus_scarica || return 1
     log "venus: server grafico nostro installato (versione $VENUS_VERSIONE)"
+    x11_with_server venus_verifica || return 0
   fi
   # il Vulkan nel container: deciso da una prova vera, su un server a parte
   if cx_installed; then x11_with_server cx_venus_prova || true; fi
@@ -199,6 +231,7 @@ virgl_comando() { # il server da lanciare, un pezzo per riga: il nostro (con Ven
   local d
   d=$(venus_dir)
   if [[ -z ${VENUS_SALTA:-} ]] && venus_on && venus_pronto; then
+    venus_collega
     printf '%s\n' env "LD_LIBRARY_PATH=$d/lib" "RENDER_SERVER_EXEC_PATH=$d/libexec/virgl_render_server" \
       "$d/bin/virgl_test_server" --venus
   else
@@ -215,6 +248,7 @@ venus_cli() { # tod venus [stato|prepara|on|off]
       ;;
     prepara)
       conf_set VENUS 1
+      rm -f "$(venus_dir)/guasto"   # chiesto a mano: si riprova
       [[ -n $VENUS_SHA256 ]] || die "$(t venus_no_release)"
       venus_install || die "$(t venus_no)"
       ;;

@@ -625,11 +625,32 @@ EOF
   giusta=$(sha256sum "$r/dist/tod-venus-aarch64.tar.xz" | cut -d' ' -f1)
   net_download() { [[ -f $2 ]]; }
   cx_installed() { return 1; }
+  x11_with_server() { "$@"; }
+  local vn_renderer="virgl (LLVMPIPE (LLVM 21.1.8, 128 bits))"
+  gpu_probe_one() { echo "$vn_renderer"; [[ ! ${vn_renderer,,} =~ llvmpipe ]]; }
   if (TOD_ROOT=$r VENUS_SHA256=0000 GPU_FAMILY=mali venus_install) 2>/dev/null; then eq "impronta sbagliata: rifiutato" no si; fi
   fails venus_pronto
   eq "su Adreno non si installa" no "$(TOD_ROOT=$r VENUS_SHA256=$giusta GPU_FAMILY=adreno venus_install; venus_pronto && echo si || echo no)"
+  # col server nostro l'OpenGL finisce sul processore (S20+, 16 novembre: schermo nero all'avvio): bocciato,
+  # resta il server di Termux, e non si riscarica a ogni aggiornamento
+  TOD_ROOT=$r VENUS_SHA256=$giusta GPU_FAMILY=mali venus_install
+  fails venus_pronto
+  eq "bocciato dalla prova: il server di Termux" virgl_test_server_android "$(virgl_comando)"
+  has "nel registro il perché" "non arriva dal chip (virgl (LLVMPIPE" "$(cat "$TOD_LOG")"
+  rm -f "$TOD_CACHE_DIR"/tod-venus-*.tar.xz
+  TOD_ROOT=/nessuno VENUS_SHA256=$giusta GPU_FAMILY=mali venus_install
+  fails venus_pronto
+  # il chip risponde: installato
+  rm -rf "$d"
+  vn_renderer="virgl (Mali-G77)"
   TOD_ROOT=$r VENUS_SHA256=$giusta GPU_FAMILY=mali venus_install
   venus_pronto
+  eq "OpenGL di Android, non Mesa di Termux" /system/lib64/libEGL.so "$(readlink "$d/lib/libEGL.so")"
+  eq "OpenGL ES di Android" /system/lib64/libGLESv2.so "$(readlink "$d/lib/libGLESv2.so")"
+  # un'installazione di prima della correzione (senza quei collegamenti) si aggiusta al primo avvio
+  rm -f "$d/lib/libEGL.so" "$d/lib/libGLESv2.so"
+  virgl_comando >/dev/null
+  eq "collegamenti rimessi all'avvio" /system/lib64/libEGL.so "$(readlink "$d/lib/libEGL.so")"
   eq "eseguibile" si "$([[ -x $d/bin/virgl_test_server ]] && echo si || echo no)"
   eq "il Vulkan di Android, non quello di Termux" /system/lib64/libvulkan.so "$(readlink "$d/lib/libvulkan.so.1")"
   # da qui il server è il nostro, con --venus e i suoi percorsi
