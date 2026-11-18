@@ -74,8 +74,10 @@ PASSI = {
     "apps": ("Installo le app che hai scelto", "Installing the apps you chose"),
     "look": ("Applico l'aspetto che hai scelto", "Applying your appearance"),
     "lingua": ("Traduco il desktop nella tua lingua", "Translating the desktop"),
-    "usbvm": ("Preparo il supporto per chiavette e schede SD", "Setting up USB sticks and SD cards"),
-    "dischi": ("Installo Dischi", "Installing Disks"),
+    "usb": ("Preparo il supporto per chiavette e schede SD", "Setting up USB sticks and SD cards"),
+    "rete": ("Preparo l'accesso ai computer di casa", "Setting up access to home computers"),
+    "venus": ("Preparo la grafica 3D per le app", "Setting up 3D graphics for apps"),
+    "videochip": ("Preparo i video fluidi nelle app", "Setting up smooth video in apps"),
     "integrate": ("Ultimi ritocchi", "Finishing touches"),
     "preseed": ("Preparo il primo avvio", "Preparing the first start"),
 }

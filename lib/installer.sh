@@ -128,7 +128,16 @@ _step() { # _step id "titolo" comando...   (con possibilità di riprovare)
     if (( ! TUI_ON )); then printf ' %s↷ %s (%s)%s\n' "$C_DIM" "$title" "$(t already_done)" "$C_0"; fi
     return 0
   fi
-  if (( TUI_ON )); then tui_run "$id" "$@"; return; fi
+  if (( TUI_ON )); then
+    # un passo senza il suo tui_register gira lo stesso, senza peso sulla barra: prima tui_run tornava 1 e
+    # set -e chiudeva l'installazione (18 novembre: rete e video col chip, tutte ferme al 95%)
+    if ! tui_index "$id" >/dev/null; then
+      log "tui: il passo $id non ha tui_register: aggiunto senza peso"
+      tui_register "$id" "$title" 0
+    fi
+    tui_run "$id" "$@"
+    return
+  fi
   local attempt=1 max=3
   if [[ $TOD_YES == 1 ]]; then max=2; fi
   while true; do
@@ -177,6 +186,10 @@ installer_steps() {
     if ((look_on)); then tui_register look "$(t s_look)" 4; fi
     if ((lang_on)) || bv_wanted; then tui_register lingua "$(t s_lingua "$(lingua_code)")" 8; fi
     if usb_on; then tui_register usb "$(t s_usb)" 3; fi
+    # ogni _step qui sotto deve avere il suo posto, con la stessa condizione (test_installer_passi_registrati)
+    if rete_on; then tui_register rete "$(t s_rete)" 3; fi
+    if installer_venus_wanted; then tui_register venus "$(t s_venus)" 3; fi
+    if videochip_on; then tui_register videochip "$(t s_videochip)" 3; fi
     tui_register integrate "$(t s_integrate)" 3
     if [[ $de == xfce ]]; then tui_register preseed "$(t s_preseed)" 2; fi
   fi
@@ -239,11 +252,15 @@ installer_steps() {
   # dischi USB: tod-lkl e le sue librerie (scaricati, o compilati se non si può), ntfs-3g nel container
   if usb_on; then _step usb "$(t s_usb)" usb_install; fi
   if rete_on; then _step rete "$(t s_rete)" rete_install; fi
-  if venus_on && [[ -n $VENUS_SHA256 && ${GPU_FAMILY:-} != adreno ]]; then _step venus "$(t s_venus)" venus_passo; fi
+  if installer_venus_wanted; then _step venus "$(t s_venus)" venus_passo; fi
   if videochip_on; then _step videochip "$(t s_videochip)" videochip_install; fi
   _step integrate "$(t s_integrate)" installer_integrate
   # tema, icone, cartelle e barra già nei file: il desktop parte la prima volta già sistemato
   if [[ $de == xfce ]]; then _step preseed "$(t s_preseed)" session_preseed; fi
+}
+
+installer_venus_wanted() { # Vulkan del telefono per le app: solo senza Adreno, e solo se c'è l'archivio da scaricare
+  venus_on && [[ -n $VENUS_SHA256 && ${GPU_FAMILY:-} != adreno ]]
 }
 
 installer_user_folders() {

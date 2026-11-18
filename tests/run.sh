@@ -2168,9 +2168,42 @@ test_bv_note_e_comandi() { # stato per la schermata (solo l'id del passo) e Ripr
 test_bv_nomi_dei_passi() { # la schermata ha un nome comprensibile per ogni passo dopo di lei (niente "v1", "xfce"...)
   local id ids
   ids=$(python3 -c 'import ast,sys; t=ast.parse(open(sys.argv[1]).read()); print(" ".join(k.value for n in ast.walk(t) if isinstance(n,ast.Assign) and getattr(n.targets[0],"id","")=="PASSI" for k in n.value.keys))' "$TOD_ROOT/share/tod-benvenuto.py")
-  for id in desktop gpu cx cxgpu apps look lingua usbvm dischi integrate; do
+  # i passi della barra che vengono dopo la schermata (prima di lei nessuno li legge), presi da installer_steps
+  local passi
+  passi=$(declare -f installer_steps | sed -n '/tui_register benvenuto/,$p' | grep -oE 'tui_register [a-z0-9_]+' | awk '$2 != "benvenuto" {print $2}')
+  has "c'è l'elenco" "integrate" "$passi"
+  for id in $passi; do
     has "nome per $id" " $id " " $ids "
   done
+}
+
+test_installer_passi_registrati() { # 18 novembre: rete e video col chip senza posto nella barra → installazioni ferme al 95%
+  local corpo id
+  corpo=$(declare -f installer_steps)
+  for id in $(grep -oE '_step [a-z0-9_]+' <<<"$corpo" | awk '{print $2}' | sort -u); do
+    has "tui_register per il passo $id" "tui_register $id " "$corpo"
+  done
+  # tutta l'installazione con la barra (TUI_ON=1) e ogni passo acceso: deve arrivare in fondo
+  _fake_dialog
+  GPU_FAMILY=mali VENUS_SHA256=prova
+  bv_wanted() { return 1; }
+  lingua_code() { echo it; }
+  local fatti="$WORK/ipr_$$" p tutti="installer_base x11_app_ensure api_app_ensure desktop_install gpu_setup cx_install"
+  tutti+=" cx_gpu_setup apps_install_selected look_apply_current lingua_setup usb_install rete_install venus_passo"
+  tutti+=" videochip_install installer_integrate session_preseed"
+  for p in $tutti; do eval "$p() { echo $p >>'$fatti'; }"; done
+  # in sottofondo e non dentro "|| rc=": lì bash ignorerebbe set -e e il passo fallito non fermerebbe niente
+  local rc=0
+  ( installer_steps ) >/dev/null 2>&1 &
+  wait $! || rc=$?
+  eq "installazione arrivata in fondo" 0 "$rc"
+  eq "tutti i passi, in ordine" "$tutti" "$(tr '\n' ' ' <"$fatti" | sed 's/ $//')"
+  hasnt "nessun passo senza posto nella barra" "non ha tui_register" "$(cat "$TOD_LOG")"
+  # un passo dimenticato in futuro gira lo stesso, senza peso sulla barra
+  _step zeta "Zeta" true >/dev/null 2>&1
+  step_done zeta
+  has "scritto nel registro" "il passo zeta non ha tui_register" "$(cat "$TOD_LOG")"
+  eq "senza peso" 0 "${TUI_WEIGHTS[$(tui_index zeta)]}"
 }
 
 test_bv_domande() { # con la schermata di benvenuto nel terminale si chiede solo ADB
