@@ -7180,7 +7180,9 @@ test_lingua_code_and_env() {
   fails lingua_active
   touch "$LINGUA_DIR/it/LC_MESSAGES/xfce4-panel.mo"
   lingua_active
-  LD_PRELOAD=/termux-exec.so lingua_env
+  # export e poi la funzione: con "VAR=x funzione" bash 5.3 (Termux, CI su Ubuntu 26.04) non tiene l'export dopo
+  export LD_PRELOAD=/termux-exec.so
+  lingua_env
   eq "libreria davanti a termux-exec" "$LINGUA_SO:/termux-exec.so" "$LD_PRELOAD"
   eq "lingua" it "$TOD_GETTEXT_LANG"
   eq "LANGUAGE per i menu di glib" it "$LANGUAGE"
