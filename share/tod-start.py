@@ -80,6 +80,9 @@ TEXT = {
     "best": ("Corrispondenza migliore", "Best match"),
     "apps": ("App", "Apps"),
     "phone_app": ("App del telefono", "Phone app"),
+    "phone_apps": ("App del telefono", "Phone apps"),
+    "n_app": ("%d app", "%d app"),
+    "n_apps": ("%d app", "%d apps"),
     "pc_app": ("App", "App"),
     "none": ("Nessun risultato", "No results"),
     "power": ("Spegni", "Shut down"),
@@ -144,6 +147,7 @@ CSS = b"""
 .tod-start .tile-label { font-size: 9pt; }
 .tod-start .sub { font-size: 8.5pt; color: #5f5f5f; }
 .tod-start .letter { font-weight: 600; color: #005fb8; padding: 10px 10px 2px 10px; }
+.tod-start .cartella { background: rgba(0,0,0,0.07); border-radius: 7px; padding: 2px; }
 .tod-start .best {
   background: rgba(0,0,0,0.035);
   border-radius: 6px;
@@ -182,6 +186,7 @@ CSS_DARK = b"""
 .tod-start button.tile:active, .tod-start button.row:active { background: rgba(255,255,255,0.10); }
 .tod-start .sub { color: #a8a8a8; }
 .tod-start .letter { color: #60cdff; }
+.tod-start .cartella { background: rgba(255,255,255,0.10); }
 .tod-start .best { background: rgba(255,255,255,0.05); }
 .tod-start .footer { background: #1c1c1c; border-top: 1px solid rgba(255,255,255,0.07); }
 .tod-start scrollbar slider { background: rgba(255,255,255,0.3); }
@@ -352,6 +357,7 @@ class Start(Gtk.Window):
 
         self.stack.add_named(self.build_home(), "home")
         self.stack.add_named(self.build_all(), "all")
+        self.stack.add_named(self.build_phone(), "phone")
         self.stack.add_named(self.build_results(), "results")
 
         root.pack_end(self.build_footer(), False, False, 0)
@@ -418,17 +424,24 @@ class Start(Gtk.Window):
         return box
 
     def build_all(self):
+        box, self.all_list, self.all_scroll = self.pagina_elenco(T("all"), "home")
+        return box
+
+    def build_phone(self):
+        box, self.phone_list, self.phone_scroll = self.pagina_elenco(T("phone_apps"), "all")
+        return box
+
+    def pagina_elenco(self, titolo, indietro):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        box.pack_start(self.header(T("all"), T("back"), lambda *a: self.show_page("home"), back=True), False, False, 0)
+        box.pack_start(self.header(titolo, T("back"), lambda *a: self.show_page(indietro), back=True), False, False, 0)
         sw = Gtk.ScrolledWindow()
         sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.all_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self.all_list.set_margin_start(px(60))
-        self.all_list.set_margin_end(px(60))
-        sw.add(self.all_list)
-        self.all_scroll = sw
+        lista = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        lista.set_margin_start(px(60))
+        lista.set_margin_end(px(60))
+        sw.add(lista)
         box.pack_start(sw, True, True, 0)
-        return box
+        return box, lista, sw
 
     def build_results(self):
         sw = Gtk.ScrolledWindow()
@@ -568,20 +581,57 @@ class Start(Gtk.Window):
         self.grid.show_all()
 
     def fill_all(self):
-        for c in self.all_list.get_children():
-            self.all_list.remove(c)
+        # le app del telefono (spesso 200) in una cartella in cima, come ChromeOS con le app Linux: in mezzo a loro
+        # le app del desktop si perdevano (Reddit, 19 novembre). La ricerca le trova tutte come prima
+        telefono = [a for a in self.apps if is_phone_app(a)]
+        self.elenco_lettere(self.all_list, [a for a in self.apps if not is_phone_app(a)], cartella=telefono)
+        self.elenco_lettere(self.phone_list, telefono)
+        if not telefono and self.stack.get_visible_child_name() == "phone":   # spente mentre la cartella era aperta
+            self.show_page("all")
+
+    def elenco_lettere(self, lista, apps, cartella=()):
+        for c in lista.get_children():
+            lista.remove(c)
+        if cartella:
+            lista.pack_start(self.riga_cartella(cartella), False, False, 0)
         last = None
-        for a in self.apps:
+        for a in apps:
             first = short_name(a)[:1].upper()
             if not first.isalpha():
                 first = "#"
             if first != last:
                 lab = Gtk.Label(label=first, xalign=0)
                 lab.get_style_context().add_class("letter")
-                self.all_list.pack_start(lab, False, False, 0)
+                lista.pack_start(lab, False, False, 0)
                 last = first
-            self.all_list.pack_start(self.row(a, sub=T("phone_app") if is_phone_app(a) else None), False, False, 0)
-        self.all_list.show_all()
+            lista.pack_start(self.row(a), False, False, 0)
+        lista.show_all()
+
+    def riga_cartella(self, apps):
+        """la riga "App del telefono": l'icona è una cartella con le prime quattro, come su Android e iPhone"""
+        b = Gtk.Button()
+        b.get_style_context().add_class("row")
+        h = Gtk.Box(spacing=12)
+        icone = Gtk.Grid(row_spacing=px(2), column_spacing=px(2))
+        icone.get_style_context().add_class("cartella")
+        for n, a in enumerate(apps[:4]):
+            icone.attach(app_icon(a, px(11)), n % 2, n // 2, 1, 1)   # 2×11 + 2 + i bordi: come le icone da 28
+        icone.set_valign(Gtk.Align.CENTER)
+        posto = Gtk.Box()   # largo quanto le icone delle altre righe: i nomi restano in colonna
+        posto.set_size_request(px(28), -1)
+        posto.set_center_widget(icone)
+        h.pack_start(posto, False, False, 0)
+        v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        v.set_valign(Gtk.Align.CENTER)
+        v.pack_start(Gtk.Label(label=T("phone_apps"), xalign=0), False, False, 0)
+        s = Gtk.Label(label=T("n_app" if len(apps) == 1 else "n_apps") % len(apps), xalign=0)
+        s.get_style_context().add_class("sub")
+        v.pack_start(s, False, False, 0)
+        h.pack_start(v, True, True, 0)
+        h.pack_end(Gtk.Label(label="›"), False, False, 0)
+        b.add(h)
+        b.connect("clicked", lambda *a: self.show_page("phone"))
+        return b
 
     def fill_recent(self):
         for c in self.recent_grid.get_children():
@@ -778,9 +828,12 @@ class Start(Gtk.Window):
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def show_page(self, name):
-        self.stack.set_visible_child_name(name)
-        if name == "all":
+        # tornando dalla cartella "App del telefono" l'elenco resta dov'era; da Aggiunte riparte dall'inizio
+        if name == "all" and self.stack.get_visible_child_name() != "phone":
             self.all_scroll.get_vadjustment().set_value(0)
+        if name == "phone":
+            self.phone_scroll.get_vadjustment().set_value(0)
+        self.stack.set_visible_child_name(name)
 
     # ---------- apri/chiudi ----------
     def a_sinistra(self):
@@ -966,6 +1019,8 @@ class Start(Gtk.Window):
         if event.keyval == Gdk.KEY_Escape:
             if self.search.get_text():
                 self.search.set_text("")
+            elif self.stack.get_visible_child_name() == "phone":
+                self.show_page("all")
             elif self.stack.get_visible_child_name() != "home":
                 self.show_page("home")
             else:

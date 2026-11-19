@@ -7082,6 +7082,95 @@ PYEOF
   hasnt "nessun avviso di GTK" "CRITICAL" "$out"
 }
 
+test_start_cartella_telefono() { # 19 novembre (Reddit): le app del telefono in una cartella in cima a "Tutte le app"
+  local T=/data/data/com.termux/files/usr py x pid out d
+  py=$T/bin/python3
+  if [[ ! -x $T/bin/Xvfb || ! -x $py ]] || ! "$py" -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null; then
+    echo "  (Xvfb o PyGObject di Termux assenti: salto)"; return 0
+  fi
+  d=$WORK/ct_$$
+  mkdir -p "$d/casa" "$d/tmp" "$d/dati/applications"
+  local nome pkg
+  for nome in Zeta Alfa Mu; do   # come le scrive tod-android-apps.py
+    pkg=com.prova.${nome,,}
+    printf '%s\n' "[Desktop Entry]" "Type=Application" "Name=$nome Phone" "Exec=true" "Icon=application-x-executable" \
+      "X-TOD-Android=true" "X-TOD-Package=$pkg" >"$d/dati/applications/tod-android-$pkg.desktop"
+  done
+  printf '%s\n' "[Desktop Entry]" "Type=Application" "Name=Linux Prova" "Exec=true" "Icon=application-x-executable" \
+    >"$d/dati/applications/linux-prova.desktop"
+  x=$((150 + RANDOM % 100))
+  while [[ -e $T/tmp/.X11-unix/X$x ]]; do x=$((x + 1)); done
+  "$T/bin/Xvfb" ":$x" -screen 0 1920x1080x24 -nolisten tcp >/dev/null 2>&1 &
+  pid=$!
+  for _ in $(seq 50); do [[ -S $T/tmp/.X11-unix/X$x ]] && break; sleep 0.1; done
+  cat >"$d/prova.py" <<'PYEOF'
+# le righe di "Tutte le app" e della cartella, poi clic sulla cartella, Esc due volte e una ricerca; infine le
+# app del telefono tolte con la cartella aperta (tod telefono spento): una sola rimasta, poi nessuna
+import importlib.util, os, sys, time
+import gi
+gi.require_version("Gtk", "3.0"); gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, GLib, Gtk
+spec = importlib.util.spec_from_file_location("todstart", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.Start.home_apps_check = lambda self: None
+w = m.Start()
+def testi(wd):
+    if isinstance(wd, Gtk.Label):
+        return [wd.get_text()]
+    if isinstance(wd, Gtk.Container):
+        return [t for c in wd.get_children() for t in testi(c)]
+    return []
+for nome, lista in (("tutte", w.all_list), ("telefono", w.phone_list)):
+    for c in lista.get_children():
+        if isinstance(c, Gtk.Button):
+            print(f"{nome}: " + " | ".join(testi(c)))
+class Esc:
+    keyval = Gdk.KEY_Escape
+w.show_page("all")
+w.all_list.get_children()[0].clicked()
+print("clic:", w.stack.get_visible_child_name())
+w.on_key(None, Esc)
+print("esc:", w.stack.get_visible_child_name())
+w.on_key(None, Esc)
+print("esc2:", w.stack.get_visible_child_name())
+w.search.set_text("zeta")
+print("ricerca:", m.short_name(w.found[0]), "|", w.stack.get_visible_child_name())
+def togli(*nomi):   # come le toglie tod telefono spento; Gio se ne accorge da sé dopo un attimo
+    for n in nomi:
+        os.remove(f"{sys.argv[2]}/applications/tod-android-com.prova.{n}.desktop")
+    fine = time.monotonic() + 1.5
+    while time.monotonic() < fine:
+        GLib.MainContext.default().iteration(False)
+        time.sleep(0.05)
+    w.reload()
+w.search.set_text("")
+w.show_page("all")
+w.show_page("phone")
+def prima():
+    return " | ".join(testi([c for c in w.all_list.get_children() if isinstance(c, Gtk.Button)][0]))
+togli("zeta", "mu")
+print("una:", w.stack.get_visible_child_name(), "|", prima())
+togli("alfa")
+print("nessuna:", w.stack.get_visible_child_name(), "|", prima())
+PYEOF
+  out=$(env -u TOD_TERMUX_HOME HOME="$d/casa" XDG_DATA_HOME="$d/dati" TMPDIR="$d/tmp" DISPLAY=":$x" LANGUAGE=en \
+    "$py" "$d/prova.py" "$ROOT/share/tod-start.py" "$d/dati" 2>&1)
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+  eq "la cartella è la prima riga" "tutte: Phone apps | 3 apps | ›" "$(grep -m1 '^tutte:' <<<"$out")"
+  has "le app del desktop restano nell'elenco" "tutte: Linux Prova" "$out"
+  hasnt "le app del telefono no" "tutte: Alfa Phone" "$out"
+  eq "nella cartella, in ordine" "telefono: Alfa Phone telefono: Mu Phone telefono: Zeta Phone" \
+    "$(grep '^telefono:' <<<"$out" | tr '\n' ' ' | sed 's/ $//')"
+  has "il clic apre la cartella" "clic: phone" "$out"
+  has "Esc torna a Tutte le app" "esc: all" "$out"
+  has "e poi ad Aggiunte" "esc2: home" "$out"
+  has "la ricerca le trova ancora" "ricerca: Zeta Phone | results" "$out"
+  has "una sola: la cartella resta aperta, «1 app» e non «1 apps»" "una: phone | Phone apps | 1 app | ›" "$out"
+  has "nessuna con la cartella aperta: si torna a Tutte le app" "nessuna: all |" "$out"
+  hasnt "e la cartella sparisce" "nessuna: all | Phone apps" "$out"
+  hasnt "nessun avviso di GTK" "CRITICAL" "$out"
+}
+
 test_start_wrapper() {
   local w="$ROOT/share/tod-start" log="$WORK/start_$$"
   mkdir -p "$TMPDIR" "$WORK/fakepy_$$"
