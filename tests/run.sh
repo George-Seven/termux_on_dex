@@ -7233,6 +7233,43 @@ EOF
   eq "spenta: niente scansione" no "$([[ -e $TOD_STATE_DIR/android-apps.log ]] && echo si || echo no)"
 }
 
+test_android_apps_dalla_cache() { # 19 novembre: riaccese le app del telefono, prima si rifacevano tutte dagli APK
+  command -v python3 >/dev/null || { echo "  (python3 assente: salto)"; return 0; }
+  local th="$WORK/adc_$$" fb="$WORK/adc_bin_$$" a out
+  mkdir -p "$th/.local/share/applications" "$th/.local/share/icons/tod-android" "$th/.cache/tod" "$fb"
+  # Android finto: quattro app nel launcher, versione 1; aapt2 e pm scrivono chi li chiama
+  printf '%s\n' '#!/bin/sh' 'case "$*" in' \
+    '*query-activities*) printf "%s\n" com.a.uno/.Main com.a.due/.Main com.a.tre/.Main com.a.quattro/.Main ;;' \
+    '*"list packages"*) printf "package:%s versionCode:1\n" com.a.uno com.a.due com.a.tre com.a.quattro ;;' \
+    'esac' >"$fb/cmd"
+  printf '%s\n' '#!/bin/sh' "echo \"pm \$*\" >>\"$th/chiamate\"" 'echo "package:/finto/$2/base.apk"' >"$fb/pm"
+  printf '%s\n' '#!/bin/sh' "echo \"aapt2 \$*\" >>\"$th/chiamate\"" \
+    'if [ "$2" = badging ]; then p=${3%/base.apk}; echo "application-label:'"'"'Nome ${p##*/}'"'"'"; fi' >"$fb/aapt2"
+  printf '%s\n' '#!/bin/sh' 'while [ $# -gt 0 ]; do if [ "$1" = -o ]; then printf x >"$2"; fi; shift; done' >"$fb/rsvg-convert"
+  chmod +x "$fb"/*
+  # uno: in cache e con l'icona, voce tolta spegnendo le app → si rimette dalla cache
+  # due: in cache ma di una versione vecchia → si rifà; tre: mai vista → si fa; quattro: tutto a posto → non si tocca
+  for a in uno due quattro; do printf x >"$th/.local/share/icons/tod-android/com.a.$a.png"; done
+  printf '%s\n' '{"com.a.uno": {"key": "1|com.a.uno/com.a.uno.Main", "label": "Uno vero", "icon": "app"},' \
+    '"com.a.due": {"key": "0|com.a.due/com.a.due.Main", "label": "Due vecchio", "icon": "app"},' \
+    '"com.a.quattro": {"key": "1|com.a.quattro/com.a.quattro.Main", "label": "Quattro", "icon": "app"}}' \
+    >"$th/.cache/tod/android-apps.json"
+  echo "intatta" >"$th/.local/share/applications/tod-android-com.a.quattro.desktop"
+  out=$(TOD_TERMUX_HOME="$th" PATH="$fb:$PATH" python3 "$ROOT/share/tod-android-apps.py" 2>&1)
+  a=$th/.local/share/applications
+  has "rimessa dalla cache, col suo nome" "Name=Uno vero" "$(cat "$a/tod-android-com.a.uno.desktop" 2>/dev/null)"
+  has "e con la sua icona" "Icon=$th/.local/share/icons/tod-android/com.a.uno.png" "$(cat "$a/tod-android-com.a.uno.desktop" 2>/dev/null)"
+  hasnt "senza riaprire l'APK" "com.a.uno" "$(cat "$th/chiamate")"
+  has "versione nuova: rifatta" "Name=Nome com.a.due" "$(cat "$a/tod-android-com.a.due.desktop" 2>/dev/null)"
+  has "mai vista: fatta" "Name=Nome com.a.tre" "$(cat "$a/tod-android-com.a.tre.desktop" 2>/dev/null)"
+  eq "tutto a posto: non si tocca" intatta "$(cat "$a/tod-android-com.a.quattro.desktop")"
+  hasnt "e non si apre" "com.a.quattro" "$(cat "$th/chiamate")"
+  eq "nel registro, in ordine" "com.a.due: Nome com.a.due (lettera) com.a.tre: Nome com.a.tre (lettera)" \
+    "$(grep '^com\.a\.' <<<"$out" | tr '\n' ' ' | sed 's/ $//')"
+  has "e quante rimesse" "1 rimesse dalla cache" "$out"
+  has "cache aggiornata" '"label": "Nome com.a.tre"' "$(cat "$th/.cache/tod/android-apps.json")"
+}
+
 test_phone_status() {
   command -v python3 >/dev/null || { echo "  (python3 assente: salto)"; return 0; }
   mkdir -p "$TMPDIR"

@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 HOME = os.environ.get("TOD_TERMUX_HOME") or os.path.expanduser("~")
 PREFIX = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
@@ -558,30 +559,51 @@ def main():
         return 1
     vers = versions()
     own = {"com.termux", "com.termux.x11"}
-    done = 0
+    done = rimesse = 0
+    da_fare = []
     for pkg, comp in sorted(comps.items()):
         if pkg in own or (only and pkg != only):
             continue
-        if spente():   # spente mentre si lavorava: via tutto, e basta
-            togli_tutte()
-            json.dump(cache, open(CACHE, "w"), indent=1)
-            return 0
         key = f"{vers.get(pkg, '?')}|{comp}"
         entry = os.path.join(APPS, f"tod-android-{pkg}.desktop")
         png = os.path.join(ICONS, f"{pkg}.png")
         c = cache.get(pkg, {})
-        if (not force and c.get("key") == key and c.get("icon") == "app"   # le lettere si riprovano
-                and os.path.exists(entry) and os.path.exists(png)):
+        if (not force and c.get("key") == key and c.get("icon") == "app" and c.get("label")   # le lettere si riprovano
+                and os.path.exists(png)):
+            if not os.path.exists(entry):
+                # tolta spegnendo le app del telefono: riaccese, si rimette dalla cache senza riaprire l'APK
+                # (prima si rifacevano tutte: 236 app, 1,3 s l'una e in sottofondo anche 5; 19 novembre)
+                with open(entry, "w") as f:
+                    f.write(desktop_entry(pkg, comp, c["label"], png))
+                rimesse += 1
             continue
-        fatto = fai_icona(pkg, png)
-        if fatto is None:
-            continue
-        label, tipo = fatto
-        with open(entry, "w") as f:
-            f.write(desktop_entry(pkg, comp, label, png))
-        cache[pkg] = {"key": key, "label": label, "icon": tipo}
-        done += 1
-        print(f"{pkg}: {label} ({cache[pkg]['icon']})", flush=True)
+        da_fare.append((pkg, comp, key, entry, png))
+
+    def lavora(x):
+        return None if spente() else fai_icona(x[0], x[4])
+
+    # le altre dall'APK, tre per volta: quasi tutto il tempo è aapt2 (0,9 s ad app per l'icona), e in tre si fa in
+    # meno della metà. Non di più: un APK grande (TikTok) tiene 70 MB mentre si legge
+    ex = ThreadPoolExecutor(3)
+    try:
+        for (pkg, comp, key, entry, png), fatto in zip(da_fare, ex.map(lavora, da_fare)):
+            if spente():   # spente mentre si lavorava: via tutto, e basta
+                ex.shutdown(wait=True, cancel_futures=True)
+                togli_tutte()
+                json.dump(cache, open(CACHE, "w"), indent=1)
+                return 0
+            if fatto is None:
+                continue
+            label, tipo = fatto
+            with open(entry, "w") as f:
+                f.write(desktop_entry(pkg, comp, label, png))
+            cache[pkg] = {"key": key, "label": label, "icon": tipo}
+            done += 1
+            print(f"{pkg}: {label} ({cache[pkg]['icon']})", flush=True)
+    finally:
+        ex.shutdown(wait=True, cancel_futures=True)
+    if rimesse:
+        print(f"tod-android-apps: {rimesse} rimesse dalla cache", file=sys.stderr)
     # app disinstallate: via le loro voci
     for f in os.listdir(APPS):
         m = re.match(r"tod-android-(.+)\.desktop$", f)
