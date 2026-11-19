@@ -211,6 +211,13 @@ def dark_theme():
 
 W, H = 640, 700
 SCALE = 1.0   # DPI dello schermo / 96: tutto ciò che è in pixel cresce come il testo
+MARGINE = 12   # distanza minima dai bordi dello schermo e dalla barra
+RIGA = 92      # altezza di una riga di app aggiunte
+# Schermi piccoli o bassi (telefono in orizzontale o in verticale; Reddit, 19 novembre: su un Pixel 8 Pro in
+# orizzontale il menu usciva dall'alto): come Windows 11, prima meno margine e meno colonne di app aggiunte, poi
+# meno righe e niente Consigliati, finché il menu non ci sta. Dalla forma piena alla più stretta:
+FORME_LARGHE = [(6, 32), (6, 16), (5, 16), (4, 16), (3, 16)]        # (colonne, margine ai lati)
+FORME_ALTE = [(3, True), (2, True), (2, False), (1, False)]         # (righe di app aggiunte, Consigliati)
 
 
 def px(n):
@@ -323,7 +330,7 @@ class Start(Gtk.Window):
         root.get_style_context().add_class("root")
         self.add(root)
 
-        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        body = self.body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
         body.set_margin_top(px(28))
         body.set_margin_start(px(32))
         body.set_margin_end(px(32))
@@ -395,12 +402,19 @@ class Start(Gtk.Window):
         self.grid.set_row_spacing(2)
         self.grid.set_column_spacing(2)
         self.grid.set_valign(Gtk.Align.START)
-        self.grid.set_size_request(-1, 3 * px(92))
-        box.pack_start(self.grid, False, False, 0)
+        # le righe di app aggiunte che si vedono le decide adatta(): sugli schermi bassi le altre si scorrono
+        self.pin_scroll = Gtk.ScrolledWindow()
+        self.pin_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.pin_scroll.add(self.grid)
+        box.pack_start(self.pin_scroll, False, False, 0)
 
-        box.pack_start(self.header(T("recent")), False, False, 8)
+        # Consigliati in una scatola sola: adatta() la nasconde tutta, e fill_recent (show_all) non la riaccende
+        self.rec_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.rec_box.pack_start(self.header(T("recent")), False, False, 8)
         self.recent_grid = Gtk.Grid(column_spacing=8, row_spacing=2, column_homogeneous=True)
-        box.pack_start(self.recent_grid, True, True, 0)
+        self.rec_box.pack_start(self.recent_grid, True, True, 0)
+        box.pack_start(self.rec_box, True, True, 0)
+        self.forma(*FORME_LARGHE[0], *FORME_ALTE[0])
         return box
 
     def build_all(self):
@@ -781,23 +795,69 @@ class Start(Gtk.Window):
     def x_menu(self, wa, w):
         return wa.x + px(12) if self.sinistra else wa.x + (wa.width - w) // 2
 
-    def place(self):
+    def area(self):
+        """lo spazio libero dello schermo (senza la barra): riletto a ogni apertura, perché il telefono ruota e
+        passa a DeX col menu già in memoria"""
         display = Gdk.Display.get_default()
-        mon = display.get_primary_monitor() or display.get_monitor(0)
-        wa = mon.get_workarea()
-        w, h = px(W), min(px(H), wa.height - px(24))
+        return (display.get_primary_monitor() or display.get_monitor(0)).get_workarea()
+
+    def forma(self, colonne, margine, righe, consigliati):
+        self.grid.set_min_children_per_line(colonne)
+        self.grid.set_max_children_per_line(colonne)
+        self.body.set_margin_start(px(margine))
+        self.body.set_margin_end(px(margine))
+        alta = self.altezza_aggiunte(colonne, righe)
+        self.pin_scroll.set_max_content_height(-1)   # prima il massimo libero: GTK vuole sempre minimo <= massimo
+        self.pin_scroll.set_min_content_height(alta)
+        self.pin_scroll.set_max_content_height(alta)
+        self.rec_box.set_visible(consigliati)
+
+    def altezza_aggiunte(self, colonne, righe):
+        """se le app aggiunte ci stanno, lo spazio di sempre (righe * RIGA); se vanno scorse, righe vere intere,
+        sennò in fondo spunta un pezzo della riga dopo (RIGA è più alta di una riga vera)"""
+        app = self.grid.get_children()
+        if -(-len(app) // colonne) <= righe:
+            return righe * px(RIGA)
+        return righe * (app[0].get_preferred_height()[1] + self.grid.get_row_spacing())
+
+    def adatta(self, maxw, maxh):
+        """la forma più piena che sta in maxw x maxh → la misura della finestra. Si misura il contenuto, non la
+        finestra: la sua misura minima è quella data all'apertura di prima (set_size_request)."""
+        root = self.get_child()
+        for larga in FORME_LARGHE:
+            self.forma(*larga, *FORME_ALTE[0])
+            if root.get_preferred_width()[0] <= maxw:
+                break
+        w = max(min(px(W), maxw), root.get_preferred_width()[0])
+        for alta in FORME_ALTE:
+            self.forma(*larga, *alta)
+            if root.get_preferred_height_for_width(w)[0] <= maxh:
+                break
+        h = max(min(px(H), maxh), root.get_preferred_height_for_width(w)[0])
+        return w, h
+
+    def posto(self, wa, w, h):
+        # sopra la barra; su uno schermo dove neanche la forma più stretta ci sta, almeno la ricerca resta visibile
+        return self.x_menu(wa, w), max(wa.y, wa.y + wa.height - h - px(MARGINE))
+
+    def place(self):
+        wa = self.area()
+        w, h = self.adatta(wa.width - 2 * px(MARGINE), wa.height - 2 * px(MARGINE))
         self.sinistra = self.a_sinistra()
+        # la finestra non è ridimensionabile: GTK le dà la misura di set_default_size la prima volta e poi la
+        # tiene, e ignora resize(). La misura minima la fissa invece a ogni apertura (prima restava 700 di altezza
+        # anche su uno schermo alto 600)
+        self.set_size_request(w, h)
+        self.set_default_size(w, h)
         self.resize(w, h)
-        self.move(self.x_menu(wa, w), wa.y + wa.height - h - px(12))
+        self.move(*self.posto(wa, w, h))
 
     def _ancora(self, _w, alloc):
         """il bordo basso alla stessa distanza dalla barra dei pannelli (tod-pannelli.py), qualunque
         sia l'altezza vera della finestra"""
         if not self.get_visible():
             return
-        display = Gdk.Display.get_default()
-        wa = (display.get_primary_monitor() or display.get_monitor(0)).get_workarea()
-        x, y = self.x_menu(wa, alloc.width), wa.y + wa.height - alloc.height - px(12)
+        x, y = self.posto(self.area(), alloc.width, alloc.height)
         if self.get_position() != (x, y):
             GLib.idle_add(lambda: self.move(x, y) and False)
 

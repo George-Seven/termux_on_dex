@@ -7014,7 +7014,72 @@ PY
   )
   eq "senza barra.json al centro, barra a sinistra a sinistra, al centro al centro" "400 112 400" "$out"
   has "si sceglie a ogni apertura" "self.sinistra = self.a_sinistra()" "$(sed -n '/    def place(self):/,/^    def /p' "$ROOT/share/tod-start.py")"
-  has "anche quando la finestra cambia misura" "x, y = self.x_menu(wa, alloc.width)" "$(cat "$ROOT/share/tod-start.py")"
+  has "anche quando la finestra cambia misura" "self.posto(self.area(), alloc.width, alloc.height)" "$(cat "$ROOT/share/tod-start.py")"
+  has "il posto segue la barra" "return self.x_menu(wa, w)," "$(cat "$ROOT/share/tod-start.py")"
+}
+
+test_start_schermi_piccoli() { # 19 novembre (Reddit, Pixel 8 Pro): in orizzontale lo Start usciva dall'alto dello schermo
+  local T=/data/data/com.termux/files/usr py x pid out d
+  py=$T/bin/python3
+  if [[ ! -x $T/bin/Xvfb || ! -x $py ]] || ! "$py" -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null; then
+    echo "  (Xvfb o PyGObject di Termux assenti: salto)"; return 0
+  fi
+  d=$WORK/sp_$$
+  mkdir -p "$d/casa" "$d/tmp"
+  x=$((150 + RANDOM % 100))
+  while [[ -e $T/tmp/.X11-unix/X$x ]]; do x=$((x + 1)); done
+  "$T/bin/Xvfb" ":$x" -screen 0 3000x3000x24 -nolisten tcp >/dev/null 2>&1 &
+  pid=$!
+  for _ in $(seq 50); do [[ -S $T/tmp/.X11-unix/X$x ]] && break; sleep 0.1; done
+  cat >"$d/prova.py" <<'PYEOF'
+# lo Start aperto più volte con aree diverse (la finestra resta in memoria come quella vera): telefono in
+# orizzontale e in verticale, schermo basso, di nuovo orizzontale; DeX a parte
+import importlib.util, sys
+import gi
+gi.require_version("Gtk", "3.0"); gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, GLib, Gtk
+dpi = float(sys.argv[2])
+aree = [tuple(int(v) for v in a.split("x")) for a in sys.argv[3:]]
+Gtk.Settings.get_default().set_property("gtk-xft-dpi", int(dpi * 1024))
+spec = importlib.util.spec_from_file_location("todstart", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.Start.home_apps_check = lambda self: None
+ora = {}
+def area(self):
+    r = Gdk.Rectangle(); r.x = r.y = 0; r.width, r.height = ora["a"]; return r
+m.Start.area = area
+w = m.Start()
+passi = [(p, a) for a in aree for p in ("mostra", "misura", "nascondi")]
+def giro():
+    p, a = passi.pop(0)
+    ora["a"] = a
+    if p == "mostra":
+        w.show_menu()
+    elif p == "misura":
+        al = w.get_allocation(); x, y = w.get_position()
+        dentro = x >= 0 and y >= 0 and x + al.width <= a[0] and y + al.height <= a[1]
+        print(f"{a[0]}x{a[1]} dentro={int(dentro)} colonne={w.grid.get_min_children_per_line()}"
+              f" consigliati={int(w.rec_box.get_visible())} piena={int(al.height == m.px(m.H))}", flush=True)
+    else:
+        w.hide_menu()
+    if not passi:
+        Gtk.main_quit()
+        return False
+    return True
+GLib.timeout_add(700, giro)
+Gtk.main()
+PYEOF
+  out=$(for args in "216 2992x1290 1344x2938 2992x800 2992x1290" "108 1920x1032"; do
+    # shellcheck disable=SC2086
+    env -u TOD_TERMUX_HOME HOME="$d/casa" TMPDIR="$d/tmp" DISPLAY=":$x" LANGUAGE=en "$py" "$d/prova.py" "$ROOT/share/tod-start.py" $args 2>&1
+  done)
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+  has "orizzontale: dentro lo schermo, più bassa del solito" "2992x1290 dentro=1 colonne=6 consigliati=1 piena=0" "$out"
+  has "verticale: meno colonne, dentro" "1344x2938 dentro=1 colonne=5" "$out"
+  has "schermo basso: senza Consigliati, dentro" "2992x800 dentro=1 colonne=6 consigliati=0" "$out"
+  eq "di nuovo orizzontale: com'era" 2 "$(grep -c '^2992x1290 dentro=1 colonne=6 consigliati=1' <<<"$out")"
+  has "DeX: la misura di sempre" "1920x1032 dentro=1 colonne=6 consigliati=1 piena=1" "$out"
+  hasnt "nessun avviso di GTK" "CRITICAL" "$out"
 }
 
 test_start_wrapper() {
